@@ -1,6 +1,7 @@
 package ninja
 
 import (
+	"runtime"
 	"strings"
 	"testing"
 
@@ -49,6 +50,10 @@ func TestEmitUsesNinjaDefaultMSVCDependencyPrefix(t *testing.T) {
 }
 
 func TestEmitDoesNotQuoteWSLOptions(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("WSL command quoting uses Windows shell semantics")
+	}
+
 	data, err := Emit(plan.BuildPlan{Actions: []plan.Action{
 		{ID: "compile", Rule: "compile", Command: plan.Command{Exe: `C:\Windows\System32\wsl.exe`, Args: []string{"-d", "Ubuntu-24.04", "--cd", "/mnt/c/project", "--exec", "/usr/bin/gcc", "-c", "main.c"}}, Inputs: []string{"main.c"}, Outputs: []string{"main.o"}},
 	}})

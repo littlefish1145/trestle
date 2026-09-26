@@ -4,9 +4,17 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
+
+func requireWindows(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS != "windows" {
+		t.Skip("requires Windows and MSVC path semantics")
+	}
+}
 
 func TestVisualStudioRootFromSetup(t *testing.T) {
 	root := t.TempDir()
@@ -34,6 +42,8 @@ func TestVisualStudioRootFromSetup(t *testing.T) {
 }
 
 func TestEnvironmentForVcpkgUsesSelectedToolchainInstallation(t *testing.T) {
+	requireWindows(t)
+
 	root := t.TempDir()
 	setup := filepath.Join(root, "VC", "Auxiliary", "Build", "vcvars64.bat")
 	if err := os.MkdirAll(filepath.Dir(setup), 0o755); err != nil {
@@ -56,6 +66,8 @@ func TestEnvironmentForVcpkgUsesSelectedToolchainInstallation(t *testing.T) {
 }
 
 func TestResolveMSVCSetupFromConfiguredArchiver(t *testing.T) {
+	requireWindows(t)
+
 	root := t.TempDir()
 	setup := filepath.Join(root, "VC", "Auxiliary", "Build", "vcvars64.bat")
 	compiler := filepath.Join(root, "VC", "Tools", "MSVC", "14.44", "bin", "Hostx64", "x64", "cl.exe")
@@ -90,6 +102,8 @@ func TestTargetUsesMSVCABI(t *testing.T) {
 }
 
 func TestEnvironmentForSetupHandlesQuotedPath(t *testing.T) {
+	requireWindows(t)
+
 	root := filepath.Join(t.TempDir(), "Visual Studio")
 	setup := filepath.Join(root, "VC", "Auxiliary", "Build", "vcvars64.bat")
 	compiler := filepath.Join(root, "VC", "Tools", "MSVC", "14.44", "bin", "Hostx64", "x64", "cl.exe")
