@@ -1,0 +1,68 @@
+schema_version = 4
+
+[project]
+  name = "."
+
+[build]
+  profile = "debug"
+  build_dir = "build"
+  c_standard = "c17"
+  cxx_standard = "c++20"
+  compile_flags = []
+  c_flags = []
+  cxx_flags = []
+  link_flags = []
+  default_targets = ["app"]
+  compile_commands = "compile_commands.json"
+  auto_compile_shaders = true
+  modules = false
+  module_scanner = ""
+
+[toolchain]
+  c = "auto"
+  cxx = "auto"
+  archiver = ""
+  linker = ""
+  setup = ""
+  cuda = ""
+  cuda_mode = "whole"
+  cuda_architectures = ["sm_75"]
+  module_scanner = ""
+  mode = "native"
+  wsl_distribution = ""
+  preset = ""
+
+[vcpkg]
+  root = ""
+  triplet = "auto"
+  crt_linkage = ""
+  library_linkage = ""
+
+[compiler_presets]
+
+[targets]
+  [targets.app]
+    type = "executable"
+    sources = ["src/main.cpp"]
+    output_name = "."
+    c_standard = ""
+    cxx_standard = ""
+    export_all_symbols = false
+    include_dirs = []
+    private_include_dirs = []
+    library_dirs = []
+    shader_stage = ""
+    shader_entry = ""
+    shader_tool = ""
+    shader_target_env = ""
+    dependencies = []
+    test_group = ""
+    test_working_dir = ""
+
+[packages]
+
+[package]
+  format = "zip"
+  output = "dist\\..zip"
+  optimization = "balanced"
+  targets = ["app"]

@@ -1,0 +1,26 @@
+schema_version = 3
+
+[project]
+name = "static-chain"
+
+[build]
+profile = "debug"
+build_dir = "build"
+c_standard = "c17"
+cxx_standard = "c++20"
+
+[toolchain]
+c = "auto"
+cxx = "auto"
+
+[targets.core]
+type = "static"
+sources = ["src/core.cpp"]
+include_dirs = ["include"]
+
+[targets.app]
+type = "executable"
+sources = ["src/main.cpp"]
+[[targets.app.dependencies]]
+target = "core"
+scope = "private"
