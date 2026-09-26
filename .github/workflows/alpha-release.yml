@@ -67,19 +67,25 @@ jobs:
 
       - name: Verify modules
         run: |
-          set -o pipefail
+          set -Eeuo pipefail
           mkdir -p quality-logs
-          go mod verify 2>&1 | tee "quality-logs/go-mod-verify-${RUNNER_OS}-${RUNNER_ARCH}.log"
+          log="quality-logs/go-mod-verify-${RUNNER_OS}-${RUNNER_ARCH}.log"
+          printf 'Command: go mod verify\n' | tee "$log"
+          go mod verify 2>&1 | tee -a "$log"
 
       - name: Run tests
         run: |
-          set -o pipefail
-          go test -count=1 ./... 2>&1 | tee "quality-logs/go-test-${RUNNER_OS}-${RUNNER_ARCH}.log"
+          set -Eeuo pipefail
+          log="quality-logs/go-test-${RUNNER_OS}-${RUNNER_ARCH}.log"
+          printf 'Command: go test -count=1 ./...\n' | tee "$log"
+          go test -count=1 ./... 2>&1 | tee -a "$log"
 
       - name: Run go vet
         run: |
-          set -o pipefail
-          go vet ./... 2>&1 | tee "quality-logs/go-vet-${RUNNER_OS}-${RUNNER_ARCH}.log"
+          set -Eeuo pipefail
+          log="quality-logs/go-vet-${RUNNER_OS}-${RUNNER_ARCH}.log"
+          printf 'Command: go vet ./...\n' | tee "$log"
+          go vet ./... 2>&1 | tee -a "$log"
 
       - name: Upload quality logs
         if: always()
@@ -231,6 +237,12 @@ jobs:
         run: |
           set -Eeuo pipefail
           cd dist
+
+          empty_asset=$(find . -maxdepth 1 -type f -empty -print -quit)
+          if [[ -n "$empty_asset" ]]; then
+            echo "::error file=dist/${empty_asset#./}::Release asset is empty"
+            exit 1
+          fi
 
           sha256sum trestle-*.tar.gz trestle-*.zip > SHA256SUMS.txt
           jq -s \
