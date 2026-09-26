@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -50,6 +51,36 @@ func Detect(ctx context.Context, root string) (Toolchain, error) {
 
 func DetectWithHost(ctx context.Context, root string, host toolchain.Toolchain) (Toolchain, error) {
 	return detect(ctx, root, &host)
+}
+
+// DetectWSL resolves an nvcc installation inside a WSL distribution and pairs
+// it with the already selected WSL host compiler.
+func DetectWSL(ctx context.Context, distribution, root string, host toolchain.Toolchain) (Toolchain, error) {
+	if host.Runner == "" {
+		return Toolchain{}, fmt.Errorf("E_CUDA_WSL_HOST: WSL CUDA requires a WSL C/C++ toolchain")
+	}
+	root = strings.TrimSpace(root)
+	if root == "" {
+		root = toolchain.WSLVariable(ctx, distribution, "CUDA_HOME")
+	}
+	if root == "" {
+		root = toolchain.WSLVariable(ctx, distribution, "CUDA_PATH")
+	}
+	requested := "nvcc"
+	if root != "" {
+		requested = path.Join(root, "bin", "nvcc")
+	}
+	nvcc, err := toolchain.WSLExecutable(ctx, distribution, requested)
+	if err != nil {
+		return Toolchain{}, fmt.Errorf("E_CUDA_NVCC: %s was not found in WSL distribution %s", requested, distribution)
+	}
+	if root == "" {
+		root = path.Dir(path.Dir(nvcc))
+	}
+	exe, args := host.Wrap(nvcc, []string{"--version"})
+	versionOutput, _ := exec.CommandContext(ctx, exe, args...).Output()
+	version := firstLine(string(versionOutput))
+	return Toolchain{NVCC: NVCC{Path: nvcc, Version: version}, Host: host, Toolkit: Toolkit{Root: root, Version: version}, Architectures: []string{defaultArchitecture()}}, nil
 }
 
 func detect(ctx context.Context, root string, configuredHost *toolchain.Toolchain) (Toolchain, error) {
@@ -130,7 +161,8 @@ func (tc Toolchain) Compile(spec toolchain.CompileSpec) (string, []string, error
 	}
 	args = append(args, "-c", spec.Source, "-o", spec.Output)
 	args = append(args, spec.Options...)
-	return tc.NVCC.Path, args, nil
+	exe, args := tc.Host.Wrap(tc.NVCC.Path, args)
+	return exe, args, nil
 }
 
 func includeArgs(includes []string) []string {
@@ -145,7 +177,8 @@ func (tc Toolchain) DeviceLink(objects []string, output string) (string, []strin
 	args := []string{"-ccbin", tc.Host.CXX, "-dlink"}
 	args = append(args, objects...)
 	args = append(args, "-o", output)
-	return tc.NVCC.Path, args, nil
+	exe, args := tc.Host.Wrap(tc.NVCC.Path, args)
+	return exe, args, nil
 }
 
 func (tc Toolchain) HostLink(objects []string, output string, shared bool) (string, []string, error) {
@@ -163,7 +196,23 @@ func ProbeHost(ctx context.Context, tc Toolchain) error {
 	if err := os.WriteFile(source, []byte("__global__ void kernel() {}\nint main() { return 0; }\n"), 0o644); err != nil {
 		return err
 	}
-	exe, args, err := tc.Compile(toolchain.CompileSpec{Source: source, Output: output, CXXStandard: "c++20"})
+	compileSource, compileOutput := source, output
+	if tc.Host.Runner != "" {
+		distribution := runnerDistribution(tc.Host.RunnerArgs)
+		compileSource, err = toolchain.WSLPath(ctx, distribution, source)
+		if err != nil {
+			return err
+		}
+		compileOutput, err = toolchain.WSLPath(ctx, distribution, output)
+		if err != nil {
+			return err
+		}
+	}
+	probeToolchain := tc
+	if probeToolchain.Host.Runner != "" {
+		probeToolchain.Host.RunnerArgs = withoutRunnerDirectory(probeToolchain.Host.RunnerArgs)
+	}
+	exe, args, err := probeToolchain.Compile(toolchain.CompileSpec{Source: compileSource, Output: compileOutput, CXXStandard: "c++20"})
 	if err != nil {
 		return err
 	}
@@ -172,4 +221,25 @@ func ProbeHost(ctx context.Context, tc Toolchain) error {
 		return fmt.Errorf("E_TOOLCHAIN_CUDA_HOST_INCOMPATIBLE: nvcc -ccbin %s failed: %s", tc.Host.CXX, strings.TrimSpace(string(output)))
 	}
 	return nil
+}
+
+func runnerDistribution(args []string) string {
+	for index := 0; index+1 < len(args); index++ {
+		if args[index] == "-d" {
+			return args[index+1]
+		}
+	}
+	return ""
+}
+
+func withoutRunnerDirectory(args []string) []string {
+	result := make([]string, 0, len(args))
+	for index := 0; index < len(args); index++ {
+		if args[index] == "--cd" && index+1 < len(args) {
+			index++
+			continue
+		}
+		result = append(result, args[index])
+	}
+	return result
 }

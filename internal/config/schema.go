@@ -1,6 +1,6 @@
 package config
 
-const CurrentSchemaVersion = 4
+const CurrentSchemaVersion = 5
 const DefaultFileName = "trestle.toml"
 
 type Config struct {
@@ -36,18 +36,23 @@ type Build struct {
 }
 
 type Toolchain struct {
-	C                 string   `toml:"c"`
-	CXX               string   `toml:"cxx"`
-	Archiver          string   `toml:"archiver"`
-	Linker            string   `toml:"linker"`
-	Setup             string   `toml:"setup"`
-	CUDA              string   `toml:"cuda"`
-	CUDAMode          string   `toml:"cuda_mode"`
-	CUDAArchitectures []string `toml:"cuda_architectures"`
-	ModuleScanner     string   `toml:"module_scanner"`
-	Mode              string   `toml:"mode"`
-	WSLDistribution   string   `toml:"wsl_distribution"`
-	Preset            string   `toml:"preset"`
+	C                     string   `toml:"c"`
+	CXX                   string   `toml:"cxx"`
+	Archiver              string   `toml:"archiver"`
+	Linker                string   `toml:"linker"`
+	Setup                 string   `toml:"setup"`
+	CUDA                  string   `toml:"cuda"`
+	CUDAMode              string   `toml:"cuda_mode"`
+	CUDAArchitectures     []string `toml:"cuda_architectures"`
+	CUDAExecution         string   `toml:"cuda_execution"`
+	CUDAWSLDistribution   string   `toml:"cuda_wsl_distribution"`
+	Vulkan                string   `toml:"vulkan"`
+	VulkanExecution       string   `toml:"vulkan_execution"`
+	VulkanWSLDistribution string   `toml:"vulkan_wsl_distribution"`
+	ModuleScanner         string   `toml:"module_scanner"`
+	Mode                  string   `toml:"mode"`
+	WSLDistribution       string   `toml:"wsl_distribution"`
+	Preset                string   `toml:"preset"`
 }
 
 type CompilerPreset struct {

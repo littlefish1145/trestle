@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"os/exec"
+	pathpkg "path"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -84,7 +85,7 @@ func discoverWSL(ctx context.Context) []Component {
 	if err != nil {
 		return []Component{{Name: "not available", Family: "WSL", Ready: false, Detail: "wsl.exe was not found"}}
 	}
-	probeCtx, cancel := context.WithTimeout(ctx, 4*time.Second)
+	probeCtx, cancel := context.WithTimeout(ctx, 12*time.Second)
 	defer cancel()
 	out, err := exec.CommandContext(probeCtx, wsl, "--list", "--quiet").CombinedOutput()
 	if err != nil {
@@ -95,25 +96,71 @@ func discoverWSL(ctx context.Context) []Component {
 		return []Component{{Name: "unavailable", Family: "WSL", Ready: false, Detail: detail}}
 	}
 	var result []Component
+	compilerFound := false
 	for _, distribution := range strings.Fields(decodeWindowsCommand(out)) {
 		for _, compiler := range []string{"clang++", "g++"} {
-			pathOut, findErr := exec.CommandContext(probeCtx, wsl, "-d", distribution, "--exec", "sh", "-lc", "command -v "+compiler).Output()
-			path := strings.TrimSpace(string(pathOut))
-			if findErr != nil || path == "" {
+			compilerPath, findErr := WSLExecutable(probeCtx, distribution, compiler)
+			if findErr != nil || compilerPath == "" {
 				continue
 			}
-			versionOut, _ := exec.CommandContext(probeCtx, wsl, "-d", distribution, "--exec", path, "--version").Output()
+			versionOut, _ := exec.CommandContext(probeCtx, wsl, "-d", distribution, "--exec", compilerPath, "--version").Output()
 			version := strings.TrimSpace(strings.Split(string(versionOut), "\n")[0])
 			if version == "" {
 				version = "version unavailable"
 			}
-			result = append(result, Component{Name: compiler + " @ " + distribution, Family: "WSL", Path: path, Version: version, Ready: true, Detail: "runs inside WSL; Windows paths are translated automatically", Execution: "wsl", Distribution: distribution})
+			compilerFound = true
+			result = append(result, Component{Name: compiler + " @ " + distribution, Family: "WSL", Path: compilerPath, Version: version, Ready: true, Detail: "runs inside WSL; Windows paths are translated automatically", Execution: "wsl", Distribution: distribution})
+		}
+
+		if nvcc, findErr := WSLExecutable(probeCtx, distribution, "nvcc"); findErr == nil {
+			root := WSLVariable(probeCtx, distribution, "CUDA_HOME")
+			if root == "" {
+				root = WSLVariable(probeCtx, distribution, "CUDA_PATH")
+			}
+			if root == "" {
+				root = pathpkg.Dir(pathpkg.Dir(nvcc))
+			}
+			versionOut, _ := exec.CommandContext(probeCtx, wsl, "-d", distribution, "--exec", nvcc, "--version").Output()
+			result = append(result, Component{Name: "CUDA @ " + distribution, Family: "CUDA", Path: nvcc, Version: lastNonEmptyLine(string(versionOut)), Ready: true, Detail: root, Execution: "wsl", Distribution: distribution})
+		}
+
+		vulkanRoot := WSLVariable(probeCtx, distribution, "VULKAN_SDK")
+		for _, shaderTool := range []string{"glslc", "glslangValidator"} {
+			shaderPath, findErr := WSLExecutable(probeCtx, distribution, shaderTool)
+			if findErr != nil {
+				continue
+			}
+			root := vulkanRoot
+			if root == "" {
+				root = pathpkg.Dir(pathpkg.Dir(shaderPath))
+			}
+			versionOut, _ := exec.CommandContext(probeCtx, wsl, "-d", distribution, "--exec", shaderPath, "--version").Output()
+			result = append(result, Component{Name: shaderTool + " @ " + distribution, Family: "Vulkan", Path: shaderPath, Version: firstNonEmptyLine(string(versionOut)), Ready: true, Detail: root, Execution: "wsl", Distribution: distribution})
 		}
 	}
-	if len(result) == 0 {
-		return []Component{{Name: "no compiler", Family: "WSL", Ready: false, Detail: "WSL is installed, but clang++/g++ was not found in its distributions"}}
+	if !compilerFound {
+		result = append(result, Component{Name: "no compiler", Family: "WSL", Ready: false, Detail: "WSL is installed, but clang++/g++ was not found in its distributions"})
 	}
 	return result
+}
+
+func firstNonEmptyLine(value string) string {
+	for _, line := range strings.Split(strings.ReplaceAll(value, "\r\n", "\n"), "\n") {
+		if line = strings.TrimSpace(line); line != "" {
+			return line
+		}
+	}
+	return "unknown"
+}
+
+func lastNonEmptyLine(value string) string {
+	lines := strings.Split(strings.ReplaceAll(value, "\r\n", "\n"), "\n")
+	for index := len(lines) - 1; index >= 0; index-- {
+		if line := strings.TrimSpace(lines[index]); line != "" {
+			return line
+		}
+	}
+	return "unknown"
 }
 
 func decodeWindowsCommand(data []byte) string {

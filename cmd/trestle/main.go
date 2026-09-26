@@ -52,7 +52,7 @@ func run(command string, args []string) error {
 	set := flag.NewFlagSet(command, flag.ContinueOnError)
 	set.SetOutput(os.Stderr)
 	directory := set.String("C", ".", "run from this directory")
-	var name, compiler, c, profile, output, vcpkgRoot, triplet, cudaRoot, cudaMode, setup, moduleScanner, compileFlags, cFlags, cxxFlags, linkFlags, buildProfile, mode, distribution, preset, savePreset *string
+	var name, compiler, c, profile, output, vcpkgRoot, triplet, cudaRoot, cudaMode, cudaExecution, cudaDistribution, vulkanRoot, vulkanExecution, vulkanDistribution, setup, moduleScanner, compileFlags, cFlags, cxxFlags, linkFlags, buildProfile, mode, distribution, preset, savePreset *string
 	var query string
 	var ports []string
 	var portsText string
@@ -82,6 +82,11 @@ func run(command string, args []string) error {
 			triplet = set.String("triplet", "", "vcpkg triplet")
 			cudaRoot = set.String("cuda", "", "CUDA toolkit root")
 			cudaMode = set.String("cuda-mode", "", "whole or rdc")
+			cudaExecution = set.String("cuda-execution", "", "CUDA execution mode: native or wsl")
+			cudaDistribution = set.String("cuda-wsl-distribution", "", "WSL distribution containing CUDA")
+			vulkanRoot = set.String("vulkan", "", "Vulkan SDK root")
+			vulkanExecution = set.String("vulkan-execution", "", "Vulkan execution mode: native or wsl")
+			vulkanDistribution = set.String("vulkan-wsl-distribution", "", "WSL distribution containing Vulkan SDK tools")
 			interactive = set.Bool("interactive", false, "use the configuration wizard")
 			setup = set.String("setup", "", "vcvars64.bat or environment setup script")
 			moduleScanner = set.String("module-scanner", "", "clang-scan-deps executable")
@@ -141,8 +146,22 @@ func run(command string, args []string) error {
 		if err := app.ConfigureCompilerOptions(path, *mode, *distribution, *cFlags, *cxxFlags); err != nil {
 			return err
 		}
-		if err := app.Configure(path, *compiler, *c, *profile, *vcpkgRoot, *triplet, *cudaRoot, *cudaMode, *setup, *moduleScanner, *modulesEnabled); err != nil {
+		configuredCUDA := ""
+		if *cudaExecution == "" && *cudaDistribution == "" {
+			configuredCUDA = *cudaRoot
+		}
+		if err := app.Configure(path, *compiler, *c, *profile, *vcpkgRoot, *triplet, configuredCUDA, *cudaMode, *setup, *moduleScanner, *modulesEnabled); err != nil {
 			return err
+		}
+		if *cudaExecution != "" || *cudaDistribution != "" {
+			if err := app.SetCUDAConnection(path, true, *cudaRoot, *cudaExecution, *cudaDistribution); err != nil {
+				return err
+			}
+		}
+		if *vulkanRoot != "" || *vulkanExecution != "" || *vulkanDistribution != "" {
+			if err := app.SetVulkanConnection(path, true, *vulkanRoot, *vulkanExecution, *vulkanDistribution); err != nil {
+				return err
+			}
 		}
 		if *savePreset != "" {
 			return app.SaveCompilerPreset(path, *savePreset)
@@ -239,7 +258,13 @@ func dashboardServices(path string) tuimodel.Services {
 		SetWSLCompiler: func(distribution, compiler string) error { return app.SetWSLCompiler(path, distribution, compiler) },
 		SetEnvironment: func(setup string) error { return app.SetEnvironment(path, setup) },
 		SetCUDA:        func(enabled bool, root string) error { return app.SetCUDA(path, enabled, root) },
-		SetTestGroup:   func(job, group string) error { return app.SetTestGroup(path, job, group) },
+		SetCUDAConnection: func(enabled bool, root, execution, distribution string) error {
+			return app.SetCUDAConnection(path, enabled, root, execution, distribution)
+		},
+		SetVulkan: func(enabled bool, root, execution, distribution string) error {
+			return app.SetVulkanConnection(path, enabled, root, execution, distribution)
+		},
+		SetTestGroup: func(job, group string) error { return app.SetTestGroup(path, job, group) },
 		RunTests: func(ctx context.Context, selection tuimodel.TestSelection, progress func(string)) error {
 			return app.RunTests(ctx, path, app.TestSelection{Job: selection.Job, Group: selection.Group, File: selection.File, All: selection.All}, progress)
 		},
@@ -295,7 +320,7 @@ func usage() {
 	fmt.Println("Usage:")
 	fmt.Println("  trestle                         open Project Console TUI")
 	fmt.Println("  trestle init [-C dir] [-name project]")
-	fmt.Println("  trestle configure [-C dir] [-toolchain clang++] [-mode native|wsl] [-wsl-distribution Ubuntu] [-preset name] [-save-preset name] [-compile-flags flags] [-c-flags flags] [-cxx-flags flags] [-link-flags flags]")
+	fmt.Println("  trestle configure [-C dir] [-toolchain clang++] [-mode native|wsl] [-wsl-distribution Ubuntu] [-cuda path] [-cuda-execution native|wsl] [-vulkan path] [-vulkan-execution native|wsl]")
 	fmt.Println("  trestle analyze [-C dir]")
 	fmt.Println("  trestle build [-C dir] [--all] [--preset name] [target ...]")
 	fmt.Println("  trestle test [-C dir] [-job name | -group name | -file source | -all]")

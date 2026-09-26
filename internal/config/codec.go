@@ -34,7 +34,7 @@ func Default(projectName string) Config {
 			CompileCommands:    "compile_commands.json",
 			AutoCompileShaders: true,
 		},
-		Toolchain:       Toolchain{C: "auto", CXX: "auto", Mode: "native"},
+		Toolchain:       Toolchain{C: "auto", CXX: "auto", Mode: "native", CUDAExecution: "native", VulkanExecution: "native"},
 		CompilerPresets: map[string]CompilerPreset{},
 		Targets: map[string]Target{
 			"app": {
@@ -119,6 +119,12 @@ func (c *Config) normalize(root string) error {
 	}
 	if c.Toolchain.CUDAMode == "" {
 		c.Toolchain.CUDAMode = "whole"
+	}
+	if c.Toolchain.CUDAExecution == "" {
+		c.Toolchain.CUDAExecution = "native"
+	}
+	if c.Toolchain.VulkanExecution == "" {
+		c.Toolchain.VulkanExecution = "native"
 	}
 	if len(c.Toolchain.CUDAArchitectures) == 0 {
 		c.Toolchain.CUDAArchitectures = []string{"sm_75"}

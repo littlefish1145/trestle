@@ -102,6 +102,17 @@ trestle configure -toolchain /usr/bin/clang++ -c /usr/bin/clang `
   -mode wsl -wsl-distribution Ubuntu-24.04
 ```
 
+连接同一 WSL 发行版中的 CUDA 与 Vulkan SDK（根目录可省略，Trestle 会从环境变量和 `PATH` 自动发现）：
+
+```powershell
+trestle configure -toolchain /usr/bin/g++ -c /usr/bin/gcc `
+  -mode wsl -wsl-distribution Ubuntu-24.04 `
+  -cuda-execution wsl -cuda-wsl-distribution Ubuntu-24.04 `
+  -vulkan-execution wsl -vulkan-wsl-distribution Ubuntu-24.04
+```
+
+Project Console 的 Toolchains 页面也会列出各 WSL 发行版内发现的 CUDA/Vulkan 组件；选中组件后按 Enter 即可连接。CUDA 必须与 WSL 主机编译器位于同一发行版，Vulkan Shader 工具可独立在 WSL 中运行。
+
 保存和复用编译器参数：
 
 ```powershell
@@ -113,7 +124,7 @@ trestle build -preset dev app
 ## `trestle.toml` 示例
 
 ```toml
-schema_version = 4
+schema_version = 5
 
 [project]
 name = "hello"
@@ -130,6 +141,8 @@ compile_commands = "compile_commands.json"
 c = "auto"
 cxx = "auto"
 mode = "native"
+cuda_execution = "native"
+vulkan_execution = "native"
 
 [vcpkg]
 root = "C:\\src\\vcpkg"

@@ -102,6 +102,17 @@ trestle configure -toolchain /usr/bin/clang++ -c /usr/bin/clang `
   -mode wsl -wsl-distribution Ubuntu-24.04
 ```
 
+Connect CUDA and Vulkan SDK tools from the same WSL distribution (roots are optional; Trestle discovers them from environment variables and `PATH`):
+
+```powershell
+trestle configure -toolchain /usr/bin/g++ -c /usr/bin/gcc `
+  -mode wsl -wsl-distribution Ubuntu-24.04 `
+  -cuda-execution wsl -cuda-wsl-distribution Ubuntu-24.04 `
+  -vulkan-execution wsl -vulkan-wsl-distribution Ubuntu-24.04
+```
+
+The Project Console Toolchains page also lists CUDA/Vulkan components found in each WSL distribution; select one and press Enter to connect it. CUDA must share a distribution with its WSL host compiler, while Vulkan shader tools can run independently in WSL.
+
 Save and reuse compiler options:
 
 ```powershell
@@ -113,7 +124,7 @@ trestle build -preset dev app
 ## Example `trestle.toml`
 
 ```toml
-schema_version = 4
+schema_version = 5
 
 [project]
 name = "hello"
@@ -130,6 +141,8 @@ compile_commands = "compile_commands.json"
 c = "auto"
 cxx = "auto"
 mode = "native"
+cuda_execution = "native"
+vulkan_execution = "native"
 
 [vcpkg]
 root = "C:\\src\\vcpkg"

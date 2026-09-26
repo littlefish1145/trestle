@@ -22,6 +22,11 @@ func Validate(cfg Config) error {
 	if cfg.Toolchain.Mode != "" && cfg.Toolchain.Mode != "native" && cfg.Toolchain.Mode != "wsl" {
 		return fmt.Errorf("toolchain.mode %q is unsupported; use native or wsl", cfg.Toolchain.Mode)
 	}
+	for name, execution := range map[string]string{"cuda_execution": cfg.Toolchain.CUDAExecution, "vulkan_execution": cfg.Toolchain.VulkanExecution} {
+		if execution != "" && execution != "native" && execution != "wsl" {
+			return fmt.Errorf("toolchain.%s %q is unsupported; use native or wsl", name, execution)
+		}
+	}
 	for _, name := range cfg.Build.DefaultTargets {
 		if _, ok := cfg.Targets[name]; !ok {
 			return fmt.Errorf("build.default_targets references unknown target %q", name)

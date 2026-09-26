@@ -9,22 +9,13 @@ import (
 )
 
 func DetectWSL(ctx context.Context, distribution, requested string) (Toolchain, error) {
-	wsl, err := exec.LookPath("wsl.exe")
+	wsl, base, err := WSLRunner(distribution)
 	if err != nil {
-		return Toolchain{}, fmt.Errorf("E_WSL_NOT_FOUND: wsl.exe was not found")
-	}
-	base := []string{}
-	if distribution != "" {
-		base = append(base, "-d", distribution)
+		return Toolchain{}, err
 	}
 	find := func(names ...string) string {
-		for _, name := range names {
-			args := append(append([]string{}, base...), "--exec", "sh", "-lc", "command -v "+name)
-			if out, e := exec.CommandContext(ctx, wsl, args...).Output(); e == nil && strings.TrimSpace(string(out)) != "" {
-				return strings.TrimSpace(string(out))
-			}
-		}
-		return ""
+		resolved, _ := WSLExecutable(ctx, distribution, names...)
+		return resolved
 	}
 	cxx := strings.TrimSpace(requested)
 	if cxx == "" || cxx == "auto" {
@@ -47,6 +38,58 @@ func DetectWSL(ctx context.Context, distribution, requested string) (Toolchain, 
 		version = strings.TrimSpace(strings.Split(string(out), "\n")[0])
 	}
 	return Toolchain{Kind: kind, CC: cc, CXX: cxx, Archiver: ar, Linker: cxx, Version: version, Target: "wsl", Runner: wsl, RunnerArgs: base}, nil
+}
+
+// WSLRunner resolves wsl.exe and returns the arguments that select a
+// distribution. SDK packages use the same runner contract as compilers.
+func WSLRunner(distribution string) (string, []string, error) {
+	wsl, err := exec.LookPath("wsl.exe")
+	if err != nil {
+		return "", nil, fmt.Errorf("E_WSL_NOT_FOUND: wsl.exe was not found")
+	}
+	base := []string{}
+	if strings.TrimSpace(distribution) != "" {
+		base = append(base, "-d", strings.TrimSpace(distribution))
+	}
+	return wsl, base, nil
+}
+
+// WSLExecutable finds the first command in a distribution. Names are invoked
+// as positional shell parameters so configured values are never interpolated
+// into the shell program.
+func WSLExecutable(ctx context.Context, distribution string, names ...string) (string, error) {
+	wsl, base, err := WSLRunner(distribution)
+	if err != nil {
+		return "", err
+	}
+	for _, name := range names {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		args := append(append([]string{}, base...), "--exec", "sh", "-lc", `if [ -x "$1" ]; then printf '%s\n' "$1"; else command -v -- "$1"; fi`, "trestle", name)
+		if out, runErr := exec.CommandContext(ctx, wsl, args...).Output(); runErr == nil {
+			if resolved := strings.TrimSpace(string(out)); resolved != "" {
+				return resolved, nil
+			}
+		}
+	}
+	return "", fmt.Errorf("command not found in WSL: %s", strings.Join(names, ", "))
+}
+
+// WSLVariable reads a single environment variable from the selected
+// distribution without evaluating its value as shell input.
+func WSLVariable(ctx context.Context, distribution, name string) string {
+	wsl, base, err := WSLRunner(distribution)
+	if err != nil {
+		return ""
+	}
+	args := append(append([]string{}, base...), "--exec", "sh", "-lc", `printenv "$1"`, "trestle", name)
+	out, err := exec.CommandContext(ctx, wsl, args...).Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
 }
 
 func WSLPath(ctx context.Context, distribution, path string) (string, error) {

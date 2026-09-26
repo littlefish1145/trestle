@@ -18,3 +18,19 @@ func TestRDCCompileUsesHostAndArchitectures(t *testing.T) {
 		t.Fatalf("unexpected nvcc command: %s", text)
 	}
 }
+
+func TestWSLCompileWrapsNVCC(t *testing.T) {
+	tc := Toolchain{
+		NVCC:          NVCC{Path: "/usr/local/cuda/bin/nvcc"},
+		Host:          toolchain.Toolchain{CXX: "/usr/bin/g++", Runner: "wsl.exe", RunnerArgs: []string{"-d", "Ubuntu", "--cd", "/mnt/c/project/build/debug"}},
+		Architectures: []string{"sm_90"},
+	}
+	exe, args, err := tc.Compile(toolchain.CompileSpec{Source: "../../../src/kernel.cu", Output: "obj/kernel.o", CXXStandard: "c++20"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := strings.Join(args, " ")
+	if exe != "wsl.exe" || !strings.Contains(text, "--exec /usr/local/cuda/bin/nvcc") || !strings.Contains(text, "-ccbin /usr/bin/g++") {
+		t.Fatalf("unexpected WSL nvcc command: %s %s", exe, text)
+	}
+}

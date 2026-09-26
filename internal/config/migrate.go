@@ -13,6 +13,7 @@ var migrations = map[int]migration{
 	1: migrateV1ToV2,
 	2: migrateV2ToV3,
 	3: migrateV3ToV4,
+	4: migrateV4ToV5,
 }
 
 func Migrate(data []byte) ([]byte, error) {
@@ -108,6 +109,21 @@ func migrateV3ToV4(document map[string]any) error {
 	}
 	if _, exists := document["compiler_presets"]; !exists {
 		document["compiler_presets"] = map[string]any{}
+	}
+	return nil
+}
+
+func migrateV4ToV5(document map[string]any) error {
+	toolchain, ok := document["toolchain"].(map[string]any)
+	if !ok {
+		toolchain = map[string]any{}
+		document["toolchain"] = toolchain
+	}
+	if _, exists := toolchain["cuda_execution"]; !exists {
+		toolchain["cuda_execution"] = "native"
+	}
+	if _, exists := toolchain["vulkan_execution"]; !exists {
+		toolchain["vulkan_execution"] = "native"
 	}
 	return nil
 }

@@ -273,32 +273,112 @@ func SetEnvironment(path, setup string) error {
 }
 
 func SetCUDA(path string, enabled bool, root string) error {
-	cfg, err := config.Load(path)
+	return SetCUDAConnection(path, enabled, root, "native", "")
+}
+
+func SetCUDAConnection(configPath string, enabled bool, root, execution, distribution string) error {
+	cfg, err := config.Load(configPath)
 	if err != nil {
 		return err
 	}
 	if !enabled {
 		cfg.Toolchain.CUDA = ""
-		return config.Save(path, cfg)
+		cfg.Toolchain.CUDAExecution = "native"
+		cfg.Toolchain.CUDAWSLDistribution = ""
+		return config.Save(configPath, cfg)
 	}
 	root = strings.TrimSpace(root)
-	if root == "" {
-		root = os.Getenv("CUDA_PATH")
+	execution = strings.ToLower(strings.TrimSpace(execution))
+	if execution == "" {
+		execution = "native"
 	}
-	if root == "" {
-		root = os.Getenv("CUDA_HOME")
-	}
-	if root == "" {
-		return fmt.Errorf("CUDA toolkit root is required")
-	}
-	nvcc := filepath.Join(root, "bin", "nvcc")
-	if _, err := os.Stat(nvcc); err != nil {
-		if _, windowsErr := os.Stat(nvcc + ".exe"); windowsErr != nil {
-			return fmt.Errorf("CUDA compiler was not found under %s", root)
+	distribution = strings.TrimSpace(distribution)
+	if execution == "wsl" {
+		if cfg.Toolchain.Mode != "wsl" {
+			return fmt.Errorf("E_CUDA_WSL_HOST: select a WSL C/C++ compiler before connecting WSL CUDA")
 		}
+		if distribution == "" {
+			distribution = cfg.Toolchain.WSLDistribution
+		}
+		if cfg.Toolchain.WSLDistribution != "" && distribution != "" && !strings.EqualFold(cfg.Toolchain.WSLDistribution, distribution) {
+			return fmt.Errorf("E_CUDA_WSL_DISTRIBUTION: CUDA is in %s but the compiler is in %s", distribution, cfg.Toolchain.WSLDistribution)
+		}
+		host, detectErr := detectConfigured(context.Background(), cfg)
+		if detectErr != nil {
+			return detectErr
+		}
+		detected, detectErr := cuda.DetectWSL(context.Background(), distribution, root, host)
+		if detectErr != nil {
+			return detectErr
+		}
+		root = detected.Toolkit.Root
+	} else if execution == "native" {
+		if root == "" {
+			root = os.Getenv("CUDA_PATH")
+		}
+		if root == "" {
+			root = os.Getenv("CUDA_HOME")
+		}
+		if root == "" {
+			return fmt.Errorf("CUDA toolkit root is required")
+		}
+		nvcc := filepath.Join(root, "bin", "nvcc")
+		if _, statErr := os.Stat(nvcc); statErr != nil {
+			if _, windowsErr := os.Stat(nvcc + ".exe"); windowsErr != nil {
+				return fmt.Errorf("CUDA compiler was not found under %s", root)
+			}
+		}
+	} else {
+		return fmt.Errorf("CUDA execution mode %q is unsupported", execution)
 	}
 	cfg.Toolchain.CUDA = root
-	return config.Save(path, cfg)
+	cfg.Toolchain.CUDAExecution = execution
+	cfg.Toolchain.CUDAWSLDistribution = distribution
+	return config.Save(configPath, cfg)
+}
+
+func SetVulkanConnection(configPath string, enabled bool, root, execution, distribution string) error {
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		return err
+	}
+	if !enabled {
+		cfg.Toolchain.Vulkan = ""
+		cfg.Toolchain.VulkanExecution = "native"
+		cfg.Toolchain.VulkanWSLDistribution = ""
+		return config.Save(configPath, cfg)
+	}
+	execution = strings.ToLower(strings.TrimSpace(execution))
+	if execution == "" {
+		execution = "native"
+	}
+	root = strings.TrimSpace(root)
+	distribution = strings.TrimSpace(distribution)
+	if execution == "wsl" {
+		if distribution == "" {
+			distribution = cfg.Toolchain.WSLDistribution
+		}
+		detected, detectErr := vulkan.DetectWSL(context.Background(), distribution, root)
+		if detectErr != nil {
+			return detectErr
+		}
+		root = detected.Root
+	} else if execution == "native" {
+		if root == "" {
+			root = os.Getenv("VULKAN_SDK")
+		}
+		detected, detectErr := vulkan.DetectRoot(root)
+		if detectErr != nil {
+			return detectErr
+		}
+		root = detected.Root
+	} else {
+		return fmt.Errorf("Vulkan execution mode %q is unsupported", execution)
+	}
+	cfg.Toolchain.Vulkan = root
+	cfg.Toolchain.VulkanExecution = execution
+	cfg.Toolchain.VulkanWSLDistribution = distribution
+	return config.Save(configPath, cfg)
 }
 
 func SetTestGroup(path, job, group string) error {
@@ -526,6 +606,16 @@ func SetProjectSetting(path, key, value string) error {
 		cfg.Toolchain.CUDAMode = value
 	case "toolchain.cuda_architectures":
 		cfg.Toolchain.CUDAArchitectures = csv()
+	case "toolchain.cuda_execution":
+		cfg.Toolchain.CUDAExecution = value
+	case "toolchain.cuda_wsl_distribution":
+		cfg.Toolchain.CUDAWSLDistribution = value
+	case "toolchain.vulkan":
+		cfg.Toolchain.Vulkan = value
+	case "toolchain.vulkan_execution":
+		cfg.Toolchain.VulkanExecution = value
+	case "toolchain.vulkan_wsl_distribution":
+		cfg.Toolchain.VulkanWSLDistribution = value
 	case "vcpkg.root":
 		cfg.Vcpkg.Root = value
 	case "vcpkg.triplet":
@@ -1012,6 +1102,15 @@ func Generate(path string) (BuildResult, error) {
 			hasNonShader = true
 		}
 	}
+	root, err := filepath.Abs(filepath.Dir(path))
+	if err != nil {
+		return BuildResult{}, err
+	}
+	buildRoot, err := filepath.Abs(cfg.Build.BuildDir)
+	if err != nil {
+		return BuildResult{}, err
+	}
+	manifestDir := filepath.Join(buildRoot, cfg.Build.Profile)
 	var tc toolchain.Toolchain
 	if hasNonShader {
 		var err error
@@ -1028,6 +1127,13 @@ func Generate(path string) (BuildResult, error) {
 	}
 	if cfg.Toolchain.Linker != "" && cfg.Toolchain.Linker != "auto" {
 		tc.Linker = cfg.Toolchain.Linker
+	}
+	if cfg.Toolchain.Mode == "wsl" && hasNonShader {
+		linuxDir, pathErr := toolchain.WSLPath(context.Background(), cfg.Toolchain.WSLDistribution, manifestDir)
+		if pathErr != nil {
+			return BuildResult{}, pathErr
+		}
+		tc = toolchain.WithWSLDirectory(tc, linuxDir)
 	}
 	if tc.Kind == toolchain.MSVC {
 		linkage := strings.ToLower(cfg.Vcpkg.CRTLinkage)
@@ -1047,9 +1153,28 @@ func Generate(path string) (BuildResult, error) {
 	}
 	var cudaToolchain *cuda.Toolchain
 	if cfg.Toolchain.CUDA != "" {
-		detected, err := cuda.DetectWithHost(context.Background(), cfg.Toolchain.CUDA, tc)
-		if err != nil {
-			return BuildResult{}, err
+		var detected cuda.Toolchain
+		var detectErr error
+		if cfg.Toolchain.CUDAExecution == "wsl" {
+			if cfg.Toolchain.Mode != "wsl" {
+				return BuildResult{}, fmt.Errorf("E_CUDA_WSL_HOST: WSL CUDA requires a WSL C/C++ toolchain")
+			}
+			distribution := cfg.Toolchain.CUDAWSLDistribution
+			if distribution == "" {
+				distribution = cfg.Toolchain.WSLDistribution
+			}
+			if cfg.Toolchain.WSLDistribution != "" && distribution != "" && !strings.EqualFold(cfg.Toolchain.WSLDistribution, distribution) {
+				return BuildResult{}, fmt.Errorf("E_CUDA_WSL_DISTRIBUTION: CUDA is in %s but the compiler is in %s", distribution, cfg.Toolchain.WSLDistribution)
+			}
+			detected, detectErr = cuda.DetectWSL(context.Background(), distribution, cfg.Toolchain.CUDA, tc)
+		} else {
+			if tc.Runner != "" {
+				return BuildResult{}, fmt.Errorf("E_CUDA_NATIVE_HOST: native CUDA cannot use a WSL host compiler; connect CUDA from the same WSL distribution")
+			}
+			detected, detectErr = cuda.DetectWithHost(context.Background(), cfg.Toolchain.CUDA, tc)
+		}
+		if detectErr != nil {
+			return BuildResult{}, detectErr
 		}
 		detected.Architectures = append([]string{}, cfg.Toolchain.CUDAArchitectures...)
 		if err := cuda.ProbeHost(context.Background(), detected); err != nil {
@@ -1063,29 +1188,32 @@ func Generate(path string) (BuildResult, error) {
 	var vulkanSDK *vulkan.SDK
 	for _, target := range project.Targets {
 		if target.Type == model.Shader {
-			detected, err := vulkan.Detect()
-			if err != nil {
-				return BuildResult{}, err
+			var detected vulkan.SDK
+			var detectErr error
+			if cfg.Toolchain.VulkanExecution == "wsl" {
+				distribution := cfg.Toolchain.VulkanWSLDistribution
+				if distribution == "" {
+					distribution = cfg.Toolchain.WSLDistribution
+				}
+				detected, detectErr = vulkan.DetectWSL(context.Background(), distribution, cfg.Toolchain.Vulkan)
+				if detectErr == nil {
+					linuxDir, pathErr := toolchain.WSLPath(context.Background(), distribution, manifestDir)
+					if pathErr != nil {
+						return BuildResult{}, pathErr
+					}
+					detected = vulkan.WithWSLDirectory(detected, linuxDir)
+				}
+			} else if cfg.Toolchain.Vulkan != "" {
+				detected, detectErr = vulkan.DetectRoot(cfg.Toolchain.Vulkan)
+			} else {
+				detected, detectErr = vulkan.Detect()
+			}
+			if detectErr != nil {
+				return BuildResult{}, detectErr
 			}
 			vulkanSDK = &detected
 			break
 		}
-	}
-	root, err := filepath.Abs(filepath.Dir(path))
-	if err != nil {
-		return BuildResult{}, err
-	}
-	buildRoot, err := filepath.Abs(cfg.Build.BuildDir)
-	if err != nil {
-		return BuildResult{}, err
-	}
-	manifestDir := filepath.Join(buildRoot, cfg.Build.Profile)
-	if cfg.Toolchain.Mode == "wsl" && hasNonShader {
-		linuxDir, err := toolchain.WSLPath(context.Background(), cfg.Toolchain.WSLDistribution, manifestDir)
-		if err != nil {
-			return BuildResult{}, err
-		}
-		tc = toolchain.WithWSLDirectory(tc, linuxDir)
 	}
 	moduleInfos := map[string]plan.ModuleInfo{}
 	var moduleBackend modules.Support

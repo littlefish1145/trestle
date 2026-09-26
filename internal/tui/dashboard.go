@@ -37,6 +37,8 @@ type Services struct {
 	SetWSLCompiler    func(string, string) error
 	SetEnvironment    func(string) error
 	SetCUDA           func(bool, string) error
+	SetCUDAConnection func(bool, string, string, string) error
+	SetVulkan         func(bool, string, string, string) error
 	SetTestGroup      func(string, string) error
 	RunTests          func(context.Context, TestSelection, func(string)) error
 	ImportCMake       func(context.Context, func(string)) error
@@ -242,7 +244,18 @@ func (model dashboardModel) probeCommand() tea.Cmd {
 		if client, clientErr := vcpkg.NewClient(vcpkgRoot); clientErr == nil {
 			message.Vcpkg, message.VcpkgRoot = true, client.Root
 		}
-		_, vulkanError := vulkan.Detect()
+		var vulkanError error
+		if err == nil && cfg.Toolchain.VulkanExecution == "wsl" {
+			distribution := cfg.Toolchain.VulkanWSLDistribution
+			if distribution == "" {
+				distribution = cfg.Toolchain.WSLDistribution
+			}
+			_, vulkanError = vulkan.DetectWSL(context.Background(), distribution, cfg.Toolchain.Vulkan)
+		} else if err == nil && cfg.Toolchain.Vulkan != "" {
+			_, vulkanError = vulkan.DetectRoot(cfg.Toolchain.Vulkan)
+		} else {
+			_, vulkanError = vulkan.Detect()
+		}
 		_, ninjaError := exec.LookPath("ninja")
 		_, cmakeError := exec.LookPath("cmake")
 		message.Vulkan = vulkanError == nil
@@ -405,7 +418,16 @@ func (model dashboardModel) handleKey(message tea.KeyPressMsg) (tea.Model, tea.C
 				return model.installPackage(name)
 			}
 		} else if model.route == ToolchainsRoute {
-			if component, ok := model.selectedCompiler(); ok {
+			if component, ok := model.selectedComponent(); ok {
+				if component.Family == "CUDA" && component.Ready {
+					return model.connectCUDA(component)
+				}
+				if component.Family == "Vulkan" && component.Ready {
+					return model.connectVulkan(component)
+				}
+				if _, compiler := model.selectedCompiler(); !compiler {
+					break
+				}
 				if component.Execution == "wsl" {
 					return model.startMutation("Selecting WSL compiler", "WSL compiler selected: "+component.Name+" · builds run inside "+component.Distribution, func() error {
 						if model.services.SetWSLCompiler == nil {
@@ -534,7 +556,22 @@ func (model dashboardModel) handleKey(message tea.KeyPressMsg) (tea.Model, tea.C
 			}
 		}
 	case "v":
-		if model.route == PackagesRoute {
+		if model.route == ToolchainsRoute {
+			enabled := model.config.Toolchain.Vulkan == ""
+			if enabled {
+				if component, ok := model.detectedSDK("Vulkan"); ok {
+					return model.connectVulkan(component)
+				}
+				model.setMessage("No Vulkan SDK was detected", true)
+				return model, nil
+			}
+			return model.startMutation("Disconnecting Vulkan SDK", "Vulkan SDK disconnected", func() error {
+				if model.services.SetVulkan == nil {
+					return fmt.Errorf("Vulkan service is unavailable")
+				}
+				return model.services.SetVulkan(false, "", "native", "")
+			})
+		} else if model.route == PackagesRoute {
 			model.openInput("version", "Set package version (name@version)")
 			names := sortedPackageNames(model.config.Packages)
 			if model.cursor >= 0 && model.cursor < len(names) {
@@ -570,27 +607,38 @@ func (model dashboardModel) handleKey(message tea.KeyPressMsg) (tea.Model, tea.C
 	case "c":
 		if model.route == ToolchainsRoute {
 			enabled := model.config.Toolchain.CUDA == ""
-			root := model.detectedCUDARoot()
-			if enabled && root == "" {
-				model.openInput("cuda", "CUDA toolkit root (no toolkit was auto-detected)")
+			component, detected := model.detectedSDKForExecution("CUDA", model.config.Toolchain.Mode)
+			if enabled && !detected {
+				kind, prompt := "cuda", "CUDA toolkit root (no native toolkit was auto-detected)"
+				if model.config.Toolchain.Mode == "wsl" {
+					kind, prompt = "cuda-wsl", "CUDA toolkit root inside "+fallback(model.config.Toolchain.WSLDistribution, "the default WSL distribution")
+				}
+				model.openInput(kind, prompt)
 				return model, nil
 			}
-			label := "CUDA disabled"
 			if enabled {
-				label = "CUDA enabled"
+				return model.connectCUDA(component)
 			}
+			label := "CUDA disabled"
 			return model.startMutation("Updating CUDA", label, func() error {
+				if model.services.SetCUDAConnection != nil {
+					return model.services.SetCUDAConnection(false, "", "native", "")
+				}
 				if model.services.SetCUDA == nil {
 					return fmt.Errorf("CUDA service is unavailable")
 				}
-				return model.services.SetCUDA(enabled, root)
+				return model.services.SetCUDA(false, "")
 			})
 		} else if model.route == SettingsRoute {
 			model.openInput("c-flags", "Set C-only compiler flags")
 		}
 	case "u":
 		if model.route == ToolchainsRoute {
-			model.openInput("cuda", "CUDA toolkit root")
+			kind := "cuda"
+			if model.config.Toolchain.Mode == "wsl" {
+				kind = "cuda-wsl"
+			}
+			model.openInput(kind, "CUDA toolkit root")
 		}
 	case "g":
 		if model.route == TestsRoute {
@@ -700,6 +748,13 @@ func (model dashboardModel) handleInput(key tea.Key) (tea.Model, tea.Cmd) {
 				}
 				return model.services.SetCUDA(true, text)
 			}, "CUDA enabled"
+		case "cuda-wsl":
+			action, label = func() error {
+				if model.services.SetCUDAConnection == nil {
+					return fmt.Errorf("WSL CUDA service is unavailable")
+				}
+				return model.services.SetCUDAConnection(true, text, "wsl", model.config.Toolchain.WSLDistribution)
+			}, "WSL CUDA enabled"
 		case "test-group":
 			action, label = func() error {
 				if model.services.SetTestGroup == nil {
@@ -1037,16 +1092,60 @@ func (model dashboardModel) selectedCompiler() (toolchain.Component, bool) {
 	return component, compiler
 }
 
-func (model dashboardModel) detectedCUDARoot() string {
-	if model.config.Toolchain.CUDA != "" {
-		return model.config.Toolchain.CUDA
+func (model dashboardModel) selectedComponent() (toolchain.Component, bool) {
+	if model.cursor < 0 || model.cursor >= len(model.probe.Components) {
+		return toolchain.Component{}, false
+	}
+	return model.probe.Components[model.cursor], true
+}
+
+func (model dashboardModel) detectedSDK(family string) (toolchain.Component, bool) {
+	preferredExecution := model.config.Toolchain.Mode
+	if component, ok := model.detectedSDKForExecution(family, preferredExecution); ok {
+		return component, true
 	}
 	for _, component := range model.probe.Components {
-		if component.Ready && component.Family == "CUDA" {
-			return component.Detail
+		if component.Ready && component.Family == family {
+			return component, true
 		}
 	}
-	return ""
+	return toolchain.Component{}, false
+}
+
+func (model dashboardModel) detectedSDKForExecution(family, preferredExecution string) (toolchain.Component, bool) {
+	for _, component := range model.probe.Components {
+		execution := fallback(component.Execution, "native")
+		if component.Ready && component.Family == family && execution == preferredExecution {
+			return component, true
+		}
+	}
+	return toolchain.Component{}, false
+}
+
+func (model dashboardModel) connectCUDA(component toolchain.Component) (tea.Model, tea.Cmd) {
+	execution := fallback(component.Execution, "native")
+	return model.startMutation("Connecting CUDA", "CUDA connected: "+component.Name, func() error {
+		if model.services.SetCUDAConnection != nil {
+			return model.services.SetCUDAConnection(true, component.Detail, execution, component.Distribution)
+		}
+		if execution != "native" {
+			return fmt.Errorf("WSL CUDA service is unavailable")
+		}
+		if model.services.SetCUDA == nil {
+			return fmt.Errorf("CUDA service is unavailable")
+		}
+		return model.services.SetCUDA(true, component.Detail)
+	})
+}
+
+func (model dashboardModel) connectVulkan(component toolchain.Component) (tea.Model, tea.Cmd) {
+	execution := fallback(component.Execution, "native")
+	return model.startMutation("Connecting Vulkan SDK", "Vulkan SDK connected: "+component.Name, func() error {
+		if model.services.SetVulkan == nil {
+			return fmt.Errorf("Vulkan service is unavailable")
+		}
+		return model.services.SetVulkan(true, component.Detail, execution, component.Distribution)
+	})
 }
 
 type testFileRow struct {
@@ -1482,14 +1581,18 @@ func (model dashboardModel) dependencyLines(p palette, width int) []string {
 func (model dashboardModel) toolchainLines(p palette, width int) []string {
 	cudaState := "disabled"
 	if model.config.Toolchain.CUDA != "" {
-		cudaState = "enabled · " + model.config.Toolchain.CUDA
+		cudaState = fallback(model.config.Toolchain.CUDAExecution, "native") + " · " + model.config.Toolchain.CUDA
+	}
+	vulkanState := "auto-detect native"
+	if model.config.Toolchain.Vulkan != "" {
+		vulkanState = fallback(model.config.Toolchain.VulkanExecution, "native") + " · " + model.config.Toolchain.Vulkan
 	}
 	preset := fallback(model.config.Toolchain.Preset, "none")
 	execution := "Windows native"
 	if model.config.Toolchain.Mode == "wsl" {
 		execution = "WSL · " + fallback(model.config.Toolchain.WSLDistribution, "default distribution")
 	}
-	lines := []string{p.faint.Render(" ACTIVE TOOLCHAIN"), keyValue(p, "Execution", execution), keyValue(p, "Compiler", fallback(model.config.Toolchain.CXX, "auto")), keyValue(p, "Preset", preset), keyValue(p, "Environment", fallback(model.config.Toolchain.Setup, "inherited")), keyValue(p, "CUDA", cudaState), "", p.faint.Render(" DETECTED · ENTER SELECTS A COMPILER")}
+	lines := []string{p.faint.Render(" ACTIVE TOOLCHAIN"), keyValue(p, "Execution", execution), keyValue(p, "Compiler", fallback(model.config.Toolchain.CXX, "auto")), keyValue(p, "Preset", preset), keyValue(p, "Environment", fallback(model.config.Toolchain.Setup, "inherited")), keyValue(p, "CUDA", cudaState), keyValue(p, "Vulkan", vulkanState), "", p.faint.Render(" DETECTED · ENTER CONNECTS A COMPILER OR SDK")}
 	if len(model.probe.Components) == 0 {
 		lines = append(lines, p.warning.Render("!  No native development components detected"), p.faint.Render("   WSL mode may still use a compiler installed inside the selected distribution."))
 	}
@@ -1514,7 +1617,7 @@ func (model dashboardModel) toolchainLines(p palette, width int) []string {
 			lines = append(lines, p.warning.Render("     "+ansi.Truncate(compactLine(component.Detail), max(10, width-6), "…")))
 		}
 	}
-	return append(lines, "", p.faint.Render("enter select compiler (native or WSL)   x apply preset   n save preset   c CUDA"))
+	return append(lines, "", p.faint.Render("enter connect native or WSL compiler/SDK   c CUDA   v Vulkan   x apply preset"))
 }
 
 func (model dashboardModel) presetLines(p palette, width int) []string {
@@ -1760,7 +1863,16 @@ func compactLine(value string) string {
 }
 
 func (model dashboardModel) helpView(p palette, width, height int) string {
-	lines := []string{p.title.Render("Keyboard reference") + "  " + p.faint.Render("press ? or esc to close"), "", keyValue(p, "↑ ↓ / j k", "navigate routes or rows"), keyValue(p, "tab / ← →", "switch navigation and content focus"), keyValue(p, "1 … 9 / 0", "jump directly to a screen"), keyValue(p, "b", "build the active profile"), keyValue(p, "r", "refresh configuration and probes"), keyValue(p, "p", "toggle debug/release profile"), keyValue(p, "/", "search the official vcpkg.io index"), keyValue(p, "enter / i", "run the selected screen action"), keyValue(p, "toolchains", "enter compiler · e environment · c CUDA"), keyValue(p, "tests", "enter job/file · g group · a all · f view"), keyValue(p, "packages", "f features · a install · d remove"), keyValue(p, "q", "leave Project Console"), "", p.faint.Render("Inputs: enter saves · esc cancels · ctrl+u clears · ctrl+w deletes a word")}
+	lines := []string{
+		p.title.Render("Keyboard reference") + "  " + p.faint.Render("press ? or esc to close"), "",
+		keyValue(p, "↑ ↓ / j k", "navigate routes or rows"), keyValue(p, "tab / ← →", "switch navigation and content focus"),
+		keyValue(p, "1 … 9 / 0", "jump directly to a screen"), keyValue(p, "b", "build the active profile"),
+		keyValue(p, "r", "refresh configuration and probes"), keyValue(p, "p", "toggle debug/release profile"),
+		keyValue(p, "/", "search the official vcpkg.io index"), keyValue(p, "enter / i", "run the selected screen action"),
+		keyValue(p, "toolchains", "enter connect · e environment · c CUDA · v Vulkan"),
+		keyValue(p, "tests", "enter job/file · g group · a all · f view"), keyValue(p, "packages", "f features · a install · d remove"),
+		keyValue(p, "q", "leave Project Console"), "", p.faint.Render("Inputs: enter saves · esc cancels · ctrl+u clears · ctrl+w deletes a word"),
+	}
 	return lipgloss.NewStyle().Border(p.border).BorderForeground(lipgloss.Color("#38bdf8")).Padding(1, 2).Width(max(20, width-6)).Height(max(3, height-4)).Render(strings.Join(lines, "\n"))
 }
 
@@ -1814,6 +1926,8 @@ func (model dashboardModel) inputLabel() string {
 		return "Setup script"
 	case "cuda":
 		return "CUDA root"
+	case "cuda-wsl":
+		return "WSL CUDA root"
 	case "test-group":
 		return "Test group"
 	}
@@ -1824,7 +1938,7 @@ func (model dashboardModel) shortcutLine(p palette, width int) string {
 	contextKeys := "b build   r refresh   p profile"
 	switch model.route {
 	case ToolchainsRoute:
-		contextKeys = "↵ native/WSL compiler   x preset   n save   c CUDA"
+		contextKeys = "↵ connect compiler/SDK   c CUDA   v Vulkan   x apply preset"
 	case PresetsRoute:
 		contextKeys = "↵ apply   n save current   d delete"
 	case ImportRoute:

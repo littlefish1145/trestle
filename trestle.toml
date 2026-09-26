@@ -1,4 +1,4 @@
-schema_version = 4
+schema_version = 5
 
 [project]
   name = "."
@@ -27,6 +27,11 @@ schema_version = 4
   cuda = ""
   cuda_mode = "whole"
   cuda_architectures = ["sm_75"]
+  cuda_execution = "native"
+  cuda_wsl_distribution = ""
+  vulkan = ""
+  vulkan_execution = "native"
+  vulkan_wsl_distribution = ""
   module_scanner = ""
   mode = "native"
   wsl_distribution = ""
