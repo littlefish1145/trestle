@@ -50,6 +50,19 @@ go build -o trestle.exe ./cmd/trestle
 go install ./cmd/trestle
 ```
 
+也可以从 GitHub Releases 下载自动生成的 Alpha 桌面安装包。每次 `main` 更新都会发布 Windows、Linux、macOS 的 x64 与 ARM64 版本：
+
+- Windows：解压 ZIP，在包目录执行 `powershell -ExecutionPolicy Bypass -File .\install.ps1`。
+- Linux/macOS：解压 `tar.gz`，在包目录执行 `./install.sh`。
+- 安装器会复制完整的 `bin` 目录并把它加入用户 `PATH`；在 GitHub Actions 中会写入 `GITHUB_PATH`，供后续步骤直接调用 `trestle`。
+- 每个 Alpha 预发布都包含提交记录、构建日志、包清单、SHA-256 校验和；完整 Actions 日志会在主流水线结束后自动附加。
+
+安装完成后可确认构建身份：
+
+```powershell
+trestle version
+```
+
 开发验证：
 
 ```powershell
@@ -185,6 +198,8 @@ internal/ninja/       Ninja 文件生成
 internal/plan/        编译、链接和运行时部署计划
 internal/toolchain/   编译器、VS ABI、WSL 与 CUDA
 internal/tui/         终端界面
+scripts/release/      Alpha 安装包及 PATH 安装脚本
+.github/workflows/    桌面端 Alpha 构建、发布与日志归档
 testdata/             测试夹具
 ```
 

@@ -1,0 +1,353 @@
+name: Alpha Release
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  prepare:
+    name: Prepare release metadata
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.metadata.outputs.tag }}
+      version: ${{ steps.metadata.outputs.version }}
+      build_date: ${{ steps.metadata.outputs.build_date }}
+    steps:
+      - name: Compute immutable Alpha identity
+        id: metadata
+        env:
+          COMMIT_SHA: ${{ github.sha }}
+          RUN_NUMBER: ${{ github.run_number }}
+        run: |
+          set -Eeuo pipefail
+          short_sha=${COMMIT_SHA:0:7}
+          tag="alpha-${RUN_NUMBER}-${short_sha}"
+          build_date=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
+          {
+            echo "tag=$tag"
+            echo "version=$tag"
+            echo "build_date=$build_date"
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo "## Alpha release"
+            echo
+            echo "- Tag: \`$tag\`"
+            echo "- Commit: \`$COMMIT_SHA\`"
+            echo "- Build date: \`$build_date\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  quality:
+    name: Test and vet
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+
+      - name: Set up Go from go.mod
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Verify modules
+        run: |
+          set -o pipefail
+          mkdir -p quality-logs
+          go mod verify 2>&1 | tee quality-logs/go-mod-verify.log
+
+      - name: Run tests
+        run: |
+          set -o pipefail
+          go test -count=1 ./... 2>&1 | tee quality-logs/go-test.log
+
+      - name: Run go vet
+        run: |
+          set -o pipefail
+          go vet ./... 2>&1 | tee quality-logs/go-vet.log
+
+      - name: Upload quality logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: alpha-quality-logs
+          path: quality-logs/
+          if-no-files-found: warn
+          retention-days: 30
+
+  build:
+    name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
+    needs:
+      - prepare
+      - quality
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+          - goos: linux
+            goarch: arm64
+          - goos: windows
+            goarch: amd64
+          - goos: windows
+            goarch: arm64
+          - goos: darwin
+            goarch: amd64
+          - goos: darwin
+            goarch: arm64
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+
+      - name: Set up Go from go.mod
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Build installation package
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          COMMIT: ${{ github.sha }}
+          BUILD_DATE: ${{ needs.prepare.outputs.build_date }}
+          OUTPUT_DIR: dist
+        run: bash scripts/release/package.sh
+
+      - name: Verify archive layout and PATH installer
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -Eeuo pipefail
+          package="trestle-${VERSION}-${GOOS}-${GOARCH}"
+          verify_root=$(mktemp -d)
+          trap 'rm -rf "$verify_root"' EXIT
+          mkdir -p "$verify_root/extracted"
+
+          jq -e \
+            --arg goos "$GOOS" \
+            --arg goarch "$GOARCH" \
+            --arg version "$VERSION" \
+            '.goos == $goos and .goarch == $goarch and .version == $version' \
+            "dist/${package}.json" >/dev/null
+
+          if [[ "$GOOS" == windows ]]; then
+            unzip -q "dist/${package}.zip" -d "$verify_root/extracted"
+            test -s "$verify_root/extracted/$package/bin/trestle.exe"
+            test -s "$verify_root/extracted/$package/install.ps1"
+            path_file="$verify_root/github-path"
+            GITHUB_PATH="$path_file" pwsh -NoProfile -File "$verify_root/extracted/$package/install.ps1" \
+              -InstallDir "$verify_root/installed"
+            grep -F "$verify_root/installed/bin" "$path_file" >/dev/null
+            test -s "$verify_root/installed/bin/trestle.exe"
+          else
+            tar -xzf "dist/${package}.tar.gz" -C "$verify_root/extracted"
+            test -s "$verify_root/extracted/$package/bin/trestle"
+            test -x "$verify_root/extracted/$package/install.sh"
+            path_file="$verify_root/github-path"
+            GITHUB_PATH="$path_file" TRESTLE_INSTALL_DIR="$verify_root/installed" \
+              sh "$verify_root/extracted/$package/install.sh" --no-profile
+            grep -F "$verify_root/installed/bin" "$path_file" >/dev/null
+            test -x "$verify_root/installed/bin/trestle"
+          fi
+
+          if [[ "$GOOS/$GOARCH" == linux/amd64 ]]; then
+            "$verify_root/extracted/$package/bin/trestle" version | grep -F "$VERSION"
+          fi
+
+      - name: Upload target package and build record
+        uses: actions/upload-artifact@v4
+        with:
+          name: alpha-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Summarize target
+        env:
+          TARGET: ${{ matrix.goos }}/${{ matrix.goarch }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          {
+            echo "## Package complete"
+            echo
+            echo "- Target: \`$TARGET\`"
+            echo "- Version: \`$VERSION\`"
+            echo "- Installer adds the package's \`bin\` directory to PATH."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  publish:
+    name: Publish GitHub Alpha prerelease
+    needs:
+      - prepare
+      - quality
+      - build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    steps:
+      - name: Check out full history
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v5
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create checksums, manifest, and commit record
+        env:
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+          BUILD_DATE: ${{ needs.prepare.outputs.build_date }}
+          COMMIT_SHA: ${{ github.sha }}
+          REPOSITORY: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          SERVER_URL: ${{ github.server_url }}
+        run: |
+          set -Eeuo pipefail
+          cd dist
+
+          sha256sum trestle-*.tar.gz trestle-*.zip > SHA256SUMS.txt
+          jq -s \
+            --arg tag "$RELEASE_TAG" \
+            --arg commit "$COMMIT_SHA" \
+            --arg build_date "$BUILD_DATE" \
+            '{tag:$tag, commit:$commit, build_date:$build_date, packages:.}' \
+            trestle-*.json > release-manifest.json
+
+          {
+            echo "Release tag: $RELEASE_TAG"
+            echo "Version: $RELEASE_VERSION"
+            echo "Commit: $COMMIT_SHA"
+            echo "Build date: $BUILD_DATE"
+            echo "Workflow: $SERVER_URL/$REPOSITORY/actions/runs/$RUN_ID"
+            echo
+            git -C "$GITHUB_WORKSPACE" show -s --format=fuller "$COMMIT_SHA"
+          } > COMMIT.txt
+
+      - name: Generate detailed release notes
+        env:
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+          BUILD_DATE: ${{ needs.prepare.outputs.build_date }}
+          COMMIT_SHA: ${{ github.sha }}
+          REPOSITORY: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          SERVER_URL: ${{ github.server_url }}
+        run: |
+          set -Eeuo pipefail
+          subject=$(git show -s --format=%s "$COMMIT_SHA")
+          author=$(git show -s --format='%an <%ae>' "$COMMIT_SHA")
+          previous=$(git tag --list 'alpha-*' --sort=-creatordate | grep -Fvx "$RELEASE_TAG" | head -n 1 || true)
+
+          {
+            echo "Automated desktop Alpha build from \`main\`."
+            echo
+            echo "## Source"
+            echo
+            echo "- Commit: [\`$COMMIT_SHA\`]($SERVER_URL/$REPOSITORY/commit/$COMMIT_SHA)"
+            echo "- Subject: $subject"
+            echo "- Author: $author"
+            echo "- Built: \`$BUILD_DATE\`"
+            echo "- Workflow: [run $RUN_ID]($SERVER_URL/$REPOSITORY/actions/runs/$RUN_ID)"
+            echo
+            echo "## Desktop packages"
+            echo
+            echo "| OS | Architectures | Format |"
+            echo "|---|---|---|"
+            echo "| Windows | x64, ARM64 | ZIP |"
+            echo "| Linux | x64, ARM64 | tar.gz |"
+            echo "| macOS | Intel x64, Apple Silicon ARM64 | tar.gz |"
+            echo
+            echo "Every archive contains \`bin/trestle\` (or \`trestle.exe\`) plus \`install.sh\` and \`install.ps1\`. The installer copies the complete package and adds its \`bin\` directory to PATH; in GitHub Actions it writes to \`GITHUB_PATH\`."
+            echo
+            echo "Verify downloads with \`SHA256SUMS.txt\`. Machine-readable package metadata is in \`release-manifest.json\`. Full GitHub Actions logs are attached after this workflow completes."
+            echo
+            echo "## Changes"
+            echo
+            if [[ -n "$previous" ]]; then
+              git log "$previous..$COMMIT_SHA" --pretty=format:'- [`%h`]('$SERVER_URL'/'$REPOSITORY'/commit/%H) %s — %an'
+            else
+              git log -n 20 "$COMMIT_SHA" --pretty=format:'- [`%h`]('$SERVER_URL'/'$REPOSITORY'/commit/%H) %s — %an'
+            fi
+            echo
+          } > release-notes.md
+
+      - name: Create annotated Alpha tag
+        env:
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+          BUILD_DATE: ${{ needs.prepare.outputs.build_date }}
+          COMMIT_SHA: ${{ github.sha }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          set -Eeuo pipefail
+          if ! git rev-parse --verify --quiet "refs/tags/$RELEASE_TAG" >/dev/null; then
+            subject=$(git show -s --format=%s "$COMMIT_SHA")
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git tag -a "$RELEASE_TAG" "$COMMIT_SHA" \
+              -m "Trestle Alpha $RELEASE_TAG" \
+              -m "Commit: $COMMIT_SHA" \
+              -m "Subject: $subject" \
+              -m "Built: $BUILD_DATE" \
+              -m "GitHub Actions run: $RUN_ID"
+            git push origin "refs/tags/$RELEASE_TAG"
+          fi
+
+      - name: Create or repair Alpha prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+          COMMIT_SHA: ${{ github.sha }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -Eeuo pipefail
+          title="Trestle Alpha ${RELEASE_TAG#alpha-}"
+          if gh release view "$RELEASE_TAG" --repo "$REPOSITORY" >/dev/null 2>&1; then
+            gh release edit "$RELEASE_TAG" \
+              --repo "$REPOSITORY" \
+              --title "$title" \
+              --notes-file release-notes.md \
+              --prerelease \
+              --latest=false
+            gh release upload "$RELEASE_TAG" dist/* --repo "$REPOSITORY" --clobber
+          else
+            gh release create "$RELEASE_TAG" dist/* \
+              --repo "$REPOSITORY" \
+              --verify-tag \
+              --title "$title" \
+              --notes-file release-notes.md \
+              --prerelease \
+              --latest=false
+          fi
+
+      - name: Publish release summary
+        env:
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+          REPOSITORY: ${{ github.repository }}
+          SERVER_URL: ${{ github.server_url }}
+        run: |
+          {
+            echo "## Published"
+            echo
+            echo "[$RELEASE_TAG]($SERVER_URL/$REPOSITORY/releases/tag/$RELEASE_TAG)"
+            echo
+            echo "The follow-up **Alpha Release Logs** workflow will attach the complete run log archive."
+          } >> "$GITHUB_STEP_SUMMARY"

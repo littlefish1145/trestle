@@ -16,6 +16,12 @@ import (
 	tuimodel "trestle/internal/tui"
 )
 
+var (
+	version   = "dev"
+	commit    = "unknown"
+	buildDate = "unknown"
+)
+
 func main() {
 	if len(os.Args) < 2 {
 		if !term.IsTerminal(int(os.Stdin.Fd())) {
@@ -40,6 +46,10 @@ func main() {
 	command := os.Args[1]
 	if command == "-h" || command == "--help" || command == "help" {
 		usage()
+		return
+	}
+	if command == "version" || command == "--version" {
+		fmt.Printf("trestle %s (%s, %s)\n", version, commit, buildDate)
 		return
 	}
 	if err := run(command, os.Args[2:]); err != nil {
@@ -331,4 +341,5 @@ func usage() {
 	fmt.Println("  trestle doctor [-C dir]")
 	fmt.Println("  trestle toolchain [-C dir]")
 	fmt.Println("  trestle vcpkg [-C dir] [-root path] [-search query] | [-install -ports zlib,fmt]")
+	fmt.Println("  trestle version")
 }

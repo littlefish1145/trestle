@@ -50,6 +50,19 @@ Or install it into your Go bin directory:
 go install ./cmd/trestle
 ```
 
+Automated Alpha desktop packages are also available from GitHub Releases. Every update to `main` publishes x64 and ARM64 builds for Windows, Linux, and macOS:
+
+- Windows: extract the ZIP and run `powershell -ExecutionPolicy Bypass -File .\install.ps1` from the package directory.
+- Linux/macOS: extract the `tar.gz` archive and run `./install.sh` from the package directory.
+- The installer copies the complete `bin` directory and adds it to the user `PATH`. Under GitHub Actions it writes to `GITHUB_PATH`, so later steps can invoke `trestle` directly.
+- Every Alpha prerelease includes commit details, build logs, a package manifest, and SHA-256 checksums. The complete Actions log archive is attached after the main workflow finishes.
+
+Confirm the installed build identity with:
+
+```powershell
+trestle version
+```
+
 Development checks:
 
 ```powershell
@@ -185,6 +198,8 @@ internal/ninja/       Ninja manifest emitter
 internal/plan/        Compile, link, and runtime deployment plans
 internal/toolchain/   Compilers, Visual Studio ABI, WSL, and CUDA
 internal/tui/         Terminal user interface
+scripts/release/      Alpha packages and PATH-aware installers
+.github/workflows/    Desktop Alpha build, release, and log archival
 testdata/             Test fixtures
 ```
 
