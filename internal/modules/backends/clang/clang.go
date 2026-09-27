@@ -12,48 +12,65 @@ import (
 )
 
 type Backend struct {
-	Compiler string
-	Scanner  string
-	Standard string
-	Target   string
-	Options  []string
+	Compiler   string
+	Scanner    string
+	Standard   string
+	Target     string
+	Options    []string
+	Runner     string
+	RunnerArgs []string
+}
+
+func (backend Backend) wrap(args []string) (string, []string) {
+	if backend.Runner == "" {
+		return backend.Compiler, args
+	}
+	wrapped := append(append(append([]string{}, backend.RunnerArgs...), "--exec", backend.Compiler), args...)
+	return backend.Runner, wrapped
 }
 
 func (backend Backend) Scan(ctx context.Context, source string) (p1689.Document, error) {
 	if backend.Scanner == "" {
 		return p1689.Document{}, fmt.Errorf("E_MODULE_SCAN_FAILED: clang-scan-deps is not configured")
 	}
-	args := []string{"-format=p1689", "--", backend.Compiler, "-std=" + strings.TrimPrefix(backend.Standard, "c++"), "-c", source}
+	args := []string{"-format=p1689", "--", backend.Compiler, "-std=" + backend.Standard, "-c", source}
 	args = append(args, backend.Options...)
-	command := exec.CommandContext(ctx, backend.Scanner, args...)
+	executable := backend.Scanner
+	if backend.Runner != "" {
+		executable = backend.Runner
+		args = append(append(append([]string{}, backend.RunnerArgs...), "--exec", backend.Scanner), args...)
+	}
+	command := exec.CommandContext(ctx, executable, args...)
 	var stderr bytes.Buffer
 	command.Stderr = &stderr
 	output, err := command.Output()
 	if err != nil {
-		return p1689.Document{}, fmt.Errorf("E_MODULE_SCAN_FAILED: %s: %s", source, strings.TrimSpace(stderr.String()))
+		return p1689.Document{}, fmt.Errorf("E_MODULE_SCAN_FAILED: %s: %w: %s", source, err, strings.TrimSpace(stderr.String()))
 	}
 	return p1689.Decode(bytes.NewReader(output))
 }
 
 func (backend Backend) CompileModule(source, output string, references []modules.Reference) (string, []string, error) {
-	args := []string{"-std=" + strings.TrimPrefix(backend.Standard, "c++"), "--precompile", source, "-o", output}
+	args := []string{"-std=" + backend.Standard, "--precompile", source, "-o", output}
 	consumerArgs, err := backend.ConsumerArgs(references)
 	if err != nil {
 		return "", nil, err
 	}
 	args = append(args, consumerArgs...)
 	args = append(args, backend.Options...)
-	return backend.Compiler, args, nil
+	exe, args := backend.wrap(args)
+	return exe, args, nil
 }
 
 func (backend Backend) CompileModuleObject(source, output string, references []modules.Reference) (string, []string, error) {
-	args := []string{"-std=" + strings.TrimPrefix(backend.Standard, "c++"), "-c", source, "-o", output}
+	args := []string{"-std=" + backend.Standard, "-MMD", "-MF", output + ".d", "-c", source, "-o", output}
 	consumerArgs, err := backend.ConsumerArgs(references)
 	if err != nil {
 		return "", nil, err
 	}
 	args = append(args, consumerArgs...)
-	return backend.Compiler, append(args, backend.Options...), nil
+	exe, args := backend.wrap(append(args, backend.Options...))
+	return exe, args, nil
 }
 
 func (backend Backend) ConsumerArgs(references []modules.Reference) ([]string, error) {

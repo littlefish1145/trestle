@@ -57,28 +57,36 @@ func (runner Runner) RunWithEvents(ctx context.Context, executable string, args 
 	if err := command.Start(); err != nil {
 		return err
 	}
-	scanner := bufio.NewScanner(stdout)
-	for scanner.Scan() {
-		line := scanner.Text()
-		if progress, ok := ParseStatus(line); ok {
+	reader := bufio.NewReader(stdout)
+	for {
+		line, readErr := reader.ReadString('\n')
+		if readErr != nil && readErr != io.EOF {
+			_ = command.Wait()
+			return readErr
+		}
+		if line == "" && readErr == io.EOF {
+			break
+		}
+		text := strings.TrimSuffix(strings.TrimSuffix(line, "\n"), "\r")
+		if progress, ok := ParseStatus(text); ok {
 			if sink != nil {
 				sink.Progress(progress)
 			}
-			if detail := StatusDetail(line); detail != "" && sink != nil {
+			if detail := StatusDetail(text); detail != "" && sink != nil {
 				sink.Output("stdout", detail+"\n")
 			}
 			continue
 		}
 		if sink != nil {
-			sink.Output("stdout", line+"\n")
+			sink.Output("stdout", line)
 		} else if options.Stdout != nil {
-			fmt.Fprintln(options.Stdout, line)
+			_, _ = io.WriteString(options.Stdout, line)
+		}
+		if readErr == io.EOF {
+			break
 		}
 	}
 	waitErr := command.Wait()
-	if scanner.Err() != nil {
-		return scanner.Err()
-	}
 	if waitErr != nil {
 		return fmt.Errorf("E_NINJA_FAILED: %w", waitErr)
 	}

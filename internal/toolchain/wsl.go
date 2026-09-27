@@ -118,6 +118,25 @@ func WSLPath(ctx context.Context, distribution, path string) (string, error) {
 	return converted, nil
 }
 
+func WSLWindowsPath(ctx context.Context, distribution, path string) (string, error) {
+	wsl, base, err := WSLRunner(distribution)
+	if err != nil {
+		return "", err
+	}
+	args := append(append([]string{}, base...), "--exec", "wslpath", "-w", path)
+	out, err := exec.CommandContext(ctx, wsl, args...).Output()
+	if err != nil {
+		return "", fmt.Errorf("convert Linux path %q to Windows: %w", path, err)
+	}
+	for _, line := range strings.Split(strings.ReplaceAll(string(out), "\x00", ""), "\n") {
+		line = strings.TrimSpace(line)
+		if filepath.VolumeName(line) != "" {
+			return filepath.Clean(line), nil
+		}
+	}
+	return "", fmt.Errorf("convert Linux path %q to Windows: wslpath returned no Windows path", path)
+}
+
 func parseWSLPath(output []byte) string {
 	// Some Windows/WSL combinations emit a UTF-16 startup warning before the
 	// actual UTF-8 command output. Only a single absolute Linux path is valid.

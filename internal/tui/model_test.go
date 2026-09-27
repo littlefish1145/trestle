@@ -107,6 +107,49 @@ func TestDashboardKeepsCompleteInstallLogAndSupportsMouseScroll(t *testing.T) {
 	}
 }
 
+func TestDashboardBuildLogFollowsAndKeepsScrolledHistory(t *testing.T) {
+	model := newDashboard("trestle.toml", Services{})
+	model.width, model.height, model.probing = 100, 20, false
+	model.route, model.workflowRoute, model.focus, model.logFollow = BuildRoute, BuildRoute, focusContent, true
+	for i := 0; i < 100; i++ {
+		updated, _ := model.Update(workflowEvent{label: "Build", line: fmt.Sprintf("line %03d", i)})
+		model = updated.(dashboardModel)
+	}
+	if len(model.workflowLog) != 100 || model.scroll != model.maxContentScroll() {
+		t.Fatalf("log did not follow output: lines=%d scroll=%d max=%d", len(model.workflowLog), model.scroll, model.maxContentScroll())
+	}
+	if !strings.Contains(ansi.Strip(model.View().Content), "line 099") {
+		t.Fatal("latest output is not visible")
+	}
+	model.scrollContent(-10000)
+	if model.logFollow || model.scroll != 0 {
+		t.Fatal("manual scroll did not pause log following")
+	}
+	updated, _ := model.Update(workflowEvent{label: "Build", line: "line 100"})
+	model = updated.(dashboardModel)
+	if model.scroll != 0 || len(model.workflowLog) != 101 {
+		t.Fatal("new output displaced the reader from earlier log lines")
+	}
+	updated, _ = model.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnd}))
+	model = updated.(dashboardModel)
+	if !model.logFollow || model.scroll != model.maxContentScroll() {
+		t.Fatal("End did not resume following the log")
+	}
+}
+
+func TestDashboardHardWrapsUnbrokenLogLines(t *testing.T) {
+	line := strings.Repeat("x", 1000) + "TAIL"
+	parts := appendWrappedLog(nil, newPalette().muted, line, 50)
+	if len(parts) < 20 || !strings.Contains(ansi.Strip(parts[len(parts)-1]), "TAIL") {
+		t.Fatalf("unbroken log was clipped: %d rows, tail %q", len(parts), ansi.Strip(parts[len(parts)-1]))
+	}
+	for _, part := range parts {
+		if ansi.StringWidth(part) > 50 {
+			t.Fatalf("wrapped log row is too wide: %d", ansi.StringWidth(part))
+		}
+	}
+}
+
 func TestDashboardTestFileViewMapsBackToJob(t *testing.T) {
 	model := newDashboard("trestle.toml", Services{})
 	model.probing = false

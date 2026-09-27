@@ -155,6 +155,7 @@ type dashboardModel struct {
 	pulse          int
 	cursor         int
 	scroll         int
+	logFollow      bool
 	lastRun        string
 	message        string
 	messageError   bool
@@ -168,6 +169,7 @@ type dashboardModel struct {
 	installLog     []string
 	installCancel  context.CancelFunc
 	workflowEvents chan workflowEvent
+	workflowRoute  Route
 	workflowCancel context.CancelFunc
 	workflowLog    []string
 	workflowErrors []string
@@ -275,6 +277,9 @@ func (model dashboardModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	switch value := message.(type) {
 	case tea.WindowSizeMsg:
 		model.width, model.height = value.Width, value.Height
+		if model.logFollow && model.routeHasLog() {
+			model.scroll = model.maxContentScroll()
+		}
 	case pulseMessage:
 		model.pulse++
 		if model.busy() {
@@ -312,6 +317,7 @@ func (model dashboardModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	case installEvent:
 		if !value.done {
 			model.installLog = append(model.installLog, value.line)
+			model.followVisibleLog(PackagesRoute)
 			model.setMessage(value.line, false)
 			return model, waitInstallEvent(model.installEvents)
 		}
@@ -321,6 +327,7 @@ func (model dashboardModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		model.mutating, model.operation, model.installEvents, model.installCancel = false, "", nil, nil
 		if value.err != nil {
 			model.installLog = append(model.installLog, value.err.Error())
+			model.followVisibleLog(PackagesRoute)
 			model.setMessage("Install failed · "+value.err.Error(), true)
 			return model, nil
 		}
@@ -330,6 +337,7 @@ func (model dashboardModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	case workflowEvent:
 		if !value.done {
 			model.workflowLog = append(model.workflowLog, value.line)
+			model.followVisibleLog(model.workflowRoute)
 			if diagnosticLine(value.line) {
 				model.workflowErrors = append(model.workflowErrors, value.line)
 			}
@@ -342,6 +350,7 @@ func (model dashboardModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		model.mutating, model.operation, model.workflowEvents, model.workflowCancel = false, "", nil, nil
 		if value.err != nil {
 			model.workflowLog = append(model.workflowLog, value.err.Error())
+			model.followVisibleLog(model.workflowRoute)
 			model.setMessage(value.label+" failed · "+value.err.Error(), true)
 			return model, nil
 		}
@@ -459,14 +468,28 @@ func (model dashboardModel) handleKey(message tea.KeyPressMsg) (tea.Model, tea.C
 	case "down", "j":
 		model.move(1)
 	case "pgup":
-		model.move(-max(1, model.viewportHeight()/2))
+		if model.focus == focusContent && model.routeHasLog() {
+			model.scrollContent(-max(1, model.viewportHeight()/2))
+		} else {
+			model.move(-max(1, model.viewportHeight()/2))
+		}
 	case "pgdown":
-		model.move(max(1, model.viewportHeight()/2))
+		if model.focus == focusContent && model.routeHasLog() {
+			model.scrollContent(max(1, model.viewportHeight()/2))
+		} else {
+			model.move(max(1, model.viewportHeight()/2))
+		}
 	case "home":
 		model.cursor, model.scroll = 0, 0
+		model.logFollow = false
 	case "end", "G":
-		model.cursor = max(0, model.itemCount()-1)
-		model.keepCursorVisible()
+		if model.focus == focusContent && model.routeHasLog() {
+			model.scroll = model.maxContentScroll()
+			model.logFollow = true
+		} else {
+			model.cursor = max(0, model.itemCount()-1)
+			model.keepCursorVisible()
+		}
 	case "b":
 		if model.route == ReleaseRoute {
 			return model.startRelease()
@@ -955,6 +978,7 @@ func (model dashboardModel) installPackage(name string) (tea.Model, tea.Cmd) {
 	installCtx, cancel := context.WithCancel(context.Background())
 	model.mutating, model.operation = true, "Installing "+name
 	model.installEvents, model.installLog, model.installCancel = events, nil, cancel
+	model.logFollow, model.scroll = true, 0
 	model.setMessage("Preparing vcpkg install for "+name+"…", false)
 	start := func() tea.Msg {
 		go func() {
@@ -993,6 +1017,8 @@ func (model dashboardModel) startWorkflow(label string, action func(context.Cont
 	workflowCtx, cancel := context.WithCancel(context.Background())
 	model.mutating, model.operation = true, label
 	model.workflowEvents, model.workflowLog, model.workflowErrors, model.workflowCancel = events, nil, nil, cancel
+	model.workflowRoute = model.route
+	model.logFollow, model.scroll = true, 0
 	model.setMessage(label+"…", false)
 	start := func() tea.Msg {
 		go func() {
@@ -1197,6 +1223,9 @@ func (model *dashboardModel) selectRoute(index int) {
 		return
 	}
 	model.route, model.cursor, model.scroll = routes[index], 0, 0
+	if model.logFollow && model.routeHasLog() {
+		model.scroll = model.maxContentScroll()
+	}
 }
 
 func (model *dashboardModel) move(delta int) {
@@ -1267,11 +1296,37 @@ func (model dashboardModel) itemCount() int {
 func (model dashboardModel) viewportHeight() int { return max(5, model.height-10) }
 
 func (model *dashboardModel) scrollContent(delta int) {
+	maximum := model.maxContentScroll()
+	model.scroll = min(max(model.scroll+delta, 0), maximum)
+	if model.routeHasLog() {
+		model.logFollow = model.scroll == maximum
+	}
+}
+
+func (model dashboardModel) maxContentScroll() int {
 	width := model.contentWidth()
 	lines := model.contentLines(newPalette(), max(18, width-4))
 	viewport := max(1, model.viewportHeight()-2)
-	maximum := max(0, len(lines)-viewport)
-	model.scroll = min(max(model.scroll+delta, 0), maximum)
+	if model.width < 86 {
+		viewport = max(1, viewport-1)
+	}
+	return max(0, len(lines)-viewport)
+}
+
+func (model dashboardModel) routeHasLog() bool {
+	switch model.route {
+	case PackagesRoute:
+		return len(model.installLog) > 0
+	case BuildRoute, TestsRoute, ImportRoute, ReleaseRoute:
+		return len(model.workflowLog) > 0
+	}
+	return false
+}
+
+func (model *dashboardModel) followVisibleLog(route Route) {
+	if model.logFollow && model.route == route && model.routeHasLog() {
+		model.scroll = model.maxContentScroll()
+	}
 }
 
 func (model dashboardModel) contentWidth() int {
@@ -1961,8 +2016,16 @@ func (model dashboardModel) shortcutLine(p palette, width int) string {
 }
 
 func appendWrappedLog(lines []string, style lipgloss.Style, line string, width int) []string {
-	for _, part := range strings.Split(ansi.Wrap(line, max(12, width-3), " "), "\n") {
-		lines = append(lines, style.Render("  "+part))
+	limit := max(12, width-3)
+	for _, part := range strings.Split(ansi.Wrap(line, limit, " "), "\n") {
+		length := ansi.StringWidth(part)
+		if length == 0 {
+			lines = append(lines, style.Render("  "))
+			continue
+		}
+		for start := 0; start < length; start += limit {
+			lines = append(lines, style.Render("  "+ansi.Cut(part, start, min(length, start+limit))))
+		}
 	}
 	return lines
 }

@@ -45,3 +45,16 @@ func TestProgressWriterGroupsCompileFailure(t *testing.T) {
 		t.Fatalf("diagnostic was not grouped: %#v", w.diagnostics)
 	}
 }
+
+func TestProgressWriterPreservesCompleteDiagnostics(t *testing.T) {
+	var lines []string
+	writer := &progressWriter{callback: func(line string) { lines = append(lines, line) }}
+	input := "  indented compiler note\nwsl: startup warning\nNote: including file: generated.hpp\n"
+	if _, err := writer.Write([]byte(input)); err != nil {
+		t.Fatal(err)
+	}
+	writer.Flush()
+	if len(lines) != 3 || lines[0] != "  indented compiler note" || lines[1] != "wsl: startup warning" || lines[2] != "Note: including file: generated.hpp" {
+		t.Fatalf("lost build output: %#v", lines)
+	}
+}

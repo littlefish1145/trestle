@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -185,12 +186,23 @@ func (client Client) InstallWithProgress(ctx context.Context, ports []string, tr
 	}
 	var wait sync.WaitGroup
 	var callbackLock sync.Mutex
+	readErrors := make(chan error, 2)
 	outputLines := make([]string, 0, 128)
-	read := func(scanner *bufio.Scanner) {
+	read := func(reader *bufio.Reader) {
 		defer wait.Done()
-		for scanner.Scan() {
-			line := strings.TrimSpace(scanner.Text())
+		for {
+			text, readErr := reader.ReadString('\n')
+			line := strings.TrimRight(text, "\r\n")
 			if line == "" {
+				if readErr == io.EOF {
+					return
+				}
+				if readErr != nil {
+					if readErr != io.EOF {
+						readErrors <- readErr
+					}
+					return
+				}
 				continue
 			}
 			callbackLock.Lock()
@@ -199,13 +211,24 @@ func (client Client) InstallWithProgress(ctx context.Context, ports []string, tr
 				progress(line)
 			}
 			callbackLock.Unlock()
+			if readErr != nil {
+				if readErr != io.EOF {
+					readErrors <- readErr
+				}
+				return
+			}
 		}
 	}
 	wait.Add(2)
-	go read(bufio.NewScanner(stdout))
-	go read(bufio.NewScanner(stderr))
+	go read(bufio.NewReader(stdout))
+	go read(bufio.NewReader(stderr))
 	wait.Wait()
-	if err := command.Wait(); err != nil {
+	close(readErrors)
+	commandErr := command.Wait()
+	for readErr := range readErrors {
+		return fmt.Errorf("E_VCPKG_INSTALL: read output: %w", readErr)
+	}
+	if err := commandErr; err != nil {
 		callbackLock.Lock()
 		detail := strings.Join(outputLines, "\n")
 		callbackLock.Unlock()

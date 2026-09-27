@@ -16,19 +16,21 @@ import (
 )
 
 type ModuleInfo struct {
-	Artifact string
-	Provides []string
-	Requires []modules.Reference
+	Artifact   string
+	Provides   []string
+	Requires   []modules.Reference
+	HeaderDeps []string
 }
 
 type Options struct {
-	Root          string
-	BuildDir      string
-	Toolchain     toolchain.Toolchain
-	CUDA          *cuda.Toolchain
-	Vulkan        *vulkan.SDK
-	Modules       map[string]ModuleInfo
-	ModuleBackend modules.Support
+	Root           string
+	BuildDir       string
+	Toolchain      toolchain.Toolchain
+	CUDA           *cuda.Toolchain
+	Vulkan         *vulkan.SDK
+	Modules        map[string]ModuleInfo
+	ModuleBackend  modules.Support
+	ModuleBackends map[string]modules.Support
 }
 
 func Build(cfg config.Config, project model.ResolvedProject, options Options) (BuildPlan, error) {
@@ -106,30 +108,41 @@ func Build(cfg config.Config, project model.ResolvedProject, options Options) (B
 				cxxStandard = target.CXXStandard
 			}
 			if moduleInfo, ok := options.Modules[source]; ok {
-				if options.ModuleBackend == nil {
+				backend := options.ModuleBackend
+				if specific := options.ModuleBackends[source]; specific != nil {
+					backend = specific
+				}
+				if backend == nil {
 					return BuildPlan{}, fmt.Errorf("E_MODULE_BACKEND_MISSING: module source %s has no backend", source)
 				}
-				consumerArgs, err := options.ModuleBackend.ConsumerArgs(moduleInfo.Requires)
+				consumerArgs, err := backend.ConsumerArgs(moduleInfo.Requires)
 				if err != nil {
 					return BuildPlan{}, err
 				}
 				optionsForCompile = append(optionsForCompile, consumerArgs...)
-				moduleOutput := relative(options.Root, buildDir, moduleInfo.Artifact)
-				moduleInput := []string{relativeSource}
-				for _, reference := range moduleInfo.Requires {
-					moduleInput = append(moduleInput, reference.Path)
+				if moduleInfo.Artifact != "" {
+					moduleOutput := relative(options.Root, buildDir, moduleInfo.Artifact)
+					moduleInput := []string{relativeSource}
+					moduleImplicit := relativeAll(options.Root, buildDir, moduleInfo.HeaderDeps)
+					for _, reference := range moduleInfo.Requires {
+						moduleImplicit = append(moduleImplicit, reference.Path)
+					}
+					moduleExe, moduleArgs, err := backend.CompileModule(relativeSource, moduleOutput, moduleInfo.Requires)
+					if err != nil {
+						return BuildPlan{}, err
+					}
+					result.Actions = append(result.Actions, Action{ID: ActionID("module", string(target.ID), sourceID(source)), Rule: ActionID("module", string(target.ID), sourceID(source)), Command: Command{Exe: moduleExe, Args: moduleArgs}, Inputs: moduleInput, Implicit: moduleImplicit, Outputs: []string{moduleOutput}, Pool: "compile_pool"})
 				}
-				moduleExe, moduleArgs, err := options.ModuleBackend.CompileModule(relativeSource, moduleOutput, moduleInfo.Requires)
-				if err != nil {
-					return BuildPlan{}, err
-				}
-				result.Actions = append(result.Actions, Action{ID: ActionID("module", string(target.ID), sourceID(source)), Rule: ActionID("module", string(target.ID), sourceID(source)), Command: Command{Exe: moduleExe, Args: moduleArgs}, Inputs: moduleInput, Outputs: []string{moduleOutput}, Pool: "compile_pool"})
 			}
 			var exe string
 			var args []string
 			var err error
 			if moduleInfo, ok := options.Modules[source]; ok {
-				if objectCompiler, supported := options.ModuleBackend.(modules.ObjectCompiler); supported {
+				backend := options.ModuleBackend
+				if specific := options.ModuleBackends[source]; specific != nil {
+					backend = specific
+				}
+				if objectCompiler, supported := backend.(modules.ObjectCompiler); supported {
 					exe, args, err = objectCompiler.CompileModuleObject(relativeSource, relativeObject, moduleInfo.Requires)
 				}
 			}
@@ -166,8 +179,13 @@ func Build(cfg config.Config, project model.ResolvedProject, options Options) (B
 			} else {
 				action.Depfile = &DepfileSpec{Path: relativeObject + ".d"}
 			}
-			if moduleInfo, ok := options.Modules[source]; ok {
+			if moduleInfo, ok := options.Modules[source]; ok && moduleInfo.Artifact != "" {
 				action.Implicit = append(action.Implicit, relative(options.Root, buildDir, moduleInfo.Artifact))
+			}
+			if moduleInfo, ok := options.Modules[source]; ok {
+				for _, reference := range moduleInfo.Requires {
+					action.Implicit = append(action.Implicit, reference.Path)
+				}
 			}
 			if len(options.Toolchain.Env) > 0 {
 				action.Command.Env = options.Toolchain.Env

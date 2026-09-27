@@ -1088,6 +1088,10 @@ func Toolchains(ctx context.Context) error {
 }
 
 func Generate(path string) (BuildResult, error) {
+	return GenerateWithContext(context.Background(), path)
+}
+
+func GenerateWithContext(ctx context.Context, path string) (BuildResult, error) {
 	cfg, err := ensureProjectConfig(path)
 	if err != nil {
 		return BuildResult{}, err
@@ -1111,10 +1115,13 @@ func Generate(path string) (BuildResult, error) {
 		return BuildResult{}, err
 	}
 	manifestDir := filepath.Join(buildRoot, cfg.Build.Profile)
+	if err := os.MkdirAll(manifestDir, 0o755); err != nil {
+		return BuildResult{}, err
+	}
 	var tc toolchain.Toolchain
 	if hasNonShader {
 		var err error
-		tc, err = detectConfigured(context.Background(), cfg)
+		tc, err = detectConfigured(ctx, cfg)
 		if err != nil {
 			return BuildResult{}, err
 		}
@@ -1129,7 +1136,7 @@ func Generate(path string) (BuildResult, error) {
 		tc.Linker = cfg.Toolchain.Linker
 	}
 	if cfg.Toolchain.Mode == "wsl" && hasNonShader {
-		linuxDir, pathErr := toolchain.WSLPath(context.Background(), cfg.Toolchain.WSLDistribution, manifestDir)
+		linuxDir, pathErr := toolchain.WSLPath(ctx, cfg.Toolchain.WSLDistribution, manifestDir)
 		if pathErr != nil {
 			return BuildResult{}, pathErr
 		}
@@ -1217,6 +1224,7 @@ func Generate(path string) (BuildResult, error) {
 	}
 	moduleInfos := map[string]plan.ModuleInfo{}
 	var moduleBackend modules.Support
+	moduleBackends := map[string]modules.Support{}
 	if cfg.Build.Modules {
 		if tc.Kind != toolchain.Clang {
 			return BuildResult{}, fmt.Errorf("E_MODULE_BACKEND_UNSUPPORTED: modules currently require a Clang toolchain")
@@ -1225,18 +1233,87 @@ func Generate(path string) (BuildResult, error) {
 		if scannerPath == "" {
 			scannerPath = os.Getenv("CLANG_SCAN_DEPS")
 		}
-		scanner := modules.CommandScanner{Compiler: tc.CXX, Scanner: scannerPath, Standard: cfg.Build.CXXStandard, Options: cfg.Build.CompileFlags, Cache: modules.NewCache(filepath.Join(buildRoot, cfg.Build.Profile))}
+		if scannerPath == "" {
+			if tc.Runner != "" {
+				scannerPath, err = toolchain.WSLExecutable(ctx, cfg.Toolchain.WSLDistribution, "clang-scan-deps")
+			} else {
+				scannerPath, err = exec.LookPath("clang-scan-deps")
+			}
+			if err != nil {
+				return BuildResult{}, fmt.Errorf("E_MODULE_SCAN_FAILED: clang-scan-deps was not found: %w", err)
+			}
+		}
+		if tc.Runner != "" && filepath.VolumeName(scannerPath) != "" {
+			return BuildResult{}, fmt.Errorf("E_MODULE_SCAN_FAILED: WSL requires a Linux clang-scan-deps path, got %q", scannerPath)
+		}
 		documents := make([]p1689.Document, 0)
 		bySource := make(map[string]p1689.Document)
+		scanKeysBySource := make(map[string]modules.ScanKey)
+		headerDepsBySource := make(map[string][]string)
 		for _, target := range project.Targets {
 			for _, source := range target.Sources {
-				if filepath.Ext(source) == ".cppm" || filepath.Ext(source) == ".ixx" {
-					scan, err := scanner.Scan(context.Background(), source)
+				if moduleScannableSource(source) {
+					standard := cfg.Build.CXXStandard
+					if target.CXXStandard != "" {
+						standard = target.CXXStandard
+					}
+					options := append(append(append([]string{}, cfg.Build.CompileFlags...), cfg.Build.CXXFlags...), target.CompileSelf.Options...)
+					if target.Type == model.SharedLibrary && !hasPICOption(options) {
+						options = append(options, "-fPIC")
+					}
+					localDirs := make([]string, 0, len(target.CompileSelf.IncludeDirs))
+					for _, include := range target.CompileSelf.IncludeDirs {
+						absolute := include
+						if !filepath.IsAbs(absolute) {
+							absolute = filepath.Join(root, absolute)
+						}
+						localDirs = append(localDirs, absolute)
+						relative, relErr := filepath.Rel(manifestDir, absolute)
+						if relErr != nil {
+							relative = absolute
+						}
+						options = append(options, "-I"+filepath.ToSlash(relative))
+					}
+					for _, define := range target.CompileSelf.Defines {
+						options = append(options, "-D"+define)
+					}
+					localOptions := append([]string{}, options...)
+					if tc.Runner != "" {
+						options, err = mapWSLModuleOptions(ctx, cfg.Toolchain.WSLDistribution, manifestDir, options)
+						if err != nil {
+							return BuildResult{}, err
+						}
+					}
+					scanner := modules.CommandScanner{Compiler: tc.CXX, Scanner: scannerPath, Standard: standard, Options: options, Cache: modules.NewCache(manifestDir), Directory: manifestDir, Runner: tc.Runner, RunnerArgs: tc.RunnerArgs, HeaderDirs: localDirs, LocalOptions: localOptions}
+					if tc.Runner != "" {
+						scanner.PathMapper = func(ctx context.Context, path string) (string, error) {
+							return toolchain.WSLPath(ctx, cfg.Toolchain.WSLDistribution, path)
+						}
+						scanner.DependencyMapper = func(ctx context.Context, path string) (string, error) {
+							return toolchain.WSLWindowsPath(ctx, cfg.Toolchain.WSLDistribution, path)
+						}
+					}
+					scan, err := scanner.Scan(ctx, source)
 					if err != nil {
 						return BuildResult{}, err
 					}
-					documents = append(documents, scan.Document)
+					if previous, exists := scanKeysBySource[source]; exists && previous != scan.Key && (hasModuleEdges(bySource[source]) || hasModuleEdges(scan.Document)) {
+						return BuildResult{}, fmt.Errorf("E_MODULE_SCAN_CONFLICT: %s is used by multiple targets with different module compile options", source)
+					}
+					moduleBackends[source] = clang.Backend{Compiler: tc.CXX, Scanner: scannerPath, Standard: standard, Options: options, Runner: tc.Runner, RunnerArgs: tc.RunnerArgs}
+					if _, exists := scanKeysBySource[source]; !exists {
+						documents = append(documents, scan.Document)
+					}
+					scanKeysBySource[source] = scan.Key
 					bySource[source] = scan.Document
+					headerDepsBySource[source] = scan.HeaderDeps
+					if !scan.Complete {
+						stamp := filepath.Join(manifestDir, "modules", "stamps", moduleArtifactName(source)+".stamp")
+						if err := fsx.AtomicWrite(stamp, []byte(time.Now().UTC().Format(time.RFC3339Nano))); err != nil {
+							return BuildResult{}, err
+						}
+						headerDepsBySource[source] = append(headerDepsBySource[source], stamp)
+					}
 				}
 			}
 		}
@@ -1250,14 +1327,19 @@ func Generate(path string) (BuildResult, error) {
 		for source, document := range bySource {
 			for _, rule := range document.Rules {
 				for _, provided := range rule.Provides {
-					providerArtifacts[provided.Key().String()] = artifactFor(source)
+					artifact, relErr := filepath.Rel(manifestDir, artifactFor(source))
+					if relErr != nil {
+						return BuildResult{}, relErr
+					}
+					providerArtifacts[provided.Key().String()] = filepath.ToSlash(artifact)
 				}
 			}
 		}
 		for source, document := range bySource {
-			info := plan.ModuleInfo{Artifact: artifactFor(source)}
+			info := plan.ModuleInfo{HeaderDeps: headerDepsBySource[source]}
 			for _, rule := range document.Rules {
 				for _, provided := range rule.Provides {
+					info.Artifact = artifactFor(source)
 					info.Provides = append(info.Provides, provided.LogicalName)
 				}
 				for _, required := range rule.Requires {
@@ -1268,11 +1350,13 @@ func Generate(path string) (BuildResult, error) {
 					info.Requires = append(info.Requires, modules.Reference{LogicalName: required.LogicalName, Path: artifact})
 				}
 			}
-			moduleInfos[source] = info
+			if len(info.Provides) > 0 || len(info.Requires) > 0 {
+				moduleInfos[source] = info
+			}
 		}
-		moduleBackend = clang.Backend{Compiler: tc.CXX, Scanner: scannerPath, Standard: cfg.Build.CXXStandard, Options: cfg.Build.CompileFlags}
+		moduleBackend = clang.Backend{Compiler: tc.CXX, Scanner: scannerPath, Standard: cfg.Build.CXXStandard, Runner: tc.Runner, RunnerArgs: tc.RunnerArgs}
 	}
-	options := plan.Options{Root: root, BuildDir: buildRoot, Toolchain: tc, CUDA: cudaToolchain, Vulkan: vulkanSDK, Modules: moduleInfos, ModuleBackend: moduleBackend}
+	options := plan.Options{Root: root, BuildDir: buildRoot, Toolchain: tc, CUDA: cudaToolchain, Vulkan: vulkanSDK, Modules: moduleInfos, ModuleBackend: moduleBackend, ModuleBackends: moduleBackends}
 	buildPlan, err := plan.Build(cfg, project, options)
 	if err != nil {
 		return BuildResult{}, err
@@ -1413,7 +1497,7 @@ func BuildTargetsWithProgress(ctx context.Context, path string, targets []string
 	if err != nil {
 		return err
 	}
-	result, err := Generate(path)
+	result, err := GenerateWithContext(ctx, path)
 	if err != nil {
 		return err
 	}
@@ -1696,13 +1780,7 @@ func (writer *progressWriter) Flush() {
 }
 
 func (writer *progressWriter) emit(data []byte) {
-	line := strings.TrimSpace(decodeConsoleOutput(data))
-	if strings.HasPrefix(strings.ToLower(line), "wsl:") {
-		return
-	}
-	if strings.HasPrefix(line, "Note: including file:") || strings.HasPrefix(line, "注意: 包含文件:") {
-		return
-	}
+	line := strings.TrimRight(decodeConsoleOutput(data), "\r\n")
 	writer.observe(line)
 	if writer.callback != nil && line != "" {
 		writer.callback(line)
