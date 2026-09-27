@@ -27,6 +27,7 @@ import (
 	"trestle/internal/modules/p1689"
 	"trestle/internal/ninja"
 	"trestle/internal/plan"
+	"trestle/internal/policy"
 	"trestle/internal/runner"
 	"trestle/internal/sdk/vulkan"
 	"trestle/internal/state"
@@ -1096,6 +1097,14 @@ func GenerateWithContext(ctx context.Context, path string) (BuildResult, error) 
 	if err != nil {
 		return BuildResult{}, err
 	}
+	cfg, err = policy.Apply(ctx, cfg)
+	if err != nil {
+		return BuildResult{}, err
+	}
+	return generateWithConfig(ctx, path, cfg)
+}
+
+func generateWithConfig(ctx context.Context, path string, cfg config.Config) (BuildResult, error) {
 	project, err := graph.Resolve(cfg)
 	if err != nil {
 		return BuildResult{}, err
@@ -1489,7 +1498,15 @@ func BuildWithProgress(ctx context.Context, path string, progress func(string)) 
 }
 
 func BuildTargetsWithProgress(ctx context.Context, path string, targets []string, all bool, progress func(string)) error {
+	return BuildTargetsWithOptions(ctx, path, targets, all, false, progress)
+}
+
+func BuildTargetsWithOptions(ctx context.Context, path string, targets []string, all, force bool, progress func(string)) error {
 	cfg, err := config.Load(path)
+	if err != nil {
+		return err
+	}
+	cfg, err = policy.Apply(ctx, cfg)
 	if err != nil {
 		return err
 	}
@@ -1497,7 +1514,14 @@ func BuildTargetsWithProgress(ctx context.Context, path string, targets []string
 	if err != nil {
 		return err
 	}
-	result, err := GenerateWithContext(ctx, path)
+	if !force {
+		if err := policy.CheckSelected(policy.Assess(ctx, cfg), selected); err != nil {
+			return err
+		}
+	} else if progress != nil {
+		progress("Force build: target availability checks bypassed")
+	}
+	result, err := generateWithConfig(ctx, path, cfg)
 	if err != nil {
 		return err
 	}

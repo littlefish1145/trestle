@@ -11,7 +11,7 @@ func TestMigrateV1(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(migrated), "schema_version = 5") || !strings.Contains(string(migrated), "[build]") || !strings.Contains(string(migrated), "cuda_execution = \"native\"") {
+	if !strings.Contains(string(migrated), "schema_version = 6") || !strings.Contains(string(migrated), "[build]") || !strings.Contains(string(migrated), "cuda_execution = \"native\"") {
 		t.Fatalf("unexpected migration: %s", migrated)
 	}
 }
@@ -23,7 +23,7 @@ func TestMigrateV4AddsSDKExecutionModes(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := string(migrated)
-	if !strings.Contains(text, "schema_version = 5") || !strings.Contains(text, "cuda_execution = \"native\"") || !strings.Contains(text, "vulkan_execution = \"native\"") {
+	if !strings.Contains(text, "schema_version = 6") || !strings.Contains(text, "cuda_execution = \"native\"") || !strings.Contains(text, "vulkan_execution = \"native\"") {
 		t.Fatalf("unexpected migration: %s", migrated)
 	}
 }

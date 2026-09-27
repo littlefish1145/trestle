@@ -14,7 +14,10 @@ var migrations = map[int]migration{
 	2: migrateV2ToV3,
 	3: migrateV3ToV4,
 	4: migrateV4ToV5,
+	5: migrateV5ToV6,
 }
+
+func migrateV5ToV6(document map[string]any) error { return nil }
 
 func Migrate(data []byte) ([]byte, error) {
 	var document map[string]any

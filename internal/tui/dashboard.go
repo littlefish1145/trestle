@@ -16,6 +16,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 	"trestle/internal/config"
 	"trestle/internal/deps/vcpkg"
+	"trestle/internal/policy"
 	"trestle/internal/sdk/vulkan"
 	"trestle/internal/toolchain"
 )
@@ -26,6 +27,9 @@ type TargetBuildFunc func(context.Context, []string, bool, func(string)) error
 type Services struct {
 	Build             BuildFunc
 	BuildTargets      TargetBuildFunc
+	BuildTargetsForce TargetBuildFunc
+	AssessTargets     func(context.Context) (config.Config, map[string]policy.Status, error)
+	RunTask           func(context.Context, string, config.Task, func(string)) error
 	AddPackage        func(string) error
 	InstallPackage    func(context.Context, string, func(string)) error
 	SetProfile        func(string) error
@@ -71,6 +75,7 @@ type Route string
 const (
 	OverviewRoute     Route = "Overview"
 	TargetsRoute      Route = "Targets"
+	TasksRoute        Route = "Tasks"
 	DependenciesRoute Route = "Dependencies"
 	ToolchainsRoute   Route = "Toolchains"
 	PresetsRoute      Route = "Compiler Presets"
@@ -83,10 +88,10 @@ const (
 	SettingsRoute     Route = "Settings"
 )
 
-var routes = []Route{OverviewRoute, TargetsRoute, DependenciesRoute, ToolchainsRoute, PresetsRoute, ImportRoute, PackagesRoute, TestsRoute, BuildRoute, ReleaseRoute, DoctorRoute, SettingsRoute}
+var routes = []Route{OverviewRoute, TargetsRoute, TasksRoute, DependenciesRoute, ToolchainsRoute, PresetsRoute, ImportRoute, PackagesRoute, TestsRoute, BuildRoute, ReleaseRoute, DoctorRoute, SettingsRoute}
 
 var routeGlyph = map[Route]string{
-	OverviewRoute: "⌂", TargetsRoute: "▦", DependenciesRoute: "◇", ToolchainsRoute: "⚙",
+	OverviewRoute: "⌂", TargetsRoute: "▦", TasksRoute: "⌘", DependenciesRoute: "◇", ToolchainsRoute: "⚙",
 	PresetsRoute: "◫", ImportRoute: "⇣", PackagesRoute: "⬡", TestsRoute: "✓", BuildRoute: "▶", ReleaseRoute: "◆", DoctorRoute: "✚", SettingsRoute: "≡",
 }
 
@@ -99,6 +104,7 @@ const (
 
 type probeMessage struct {
 	Config       config.Config
+	Statuses     map[string]policy.Status
 	ProjectName  string
 	Sources      int
 	Targets      int
@@ -139,41 +145,43 @@ type workflowEvent struct {
 }
 
 type dashboardModel struct {
-	path           string
-	services       Services
-	config         config.Config
-	probe          probeMessage
-	route          Route
-	focus          focusArea
-	width          int
-	height         int
-	probing        bool
-	building       bool
-	searching      bool
-	mutating       bool
-	operation      string
-	pulse          int
-	cursor         int
-	scroll         int
-	logFollow      bool
-	lastRun        string
-	message        string
-	messageError   bool
-	help           bool
-	inputMode      bool
-	inputText      string
-	inputKind      string
-	inputPackage   string
-	packageResults []vcpkg.Port
-	installEvents  chan installEvent
-	installLog     []string
-	installCancel  context.CancelFunc
-	workflowEvents chan workflowEvent
-	workflowRoute  Route
-	workflowCancel context.CancelFunc
-	workflowLog    []string
-	workflowErrors []string
-	testFileMode   bool
+	path            string
+	services        Services
+	config          config.Config
+	probe           probeMessage
+	route           Route
+	focus           focusArea
+	width           int
+	height          int
+	probing         bool
+	building        bool
+	searching       bool
+	mutating        bool
+	operation       string
+	pulse           int
+	cursor          int
+	scroll          int
+	logFollow       bool
+	lastRun         string
+	message         string
+	messageError    bool
+	help            bool
+	inputMode       bool
+	inputText       string
+	inputKind       string
+	inputPackage    string
+	packageResults  []vcpkg.Port
+	installEvents   chan installEvent
+	installLog      []string
+	installCancel   context.CancelFunc
+	workflowEvents  chan workflowEvent
+	workflowRoute   Route
+	workflowCancel  context.CancelFunc
+	workflowLog     []string
+	workflowErrors  []string
+	testFileMode    bool
+	pendingTask     string
+	pendingTaskSpec config.Task
 }
 
 type palette struct {
@@ -221,6 +229,10 @@ func (model dashboardModel) probeCommand() tea.Cmd {
 	return func() tea.Msg {
 		cfg, err := config.Load(model.path)
 		message := probeMessage{Error: err}
+		if model.services.AssessTargets != nil {
+			cfg, message.Statuses, err = model.services.AssessTargets(context.Background())
+			message.Error = err
+		}
 		if err == nil {
 			message.Config = cfg
 			message.ProjectName = cfg.Project.Name
@@ -387,6 +399,27 @@ func (model dashboardModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 
 func (model dashboardModel) handleKey(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	key := message.Key()
+	if model.pendingTask != "" {
+		switch key.String() {
+		case "y", "enter":
+			name := model.pendingTask
+			spec := model.pendingTaskSpec
+			model.pendingTask = ""
+			model.pendingTaskSpec = config.Task{}
+			if model.services.RunTask == nil {
+				model.setMessage("Task service is unavailable", true)
+				return model, nil
+			}
+			return model.startWorkflow("Task "+name, func(ctx context.Context, progress func(string)) error {
+				return model.services.RunTask(ctx, name, spec, progress)
+			})
+		case "n", "esc", "q":
+			model.pendingTask = ""
+			model.pendingTaskSpec = config.Task{}
+			model.setMessage("Task cancelled", false)
+		}
+		return model, nil
+	}
 	if model.inputMode {
 		return model.handleInput(key)
 	}
@@ -449,6 +482,13 @@ func (model dashboardModel) handleKey(message tea.KeyPressMsg) (tea.Model, tea.C
 			}
 		} else if model.route == ImportRoute {
 			return model.startProjectImport()
+		} else if model.route == TasksRoute {
+			if name, ok := model.selectedTask(); ok {
+				model.pendingTask = name
+				model.pendingTaskSpec = model.config.Tasks[name]
+				model.setMessage("Review task and press y to run, n to cancel", false)
+			}
+			return model, nil
 		} else if model.route == TargetsRoute || model.route == BuildRoute {
 			return model.startSelectedTargetBuild()
 		} else if model.route == TestsRoute {
@@ -536,7 +576,11 @@ func (model dashboardModel) handleKey(message tea.KeyPressMsg) (tea.Model, tea.C
 			}
 		}
 	case "f":
-		if model.route == TestsRoute {
+		if model.route == TargetsRoute || model.route == BuildRoute {
+			if name, ok := model.selectedTarget(); ok {
+				return model.startForcedTargetBuild(name)
+			}
+		} else if model.route == TestsRoute {
 			model.testFileMode = !model.testFileMode
 			model.cursor, model.scroll = 0, 0
 			if model.testFileMode {
@@ -850,6 +894,23 @@ func (model dashboardModel) selectedTarget() (string, bool) {
 	return names[model.cursor], true
 }
 
+func (model dashboardModel) selectedTask() (string, bool) {
+	names := sortedTaskNames(model.config.Tasks)
+	if model.cursor < 0 || model.cursor >= len(names) {
+		return "", false
+	}
+	return names[model.cursor], true
+}
+
+func sortedTaskNames(tasks map[string]config.Task) []string {
+	names := make([]string, 0, len(tasks))
+	for name := range tasks {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
 type settingRow struct{ key, label, value string }
 
 func settingsRows(cfg config.Config) []settingRow {
@@ -943,6 +1004,17 @@ func (model dashboardModel) startSelectedTargetBuild() (tea.Model, tea.Cmd) {
 		return model, nil
 	}
 	return model.startTargetBuild([]string{name}, false, "Build "+name)
+}
+
+func (model dashboardModel) startForcedTargetBuild(name string) (tea.Model, tea.Cmd) {
+	if model.services.BuildTargetsForce == nil {
+		model.setMessage("Force-build service is unavailable", true)
+		return model, nil
+	}
+	model.route, model.focus = BuildRoute, focusContent
+	return model.startWorkflow("Force build "+name, func(ctx context.Context, progress func(string)) error {
+		return model.services.BuildTargetsForce(ctx, []string{name}, false, progress)
+	})
 }
 
 func (model dashboardModel) startTargetBuild(targets []string, all bool, label string) (tea.Model, tea.Cmd) {
@@ -1266,6 +1338,8 @@ func (model dashboardModel) itemCount() int {
 	switch model.route {
 	case TargetsRoute:
 		return len(model.config.Targets)
+	case TasksRoute:
+		return len(model.config.Tasks)
 	case DependenciesRoute:
 		count := 0
 		for _, target := range model.config.Targets {
@@ -1317,7 +1391,7 @@ func (model dashboardModel) routeHasLog() bool {
 	switch model.route {
 	case PackagesRoute:
 		return len(model.installLog) > 0
-	case BuildRoute, TestsRoute, ImportRoute, ReleaseRoute:
+	case BuildRoute, TasksRoute, TestsRoute, ImportRoute, ReleaseRoute:
 		return len(model.workflowLog) > 0
 	}
 	return false
@@ -1330,11 +1404,33 @@ func (model *dashboardModel) followVisibleLog(route Route) {
 }
 
 func (model dashboardModel) contentWidth() int {
-	if model.width < 86 {
+	if model.width < 96 {
 		return model.width
 	}
-	navWidth := min(24, max(20, model.width/5))
+	navWidth := sidebarWidth(model.width)
 	return max(30, model.width-navWidth-1)
+}
+
+func sidebarWidth(total int) int { return min(34, max(30, total/5)) }
+
+func navigationLabel(route Route) string {
+	switch route {
+	case PresetsRoute:
+		return "Presets"
+	case ImportRoute:
+		return "Import"
+	}
+	return string(route)
+}
+
+func navigationKey(index int) string {
+	if index < 9 {
+		return fmt.Sprint(index + 1)
+	}
+	if index == 9 {
+		return "0"
+	}
+	return " "
 }
 func routeIndex(route Route) int {
 	for index, item := range routes {
@@ -1353,10 +1449,10 @@ func (model dashboardModel) View() tea.View {
 	var main string
 	if model.help {
 		main = model.helpView(p, width, mainHeight)
-	} else if width < 86 {
+	} else if width < 96 {
 		main = lipgloss.JoinVertical(lipgloss.Left, model.compactNavigation(p, width), model.contentPanel(p, width, max(5, mainHeight-1)))
 	} else {
-		navWidth := min(24, max(20, width/5))
+		navWidth := sidebarWidth(width)
 		main = lipgloss.JoinHorizontal(lipgloss.Top, model.sidebar(p, navWidth, mainHeight), " ", model.contentPanel(p, max(30, width-navWidth-1), mainHeight))
 	}
 	content := lipgloss.JoinVertical(lipgloss.Left, header, main, model.statusLine(p, width), model.shortcutLine(p, width))
@@ -1425,21 +1521,15 @@ func (model dashboardModel) activityTone() string {
 func (model dashboardModel) sidebar(p palette, width, height int) string {
 	lines := []string{p.faint.Render(" WORKSPACE"), ""}
 	for index, route := range routes {
-		key := fmt.Sprint(index + 1)
-		if index == 9 {
-			key = "0"
-		} else if index > 9 {
-			key = "·"
-		}
-		label := fmt.Sprintf(" %s  %s  %s", key, routeGlyph[route], route)
+		label := fmt.Sprintf(" %s  %s  %s", navigationKey(index), routeGlyph[route], navigationLabel(route))
 		if route == model.route {
 			marker := "  "
 			if model.focus == focusNavigation {
 				marker = "▎ "
 			}
-			label = p.selected.Copy().Width(max(1, width-4)).Render(marker + label)
+			label = p.selected.Copy().Width(max(1, width-4)).Render(ansi.Truncate(marker+label, width-4, "…"))
 		} else {
-			label = p.muted.Render("   " + label)
+			label = p.muted.Render(ansi.Truncate("   "+label, width-4, "…"))
 		}
 		lines = append(lines, label)
 	}
@@ -1450,13 +1540,10 @@ func (model dashboardModel) sidebar(p palette, width, height int) string {
 func (model dashboardModel) compactNavigation(p palette, width int) string {
 	items := make([]string, 0, len(routes))
 	for index, route := range routes {
-		key := fmt.Sprint(index + 1)
-		if index == 9 {
-			key = "0"
-		} else if index > 9 {
-			key = "·"
+		label := navigationLabel(route)
+		if key := navigationKey(index); key != " " {
+			label = key + ":" + label
 		}
-		label := fmt.Sprintf("%s:%s", key, route)
 		if route == model.route {
 			label = p.selected.Render(" " + label + " ")
 		} else {
@@ -1486,6 +1573,8 @@ func (model dashboardModel) routeHeading() (string, string) {
 		return "Project overview", "live workspace snapshot"
 	case TargetsRoute:
 		return "Targets", "outputs and source sets"
+	case TasksRoute:
+		return "Tasks", "explicit commands and configuration edits"
 	case DependenciesRoute:
 		return "Dependency graph", "target and package edges"
 	case ToolchainsRoute:
@@ -1519,6 +1608,8 @@ func (model dashboardModel) contentLines(p palette, width int) []string {
 		return model.overviewLines(p, width)
 	case TargetsRoute:
 		return model.targetLines(p, width)
+	case TasksRoute:
+		return model.taskLines(p, width)
 	case DependenciesRoute:
 		return model.dependencyLines(p, width)
 	case ToolchainsRoute:
@@ -1592,13 +1683,17 @@ func (model dashboardModel) targetLines(p palette, width int) []string {
 	var lines []string
 	for index, name := range names {
 		target := model.config.Targets[name]
+		availability := "✓"
+		if status, ok := model.probe.Statuses[name]; ok && !status.Ready {
+			availability = "!"
+		}
 		defaultMark := " "
 		for _, item := range model.config.Build.DefaultTargets {
 			if item == name {
 				defaultMark = "★"
 			}
 		}
-		row := fmt.Sprintf("%s %-18s  %-12s  %3d sources", defaultMark, name, target.Type, len(target.Sources))
+		row := fmt.Sprintf("%s %s %-18s  %-12s  %3d sources", availability, defaultMark, name, target.Type, len(target.Sources))
 		lines = append(lines, model.selectableRow(p, index, ansi.Truncate(row, width-3, "…")))
 		if index == model.cursor && model.focus == focusContent {
 			output := target.OutputName
@@ -1606,9 +1701,49 @@ func (model dashboardModel) targetLines(p palette, width int) []string {
 				output = name
 			}
 			lines = append(lines, p.faint.Render("     output "+output+" · "+fmt.Sprint(len(target.Dependencies))+" dependencies"))
+			for _, reason := range model.probe.Statuses[name].Reasons {
+				lines = appendWrappedLog(lines, p.warning, "! "+reason, width)
+			}
 		}
 	}
-	return append(lines, "", p.faint.Render("enter build selected   d make default   a build all"))
+	return append(lines, "", p.faint.Render("enter build selected   f force selected   d make default   a build all"))
+}
+
+func (model dashboardModel) taskLines(p palette, width int) []string {
+	names := sortedTaskNames(model.config.Tasks)
+	if len(names) == 0 {
+		return emptyState(p, "No tasks configured", "Add a [tasks.<name>] section to trestle.toml.")
+	}
+	lines := []string{p.warning.Render("来源不明的 DSL 任务可能损害您的设备。仅运行可信项目中的任务。"), ""}
+	for index, name := range names {
+		task := model.config.Tasks[name]
+		lines = append(lines, model.selectableRow(p, index, ansi.Truncate(name+"  "+task.Description, width-3, "…")))
+		if index == model.cursor && model.focus == focusContent {
+			if len(task.Command) > 0 {
+				lines = appendWrappedLog(lines, p.text, "command: "+fmt.Sprintf("%q", task.Command), width)
+			}
+			keys := make([]string, 0, len(task.Set))
+			for key := range task.Set {
+				keys = append(keys, key)
+			}
+			sort.Strings(keys)
+			for _, key := range keys {
+				lines = appendWrappedLog(lines, p.muted, "set "+key+" = "+task.Set[key], width)
+			}
+		}
+	}
+	if model.pendingTask != "" {
+		lines = append(lines, "", p.warning.Render("Run "+model.pendingTask+"?  y / enter confirm · n / esc cancel"))
+	} else {
+		lines = append(lines, "", p.faint.Render("enter preview and confirm selected task"))
+	}
+	if len(model.workflowLog) > 0 && model.workflowRoute == TasksRoute {
+		lines = append(lines, "", p.faint.Render(" TASK OUTPUT"))
+		for _, line := range model.workflowLog {
+			lines = appendWrappedLog(lines, p.muted, line, width)
+		}
+	}
+	return lines
 }
 
 func (model dashboardModel) dependencyLines(p palette, width int) []string {
@@ -1822,7 +1957,16 @@ func (model dashboardModel) buildLines(p palette, width int) []string {
 	}
 	lines := []string{"", "  " + state, "", p.faint.Render(" ACTIVE PROFILE"), keyValue(p, "Profile", fallback(model.config.Build.Profile, "debug")), keyValue(p, "Default targets", fallback(strings.Join(model.config.Build.DefaultTargets, ", "), "automatic")), keyValue(p, "Build directory", fallback(model.config.Build.BuildDir, "build/{profile}")), keyValue(p, "C++ standard", fallback(model.config.Build.CXXStandard, "compiler default")), keyValue(p, "Compiler", fallback(model.config.Toolchain.CXX, "auto-detect")), "", p.faint.Render(" TARGETS · ENTER BUILDS SELECTED")}
 	for index, name := range sortedTargetNames(model.config.Targets) {
-		lines = append(lines, model.selectableRow(p, index, ansi.Truncate(name+"  "+model.config.Targets[name].Type, width-3, "…")))
+		availability := "✓"
+		if status, ok := model.probe.Statuses[name]; ok && !status.Ready {
+			availability = "!"
+		}
+		lines = append(lines, model.selectableRow(p, index, ansi.Truncate(availability+" "+name+"  "+model.config.Targets[name].Type, width-3, "…")))
+		if index == model.cursor && model.focus == focusContent {
+			for _, reason := range model.probe.Statuses[name].Reasons {
+				lines = appendWrappedLog(lines, p.warning, "! "+reason, width)
+			}
+		}
 	}
 	lines = append(lines, "", p.faint.Render(" LAST RUN"), p.text.Render(model.lastRun))
 	if len(model.workflowLog) > 0 {
@@ -1837,7 +1981,7 @@ func (model dashboardModel) buildLines(p palette, width int) []string {
 			}
 		}
 	}
-	return append(lines, "", p.muted.Render("enter selected target · b default targets · a all targets · r refresh"))
+	return append(lines, "", p.muted.Render("enter selected · f force selected · b defaults · a all · r refresh"))
 }
 
 func (model dashboardModel) releaseLines(p palette, width int) []string {
@@ -1926,6 +2070,7 @@ func (model dashboardModel) helpView(p palette, width, height int) string {
 		keyValue(p, "/", "search the official vcpkg.io index"), keyValue(p, "enter / i", "run the selected screen action"),
 		keyValue(p, "toolchains", "enter connect · e environment · c CUDA · v Vulkan"),
 		keyValue(p, "tests", "enter job/file · g group · a all · f view"), keyValue(p, "packages", "f features · a install · d remove"),
+		keyValue(p, "targets", "enter build · f force build (skip availability check)"), keyValue(p, "tasks", "enter preview · y confirm · n cancel"),
 		keyValue(p, "q", "leave Project Console"), "", p.faint.Render("Inputs: enter saves · esc cancels · ctrl+u clears · ctrl+w deletes a word"),
 	}
 	return lipgloss.NewStyle().Border(p.border).BorderForeground(lipgloss.Color("#38bdf8")).Padding(1, 2).Width(max(20, width-6)).Height(max(3, height-4)).Render(strings.Join(lines, "\n"))
@@ -2005,11 +2150,13 @@ func (model dashboardModel) shortcutLine(p palette, width int) string {
 	case SettingsRoute:
 		contextKeys = "↵ / e edit selected field   p profile"
 	case BuildRoute:
-		contextKeys = "↵ selected   b default   a all   p profile"
+		contextKeys = "↵ selected   f force   b default   a all"
+	case TasksRoute:
+		contextKeys = "↵ preview task   y confirm   n cancel"
 	case ReleaseRoute:
 		contextKeys = "↵ optimization   r release ZIP   t targets   o output"
 	case TargetsRoute:
-		contextKeys = "↵ build selected   d default   a all"
+		contextKeys = "↵ build selected   f force   d default   a all"
 	}
 	left, right := p.faint.Render(" "+contextKeys), p.faint.Render("? help   wheel scroll   q quit ")
 	return ansi.Truncate(left+strings.Repeat(" ", max(1, width-lipgloss.Width(left)-lipgloss.Width(right)))+right, width, "")

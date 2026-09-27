@@ -137,7 +137,7 @@ trestle build -preset dev app
 ## `trestle.toml` 示例
 
 ```toml
-schema_version = 5
+schema_version = 6
 
 [project]
 name = "hello"
@@ -184,6 +184,35 @@ targets = ["app"]
 ```
 
 目标依赖可使用 `private`、`public` 或 `interface` 作用域。目标类型包括 `static`、`shared`、`executable`、`test` 和 `shader`。
+
+### 条件规则与任务
+
+条件表达式只支持 `&&`、`||`、`!`、`==`、`!=`、括号和字符串；变量为 `os`、`arch`、`mode`，只读函数为 `tool("name")`、`wsl("发行版")`、`wsl_tool("发行版", "工具")`、`package("包名")`、`env("变量")`、`path("路径")`。规则按 TOML 顺序应用，条件为假时不改变配置。`tool()` 在当前模式下查找工具，WSL 模式会在选定发行版中查找。`package()` 检查声明的包能否解析。
+
+```toml
+[[rules]]
+when = 'os == "windows" && wsl_tool("Ubuntu", "clang++")'
+mode = "wsl"
+wsl_distribution = "Ubuntu"
+cxx = "clang++"
+
+[[rules]]
+when = 'mode == "wsl" && tool("clang++")'
+target = "app"
+compile_flags = ["-Wall"]
+packages = ["fmt"]
+
+[targets.app]
+when = 'os == "windows" || os == "linux"'
+requires_tools = ["ninja"]
+
+[tasks.prepare]
+description = "检查工具并切换 Release 配置"
+command = ["clang++", "--version"]
+set = { "build.profile" = "release", "toolchain.cxx" = "clang++" }
+```
+
+`[[rules]]` 可设置 `c`、`cxx`、`mode`、`wsl_distribution`、各类 flags、`targets`（默认目标），以及为 `target` 添加 `packages`（外部包）、`depends_on`（项目目标）依赖和 `compile_flags`。`targets.<name>` 还可设置 `requires_wsl`。Targets / Build 页面会列出不可构建原因；按 `f` 可跳过预检尝试编译，CLI 使用 `trestle build --force`。跳过预检不保证缺失工具或包时能成功。Tasks 页面按 Enter 预览完整命令和配置改动，再按 `y` 执行；任务来自不可信项目时可能损害设备。任务命令是参数数组，不会隐式通过 shell 执行。
 
 ## 项目结构
 

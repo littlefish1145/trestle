@@ -1,6 +1,6 @@
 package config
 
-const CurrentSchemaVersion = 5
+const CurrentSchemaVersion = 6
 const DefaultFileName = "trestle.toml"
 
 type Config struct {
@@ -13,6 +13,8 @@ type Config struct {
 	Targets         map[string]Target         `toml:"targets"`
 	Packages        map[string]Package        `toml:"packages"`
 	Package         PackageOutput             `toml:"package"`
+	Rules           []Rule                    `toml:"rules"`
+	Tasks           map[string]Task           `toml:"tasks"`
 }
 
 type Project struct {
@@ -77,6 +79,9 @@ type Vcpkg struct {
 }
 
 type Target struct {
+	When               string       `toml:"when"`
+	RequiresTools      []string     `toml:"requires_tools"`
+	RequiresWSL        string       `toml:"requires_wsl"`
 	Type               string       `toml:"type"`
 	Sources            []string     `toml:"sources"`
 	OutputName         string       `toml:"output_name"`
@@ -101,6 +106,30 @@ type Target struct {
 	TestGroup          string       `toml:"test_group"`
 	TestArgs           []string     `toml:"test_args"`
 	TestWorkingDir     string       `toml:"test_working_dir"`
+}
+
+// Rule applies declarative build changes when its side-effect-free condition is true.
+type Rule struct {
+	When         string   `toml:"when"`
+	Target       string   `toml:"target"`
+	C            string   `toml:"c"`
+	CXX          string   `toml:"cxx"`
+	Mode         string   `toml:"mode"`
+	WSL          string   `toml:"wsl_distribution"`
+	CompileFlags []string `toml:"compile_flags"`
+	CFlags       []string `toml:"c_flags"`
+	CXXFlags     []string `toml:"cxx_flags"`
+	LinkFlags    []string `toml:"link_flags"`
+	Packages     []string `toml:"packages"`
+	DependsOn    []string `toml:"depends_on"`
+	Targets      []string `toml:"targets"`
+}
+
+// Task is an explicitly confirmed argv command followed by whitelisted edits.
+type Task struct {
+	Description string            `toml:"description"`
+	Command     []string          `toml:"command"`
+	Set         map[string]string `toml:"set"`
 }
 
 type Dependency struct {

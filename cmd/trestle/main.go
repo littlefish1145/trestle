@@ -13,6 +13,7 @@ import (
 	"trestle/internal/config"
 	"trestle/internal/deps/vcpkg"
 	"trestle/internal/diag"
+	"trestle/internal/policy"
 	tuimodel "trestle/internal/tui"
 )
 
@@ -71,6 +72,7 @@ func run(command string, args []string) error {
 	var testJob, testGroup, testFile string
 	var releaseTargets string
 	var testAll bool
+	var force bool
 	var interactive, modulesEnabled, dashboard *bool
 	if command == "init" {
 		name = set.String("name", "", "project name")
@@ -106,6 +108,7 @@ func run(command string, args []string) error {
 			buildProfile = set.String("profile", "", "debug or release")
 			preset = set.String("preset", "", "apply a compiler preset")
 			set.BoolVar(&testAll, "all", false, "build every target")
+			set.BoolVar(&force, "force", false, "attempt unavailable targets anyway")
 		case "test":
 			set.StringVar(&testJob, "job", "", "run one test job")
 			set.StringVar(&testGroup, "group", "", "run one test group")
@@ -191,7 +194,7 @@ func run(command string, args []string) error {
 		if *dashboard && term.IsTerminal(int(os.Stdin.Fd())) {
 			return tuimodel.RunDashboard(path, dashboardServices(path))
 		}
-		return app.BuildTargetsWithProgress(context.Background(), path, set.Args(), testAll, func(line string) { fmt.Println(line) })
+		return app.BuildTargetsWithOptions(context.Background(), path, set.Args(), testAll, force, func(line string) { fmt.Println(line) })
 	case "test":
 		selection := app.TestSelection{Job: testJob, Group: testGroup, File: testFile, All: testAll || (testJob == "" && testGroup == "" && testFile == "")}
 		return app.RunTests(context.Background(), path, selection, func(line string) { fmt.Println(line) })
@@ -250,6 +253,15 @@ func dashboardServices(path string) tuimodel.Services {
 		},
 		BuildTargets: func(ctx context.Context, targets []string, all bool, progress func(string)) error {
 			return app.BuildTargetsWithProgress(ctx, path, targets, all, progress)
+		},
+		BuildTargetsForce: func(ctx context.Context, targets []string, all bool, progress func(string)) error {
+			return app.BuildTargetsWithOptions(ctx, path, targets, all, true, progress)
+		},
+		AssessTargets: func(ctx context.Context) (config.Config, map[string]policy.Status, error) {
+			return app.AssessTargets(ctx, path)
+		},
+		RunTask: func(ctx context.Context, name string, expected config.Task, progress func(string)) error {
+			return app.ExecuteTaskExpected(ctx, path, name, expected, progress)
 		},
 		AddPackage: func(name string) error { return app.AddPackage(path, name, "") },
 		InstallPackage: func(ctx context.Context, name string, progress func(string)) error {
@@ -332,7 +344,7 @@ func usage() {
 	fmt.Println("  trestle init [-C dir] [-name project]")
 	fmt.Println("  trestle configure [-C dir] [-toolchain clang++] [-mode native|wsl] [-wsl-distribution Ubuntu] [-cuda path] [-cuda-execution native|wsl] [-vulkan path] [-vulkan-execution native|wsl]")
 	fmt.Println("  trestle analyze [-C dir]")
-	fmt.Println("  trestle build [-C dir] [--all] [--preset name] [target ...]")
+	fmt.Println("  trestle build [-C dir] [--all] [--force] [--preset name] [target ...]")
 	fmt.Println("  trestle test [-C dir] [-job name | -group name | -file source | -all]")
 	fmt.Println("  trestle import [-C dir]          import CMake through the File API")
 	fmt.Println("  trestle import-xmake [-C dir]    import Xmake targets (new and legacy Xmake)")

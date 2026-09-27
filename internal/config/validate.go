@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"trestle/internal/condition"
 )
 
 func Validate(cfg Config) error {
@@ -38,6 +39,9 @@ func Validate(cfg Config) error {
 		}
 	}
 	for name, target := range cfg.Targets {
+		if err := condition.Validate(target.When); err != nil {
+			return fmt.Errorf("target %q when: %w", name, err)
+		}
 		switch target.Type {
 		case "static", "shared", "executable", "test", "shader":
 		default:
@@ -70,6 +74,53 @@ func Validate(cfg Config) error {
 			}
 		}
 	}
+	for i, rule := range cfg.Rules {
+		if strings.TrimSpace(rule.When) == "" {
+			return fmt.Errorf("rule %d requires when", i+1)
+		}
+		if err := condition.Validate(rule.When); err != nil {
+			return fmt.Errorf("rule %d: %w", i+1, err)
+		}
+		if rule.Mode != "" && rule.Mode != "native" && rule.Mode != "wsl" {
+			return fmt.Errorf("rule %d has invalid mode %q", i+1, rule.Mode)
+		}
+		if rule.Target != "" {
+			if _, ok := cfg.Targets[rule.Target]; !ok {
+				return fmt.Errorf("rule %d references unknown target %q", i+1, rule.Target)
+			}
+		}
+		if len(rule.Packages) > 0 && rule.Target == "" {
+			return fmt.Errorf("rule %d packages require target", i+1)
+		}
+		if len(rule.DependsOn) > 0 && rule.Target == "" {
+			return fmt.Errorf("rule %d depends_on requires target", i+1)
+		}
+		for _, pkg := range rule.Packages {
+			if _, ok := cfg.Packages[pkg]; !ok {
+				return fmt.Errorf("rule %d references undeclared package %q", i+1, pkg)
+			}
+		}
+		for _, dependency := range rule.DependsOn {
+			if _, ok := cfg.Targets[dependency]; !ok {
+				return fmt.Errorf("rule %d references unknown dependency target %q", i+1, dependency)
+			}
+		}
+		for _, target := range rule.Targets {
+			if _, ok := cfg.Targets[target]; !ok {
+				return fmt.Errorf("rule %d references unknown default target %q", i+1, target)
+			}
+		}
+	}
+	for name, task := range cfg.Tasks {
+		if len(task.Command) > 0 && strings.TrimSpace(task.Command[0]) == "" {
+			return fmt.Errorf("task %q has an empty command", name)
+		}
+		for key := range task.Set {
+			if !taskSettingAllowed(key) {
+				return fmt.Errorf("task %q cannot set %q", name, key)
+			}
+		}
+	}
 	if err := graphHasCycle(cfg.Targets); err != nil {
 		return err
 	}
@@ -91,6 +142,14 @@ func Validate(cfg Config) error {
 		}
 	}
 	return nil
+}
+
+func taskSettingAllowed(key string) bool {
+	switch key {
+	case "build.profile", "toolchain.c", "toolchain.cxx", "toolchain.mode", "toolchain.wsl_distribution", "vcpkg.root", "vcpkg.triplet":
+		return true
+	}
+	return false
 }
 
 func graphHasCycle(targets map[string]Target) error {

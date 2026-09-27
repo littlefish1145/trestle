@@ -137,7 +137,7 @@ trestle build -preset dev app
 ## Example `trestle.toml`
 
 ```toml
-schema_version = 5
+schema_version = 6
 
 [project]
 name = "hello"
@@ -184,6 +184,31 @@ targets = ["app"]
 ```
 
 Dependencies may use `private`, `public`, or `interface` scope. Supported target types are `static`, `shared`, `executable`, `test`, and `shader`.
+
+### Conditional rules and explicit tasks
+
+Rules use a deliberately small, side-effect-free `when` expression: `&&`, `||`, `!`, comparisons, parentheses, `os`, `arch`, `mode`, and read-only `tool()`, `wsl()`, `wsl_tool()`, `package()`, `env()`, and `path()` queries. Rules run in TOML order and may select compilers, execution mode, flags, default targets, per-target `packages` dependencies, and `depends_on` target dependencies.
+
+```toml
+[[rules]]
+when = 'os == "windows" && wsl_tool("Ubuntu", "clang++")'
+mode = "wsl"
+wsl_distribution = "Ubuntu"
+cxx = "clang++"
+
+[[rules]]
+when = 'mode == "wsl" && package("fmt")'
+target = "app"
+compile_flags = ["-Wall"]
+packages = ["fmt"]
+
+[tasks.prepare]
+description = "Check compiler and select release profile"
+command = ["clang++", "--version"]
+set = { "build.profile" = "release", "toolchain.cxx" = "clang++" }
+```
+
+Targets can also declare `when`, `requires_tools`, and `requires_wsl`. The Targets and Build views explain unavailable targets. Press `f` to attempt the selected target despite failed checks, or use `trestle build --force`; missing tools or packages may still make the build fail. The TUI Tasks view displays every command and configuration change and requires explicit confirmation. Tasks from unknown projects can harm your device; commands run as argv, without an implicit shell.
 
 ## Repository layout
 

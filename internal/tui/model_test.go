@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"testing"
@@ -48,6 +49,30 @@ func TestDashboardNavigationAndFocus(t *testing.T) {
 	}
 }
 
+func TestTaskRequiresExplicitConfirmation(t *testing.T) {
+	model := newDashboard("trestle.toml", Services{RunTask: func(_ context.Context, _ string, _ config.Task, _ func(string)) error { return nil }})
+	model.probing = false
+	model.route, model.focus = TasksRoute, focusContent
+	model.config.Tasks = map[string]config.Task{"prepare": {Command: []string{"go", "version"}, Set: map[string]string{"build.profile": "release"}}}
+	updated, command := model.handleKey(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
+	model = updated.(dashboardModel)
+	if model.pendingTask != "prepare" || command != nil || model.mutating {
+		t.Fatal("task ran without confirmation")
+	}
+	updated, _ = model.handleKey(tea.KeyPressMsg(tea.Key{Text: "n"}))
+	model = updated.(dashboardModel)
+	if model.pendingTask != "" || model.mutating {
+		t.Fatal("task was not cancelled")
+	}
+	updated, _ = model.handleKey(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnter}))
+	model = updated.(dashboardModel)
+	updated, command = model.handleKey(tea.KeyPressMsg(tea.Key{Text: "y"}))
+	model = updated.(dashboardModel)
+	if model.pendingTask != "" || !model.mutating || command == nil {
+		t.Fatal("confirmed task did not start")
+	}
+}
+
 func TestDashboardInputSupportsEditing(t *testing.T) {
 	model := newDashboard("trestle.toml", Services{})
 	model.openInput("package", "Add package")
@@ -69,6 +94,37 @@ func TestDashboardCompactViewContainsCoreStatus(t *testing.T) {
 	for _, expected := range []string{"TRESTLE", "demo", "Project overview", "b build", "? help"} {
 		if !strings.Contains(view, expected) {
 			t.Fatalf("compact view missing %q:\n%s", expected, view)
+		}
+	}
+}
+
+func TestSidebarKeepsRoutesOnOneLine(t *testing.T) {
+	model := newDashboard("trestle.toml", Services{})
+	model.route, model.focus = PresetsRoute, focusNavigation
+	for _, total := range []int{96, 110, 150} {
+		width := sidebarWidth(total)
+		plain := ansi.Strip(model.sidebar(newPalette(), width, 36))
+		lines := strings.Split(plain, "\n")
+		seen := map[int]bool{}
+		for _, route := range routes {
+			found := false
+			for index, line := range lines {
+				if strings.Contains(line, navigationLabel(route)) {
+					if seen[index] {
+						t.Fatalf("routes share a line at width %d: %q", width, line)
+					}
+					seen[index], found = true, true
+					break
+				}
+			}
+			if !found {
+				t.Fatalf("%s wrapped or vanished at width %d:\n%s", route, width, plain)
+			}
+		}
+		for _, line := range lines {
+			if ansi.StringWidth(line) > width {
+				t.Fatalf("sidebar exceeds width %d: %q", width, line)
+			}
 		}
 	}
 }
