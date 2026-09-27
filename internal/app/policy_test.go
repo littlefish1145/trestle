@@ -110,6 +110,21 @@ func TestTaskHelperProcess(t *testing.T) {
 	}
 }
 
+func assertSameDirectory(t *testing.T, got, want string) {
+	t.Helper()
+	gotInfo, err := os.Stat(got)
+	if err != nil {
+		t.Fatalf("stat actual directory %q: %v", got, err)
+	}
+	wantInfo, err := os.Stat(want)
+	if err != nil {
+		t.Fatalf("stat expected directory %q: %v", want, err)
+	}
+	if !os.SameFile(gotInfo, wantInfo) {
+		t.Fatalf("directory %q is not the same as %q", got, want)
+	}
+}
+
 func TestTaskCancellationStopsChildProcesses(t *testing.T) {
 	t.Setenv("TRESTLE_TASK_TEST_HELPER", "spawn")
 	root := t.TempDir()
@@ -171,7 +186,18 @@ func TestTaskRunsInPreviewedDirectoryAndReportsSavedChanges(t *testing.T) {
 		t.Fatal(err)
 	}
 	joined := strings.Join(output, "\n")
-	if !strings.Contains(joined, "cwd="+workingDir) || !strings.Contains(joined, "Applied build.profile: debug → release") {
+	var actualWorkingDir string
+	for _, line := range output {
+		if strings.HasPrefix(line, "cwd=") {
+			actualWorkingDir = strings.TrimPrefix(line, "cwd=")
+			break
+		}
+	}
+	if actualWorkingDir == "" {
+		t.Fatalf("task output omitted actual working directory: %s", joined)
+	}
+	assertSameDirectory(t, actualWorkingDir, workingDir)
+	if !strings.Contains(joined, "Applied build.profile: debug → release") {
 		t.Fatalf("task output omitted working directory or saved change: %s", joined)
 	}
 	loaded, err := config.Load(path)
@@ -211,9 +237,7 @@ func TestTaskTimeoutAndCancellationKeepConfigUnchanged(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if preview.WorkingDir != workingDir {
-				t.Fatalf("working directory %q, want %q", preview.WorkingDir, workingDir)
-			}
+			assertSameDirectory(t, preview.WorkingDir, workingDir)
 			ctx := context.Background()
 			if tc.cancel {
 				var cancel context.CancelFunc
