@@ -257,11 +257,14 @@ func dashboardServices(path string) tuimodel.Services {
 		BuildTargetsForce: func(ctx context.Context, targets []string, all bool, progress func(string)) error {
 			return app.BuildTargetsWithOptions(ctx, path, targets, all, true, progress)
 		},
-		AssessTargets: func(ctx context.Context) (config.Config, map[string]policy.Status, error) {
-			return app.AssessTargets(ctx, path)
+		AssessTargets: func(ctx context.Context) (config.Config, map[string]policy.Status, policy.Report, error) {
+			return app.AssessTargetsWithReport(ctx, path)
 		},
-		RunTask: func(ctx context.Context, name string, expected config.Task, progress func(string)) error {
-			return app.ExecuteTaskExpected(ctx, path, name, expected, progress)
+		PreviewTask: func(_ context.Context, name string) (config.TaskPreview, error) {
+			return app.PreviewTask(path, name)
+		},
+		RunTask: func(ctx context.Context, name string, preview config.TaskPreview, progress func(string)) error {
+			return app.ExecuteTaskPreview(ctx, path, name, preview, progress)
 		},
 		AddPackage: func(name string) error { return app.AddPackage(path, name, "") },
 		InstallPackage: func(ctx context.Context, name string, progress func(string)) error {

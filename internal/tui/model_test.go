@@ -9,6 +9,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 	"trestle/internal/config"
+	"trestle/internal/policy"
 	"trestle/internal/toolchain"
 )
 
@@ -50,7 +51,12 @@ func TestDashboardNavigationAndFocus(t *testing.T) {
 }
 
 func TestTaskRequiresExplicitConfirmation(t *testing.T) {
-	model := newDashboard("trestle.toml", Services{RunTask: func(_ context.Context, _ string, _ config.Task, _ func(string)) error { return nil }})
+	model := newDashboard("trestle.toml", Services{
+		PreviewTask: func(_ context.Context, _ string) (config.TaskPreview, error) {
+			return config.TaskPreview{Task: config.Task{Command: []string{"go", "env"}, Set: map[string]string{"build.profile": "release"}}}, nil
+		},
+		RunTask: func(_ context.Context, _ string, _ config.TaskPreview, _ func(string)) error { return nil },
+	})
 	model.probing = false
 	model.route, model.focus = TasksRoute, focusContent
 	model.config.Tasks = map[string]config.Task{"prepare": {Command: []string{"go", "version"}, Set: map[string]string{"build.profile": "release"}}}
@@ -58,6 +64,10 @@ func TestTaskRequiresExplicitConfirmation(t *testing.T) {
 	model = updated.(dashboardModel)
 	if model.pendingTask != "prepare" || command != nil || model.mutating {
 		t.Fatal("task ran without confirmation")
+	}
+	previewView := ansi.Strip(strings.Join(model.taskLines(newPalette(), 100), "\n"))
+	if !strings.Contains(previewView, `"env"`) || strings.Contains(previewView, `"version"`) {
+		t.Fatalf("task review did not show the previewed command: %s", previewView)
 	}
 	updated, _ = model.handleKey(tea.KeyPressMsg(tea.Key{Text: "n"}))
 	model = updated.(dashboardModel)
@@ -70,6 +80,61 @@ func TestTaskRequiresExplicitConfirmation(t *testing.T) {
 	model = updated.(dashboardModel)
 	if model.pendingTask != "" || !model.mutating || command == nil {
 		t.Fatal("confirmed task did not start")
+	}
+}
+
+func TestRunningTaskCanBeCancelledWithoutLeavingDashboard(t *testing.T) {
+	model := newDashboard("trestle.toml", Services{})
+	model.probing, model.mutating = false, true
+	model.workflowRoute = TasksRoute
+	cancelled := false
+	model.workflowCancel = func() { cancelled = true }
+	updated, command := model.handleKey(tea.KeyPressMsg(tea.Key{Code: tea.KeyEsc}))
+	model = updated.(dashboardModel)
+	if command != nil || !cancelled || !model.mutating || !strings.Contains(model.message, "Cancelling") {
+		t.Fatalf("task cancellation did not stay in dashboard: %+v", model)
+	}
+}
+
+func TestQuitWaitsForTaskCancellation(t *testing.T) {
+	model := newDashboard("trestle.toml", Services{})
+	model.probing, model.mutating = false, true
+	model.workflowRoute = TasksRoute
+	cancelled := false
+	model.workflowCancel = func() { cancelled = true }
+	updated, command := model.handleKey(tea.KeyPressMsg(tea.Key{Text: "q"}))
+	model = updated.(dashboardModel)
+	if command != nil || !cancelled || !model.quitAfterTask {
+		t.Fatal("dashboard exited before task cleanup")
+	}
+	updated, command = model.Update(workflowEvent{label: "Task prepare", done: true, err: context.Canceled})
+	model = updated.(dashboardModel)
+	if command == nil || model.mutating || model.quitAfterTask {
+		t.Fatal("dashboard did not exit after task cleanup")
+	}
+}
+
+func TestRulesViewShowsMatchedRulesAndFinalChanges(t *testing.T) {
+	model := newDashboard("trestle.toml", Services{})
+	model.probing = false
+	model.route, model.focus = SettingsRoute, focusContent
+	model.baseConfig = config.Default("demo")
+	model.config = config.Default("demo")
+	model.config.Toolchain.CXX = "clang++"
+	if model.editableConfig().Toolchain.CXX != "auto" {
+		t.Fatal("settings editor should use TOML values, not rule output")
+	}
+	model.probe.Rules = policy.Report{
+		Rules:   []policy.RuleResult{{Index: 1, When: `os == "windows"`, Matched: true, Changes: []policy.Change{{Field: "toolchain.cxx", Before: "auto", After: "clang++"}}}, {Index: 2, When: "false"}},
+		Changes: []policy.Change{{Field: "toolchain.cxx", Before: "auto", After: "clang++"}},
+	}
+	updated, _ := model.handleKey(tea.KeyPressMsg(tea.Key{Text: "v"}))
+	model = updated.(dashboardModel)
+	view := ansi.Strip(strings.Join(model.contentLines(newPalette(), 90), "\n"))
+	for _, expected := range []string{"#1 matched", "#2 skipped", "toolchain.cxx: auto → clang++", "Effective selection"} {
+		if !strings.Contains(view, expected) {
+			t.Fatalf("rule view missing %q: %s", expected, view)
+		}
 	}
 }
 

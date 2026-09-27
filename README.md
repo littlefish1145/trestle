@@ -187,7 +187,7 @@ targets = ["app"]
 
 ### 条件规则与任务
 
-条件表达式只支持 `&&`、`||`、`!`、`==`、`!=`、括号和字符串；变量为 `os`、`arch`、`mode`，只读函数为 `tool("name")`、`wsl("发行版")`、`wsl_tool("发行版", "工具")`、`package("包名")`、`env("变量")`、`path("路径")`。规则按 TOML 顺序应用，条件为假时不改变配置。`tool()` 在当前模式下查找工具，WSL 模式会在选定发行版中查找。`package()` 检查声明的包能否解析。
+条件表达式只支持 `&&`、`||`、`!`、`==`、`!=`、括号和字符串；变量为 `os`、`arch`、`mode`，只读函数为 `tool("name")`、`wsl("发行版")`、`wsl_tool("发行版", "工具")`、`package("包名")`、`env("变量")`、`path("路径")`。规则按 TOML 顺序应用，条件为假时不改变配置。`tool()` 在当前模式下查找工具，WSL 模式会在选定发行版中查找。`path()` 的相对路径以 `trestle.toml` 所在目录为基准。`package()` 检查声明的包能否解析。
 
 ```toml
 [[rules]]
@@ -200,6 +200,8 @@ cxx = "clang++"
 when = 'mode == "wsl" && tool("clang++")'
 target = "app"
 compile_flags = ["-Wall"]
+cxx_flags = ["-Wextra"]
+link_flags = ["-Wl,--as-needed"]
 packages = ["fmt"]
 
 [targets.app]
@@ -209,10 +211,14 @@ requires_tools = ["ninja"]
 [tasks.prepare]
 description = "检查工具并切换 Release 配置"
 command = ["clang++", "--version"]
+working_dir = "."
+timeout = "10s"
 set = { "build.profile" = "release", "toolchain.cxx" = "clang++" }
 ```
 
-`[[rules]]` 可设置 `c`、`cxx`、`mode`、`wsl_distribution`、各类 flags、`targets`（默认目标），以及为 `target` 添加 `packages`（外部包）、`depends_on`（项目目标）依赖和 `compile_flags`。`targets.<name>` 还可设置 `requires_wsl`。Targets / Build 页面会列出不可构建原因；按 `f` 可跳过预检尝试编译，CLI 使用 `trestle build --force`。跳过预检不保证缺失工具或包时能成功。Tasks 页面按 Enter 预览完整命令和配置改动，再按 `y` 执行；任务来自不可信项目时可能损害设备。任务命令是参数数组，不会隐式通过 shell 执行。
+`[[rules]]` 可设置 `c`、`cxx`、`mode`、`wsl_distribution`、各类 flags、`targets`（默认目标），以及为 `target` 添加 `packages`（外部包）、`depends_on`（项目目标）依赖。设置 `target` 后，`compile_flags`、`c_flags`、`cxx_flags`、`link_flags` 只影响该目标；不设置 `target` 时，它们影响整个项目。编译器、模式和默认目标仍属于项目级设置。Settings 页面按 `v` 可查看每条规则是否匹配、最终编译器与参数，以及配置相对 TOML 原值的变化。`targets.<name>` 还可设置 `requires_wsl`。Targets / Build 页面会列出不可构建原因；按 `f` 可跳过预检尝试编译，CLI 使用 `trestle build --force`。跳过预检不保证缺失工具或包时能成功。
+
+Tasks 页面按 Enter 预览完整命令、工作目录、超时和配置差异，再按 `y` 执行。`working_dir` 可填项目相对路径或绝对路径，默认项目目录；`timeout` 使用 `30s`、`5m` 等正时长，省略则不限制运行时间。运行中按 Esc 或 Ctrl+C 可取消任务，Trestle 会尝试终止任务进程及其子进程；取消、超时或命令失败时不会保存 `set` 指定的配置。命令自行修改的其他文件无法自动回滚。任务来自不可信项目时可能损害设备；任务命令是参数数组，不会隐式通过 shell 执行。
 
 ## 项目结构
 

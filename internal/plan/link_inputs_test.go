@@ -23,6 +23,60 @@ func TestMSVCSharedDependencyUsesImportLibrary(t *testing.T) {
 	}
 }
 
+func TestBuildUsesTargetLanguageFlagsOnlyForMatchingSource(t *testing.T) {
+	root := t.TempDir()
+	cSource := filepath.Join(root, "main.c")
+	cppSource := filepath.Join(root, "worker.cpp")
+	for _, source := range []string{cSource, cppSource} {
+		if err := os.WriteFile(source, []byte("int main(){return 0;}"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg := config.Default("flags")
+	cfg.Build.BuildDir = filepath.Join(root, "build")
+	cfg.Targets = map[string]config.Target{
+		"app":    {Type: "executable", Sources: []string{cSource}, CFlags: []string{"-Wc-only"}, CXXFlags: []string{"-wrong-cxx"}, LinkOptions: []string{"-Wl,app-only"}},
+		"worker": {Type: "executable", Sources: []string{cppSource}, CFlags: []string{"-wrong-c"}, CXXFlags: []string{"-Wcxx-only"}},
+	}
+	project, err := graph.Resolve(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	build, err := Build(cfg, project, Options{Root: root, BuildDir: cfg.Build.BuildDir, Toolchain: toolchain.Toolchain{Kind: toolchain.GCC, CC: "cc", CXX: "c++", Linker: "c++", Archiver: "ar"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := map[ID]bool{}
+	for _, action := range build.Actions {
+		args := strings.Join(action.Command.Args, " ")
+		switch action.ID {
+		case ActionID("compile", "app", sourceID(cSource)):
+			seen[action.ID] = true
+			if !strings.Contains(args, "-Wc-only") || strings.Contains(args, "-wrong-cxx") {
+				t.Fatalf("C target flags incorrect: %s", args)
+			}
+		case ActionID("compile", "worker", sourceID(cppSource)):
+			seen[action.ID] = true
+			if !strings.Contains(args, "-Wcxx-only") || strings.Contains(args, "-wrong-c") {
+				t.Fatalf("C++ target flags incorrect: %s", args)
+			}
+		case ActionID("link", "app"):
+			seen[action.ID] = true
+			if !strings.Contains(args, "-Wl,app-only") {
+				t.Fatalf("target link flag missing: %s", args)
+			}
+		case ActionID("link", "worker"):
+			seen[action.ID] = true
+			if strings.Contains(args, "-Wl,app-only") {
+				t.Fatalf("target link flag leaked: %s", args)
+			}
+		}
+	}
+	if len(seen) != 4 {
+		t.Fatalf("expected four compile/link actions, found %d", len(seen))
+	}
+}
+
 func TestBuildKeepsDependenciesThatSortAfterConsumer(t *testing.T) {
 	root := t.TempDir()
 	for _, name := range []string{"ggml.cpp", "base.cpp", "cpu.cpp"} {

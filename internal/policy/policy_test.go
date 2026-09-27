@@ -2,6 +2,8 @@ package policy
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -41,5 +43,45 @@ func TestUnavailableTargetReasons(t *testing.T) {
 	}
 	if err := CheckSelected(map[string]Status{"app": status}, []string{"app"}); err == nil || !strings.Contains(err.Error(), "--force") {
 		t.Fatalf("bad preflight: %v", err)
+	}
+}
+
+func TestRuleReportAndTargetFlagScope(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "marker.txt"), []byte("ready"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default("demo")
+	cfg.Targets["worker"] = config.Target{Type: "executable", Sources: []string{"worker.cpp"}}
+	cfg.Rules = []config.Rule{
+		{When: `path("marker.txt")`, CXX: "clang++", CXXFlags: []string{"-O2"}},
+		{When: `true`, Target: "app", CompileFlags: []string{"-Wall"}, CFlags: []string{"-Werror"}, CXXFlags: []string{"-Wextra"}, LinkFlags: []string{"-Wl,--as-needed"}},
+		{When: `false`, Target: "worker", CFlags: []string{"-wrong"}},
+	}
+	resolved, report, err := ApplyWithReportAt(context.Background(), cfg, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Rules) != 3 || !report.Rules[0].Matched || !report.Rules[1].Matched || report.Rules[2].Matched {
+		t.Fatalf("incorrect rule trace: %+v", report.Rules)
+	}
+	if got := resolved.Build.CXXFlags; len(got) != 1 || got[0] != "-O2" {
+		t.Fatalf("project flags changed unexpectedly: %q", got)
+	}
+	app := resolved.Targets["app"]
+	if len(app.CFlags) != 1 || app.CFlags[0] != "-Werror" || len(app.CXXFlags) != 1 || app.CXXFlags[0] != "-Wextra" || len(app.LinkOptions) != 1 {
+		t.Fatalf("target flags not applied: %+v", app)
+	}
+	if len(resolved.Targets["worker"].CFlags) != 0 || len(cfg.Targets["app"].CFlags) != 0 {
+		t.Fatal("target flags leaked or changed the source config")
+	}
+	found := false
+	for _, change := range report.Changes {
+		if change.Field == "targets.app.c_flags" && strings.Contains(change.After, "-Werror") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("final configuration diff omitted target flags: %+v", report.Changes)
 	}
 }

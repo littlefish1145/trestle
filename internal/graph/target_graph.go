@@ -41,6 +41,8 @@ func Resolve(cfg config.Config) (model.ResolvedProject, error) {
 				OutputName:       target.OutputName,
 				CStandard:        target.CStandard,
 				CXXStandard:      target.CXXStandard,
+				CFlags:           target.CFlags,
+				CXXFlags:         target.CXXFlags,
 				ExportAllSymbols: target.ExportAllSymbols,
 				ShaderStage:      target.ShaderStage,
 				ShaderEntry:      target.ShaderEntry,

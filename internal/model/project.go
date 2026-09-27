@@ -61,6 +61,8 @@ type Target struct {
 	OutputName       string
 	CStandard        string
 	CXXStandard      string
+	CFlags           []string
+	CXXFlags         []string
 	ExportAllSymbols bool
 	ShaderStage      string
 	ShaderEntry      string

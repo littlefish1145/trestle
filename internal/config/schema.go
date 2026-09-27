@@ -93,6 +93,8 @@ type Target struct {
 	Defines            []string     `toml:"defines"`
 	PrivateDefines     []string     `toml:"private_defines"`
 	CompileOptions     []string     `toml:"compile_options"`
+	CFlags             []string     `toml:"c_flags"`
+	CXXFlags           []string     `toml:"cxx_flags"`
 	LibraryDirs        []string     `toml:"library_dirs"`
 	Libraries          []string     `toml:"libraries"`
 	LinkOptions        []string     `toml:"link_options"`
@@ -129,7 +131,23 @@ type Rule struct {
 type Task struct {
 	Description string            `toml:"description"`
 	Command     []string          `toml:"command"`
+	WorkingDir  string            `toml:"working_dir"`
+	Timeout     string            `toml:"timeout"`
 	Set         map[string]string `toml:"set"`
+}
+
+type TaskSettingChange struct {
+	Field  string
+	Before string
+	After  string
+}
+
+type TaskPreview struct {
+	Task        Task
+	WorkingDir  string
+	Timeout     string
+	Changes     []TaskSettingChange
+	Fingerprint string
 }
 
 type Dependency struct {

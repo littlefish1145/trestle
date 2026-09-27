@@ -93,8 +93,10 @@ func Build(cfg config.Config, project model.ResolvedProject, options Options) (B
 			optionsForCompile := append([]string{}, cfg.Build.CompileFlags...)
 			if strings.EqualFold(filepath.Ext(source), ".c") {
 				optionsForCompile = append(optionsForCompile, cfg.Build.CFlags...)
+				optionsForCompile = append(optionsForCompile, target.CFlags...)
 			} else {
 				optionsForCompile = append(optionsForCompile, cfg.Build.CXXFlags...)
+				optionsForCompile = append(optionsForCompile, target.CXXFlags...)
 			}
 			optionsForCompile = append(optionsForCompile, target.CompileSelf.Options...)
 			if target.Type == model.SharedLibrary && options.Toolchain.Kind != toolchain.MSVC && !strings.EqualFold(filepath.Ext(source), ".cu") && !containsPICOption(optionsForCompile) {

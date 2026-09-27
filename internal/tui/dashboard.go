@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -28,8 +29,9 @@ type Services struct {
 	Build             BuildFunc
 	BuildTargets      TargetBuildFunc
 	BuildTargetsForce TargetBuildFunc
-	AssessTargets     func(context.Context) (config.Config, map[string]policy.Status, error)
-	RunTask           func(context.Context, string, config.Task, func(string)) error
+	AssessTargets     func(context.Context) (config.Config, map[string]policy.Status, policy.Report, error)
+	PreviewTask       func(context.Context, string) (config.TaskPreview, error)
+	RunTask           func(context.Context, string, config.TaskPreview, func(string)) error
 	AddPackage        func(string) error
 	InstallPackage    func(context.Context, string, func(string)) error
 	SetProfile        func(string) error
@@ -104,7 +106,9 @@ const (
 
 type probeMessage struct {
 	Config       config.Config
+	BaseConfig   config.Config
 	Statuses     map[string]policy.Status
+	Rules        policy.Report
 	ProjectName  string
 	Sources      int
 	Targets      int
@@ -145,43 +149,46 @@ type workflowEvent struct {
 }
 
 type dashboardModel struct {
-	path            string
-	services        Services
-	config          config.Config
-	probe           probeMessage
-	route           Route
-	focus           focusArea
-	width           int
-	height          int
-	probing         bool
-	building        bool
-	searching       bool
-	mutating        bool
-	operation       string
-	pulse           int
-	cursor          int
-	scroll          int
-	logFollow       bool
-	lastRun         string
-	message         string
-	messageError    bool
-	help            bool
-	inputMode       bool
-	inputText       string
-	inputKind       string
-	inputPackage    string
-	packageResults  []vcpkg.Port
-	installEvents   chan installEvent
-	installLog      []string
-	installCancel   context.CancelFunc
-	workflowEvents  chan workflowEvent
-	workflowRoute   Route
-	workflowCancel  context.CancelFunc
-	workflowLog     []string
-	workflowErrors  []string
-	testFileMode    bool
-	pendingTask     string
-	pendingTaskSpec config.Task
+	path               string
+	services           Services
+	config             config.Config
+	baseConfig         config.Config
+	probe              probeMessage
+	route              Route
+	focus              focusArea
+	width              int
+	height             int
+	probing            bool
+	building           bool
+	searching          bool
+	mutating           bool
+	operation          string
+	pulse              int
+	cursor             int
+	scroll             int
+	logFollow          bool
+	lastRun            string
+	message            string
+	messageError       bool
+	help               bool
+	inputMode          bool
+	inputText          string
+	inputKind          string
+	inputPackage       string
+	packageResults     []vcpkg.Port
+	installEvents      chan installEvent
+	installLog         []string
+	installCancel      context.CancelFunc
+	workflowEvents     chan workflowEvent
+	workflowRoute      Route
+	workflowCancel     context.CancelFunc
+	quitAfterTask      bool
+	workflowLog        []string
+	workflowErrors     []string
+	testFileMode       bool
+	rulesView          bool
+	pendingTask        string
+	pendingTaskPreview config.TaskPreview
 }
 
 type palette struct {
@@ -229,8 +236,11 @@ func (model dashboardModel) probeCommand() tea.Cmd {
 	return func() tea.Msg {
 		cfg, err := config.Load(model.path)
 		message := probeMessage{Error: err}
+		if err == nil {
+			message.BaseConfig = cfg
+		}
 		if model.services.AssessTargets != nil {
-			cfg, message.Statuses, err = model.services.AssessTargets(context.Background())
+			cfg, message.Statuses, message.Rules, err = model.services.AssessTargets(context.Background())
 			message.Error = err
 		}
 		if err == nil {
@@ -299,7 +309,7 @@ func (model dashboardModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	case probeMessage:
 		model.probing = false
-		model.probe, model.config = value, value.Config
+		model.probe, model.config, model.baseConfig = value, value.Config, value.BaseConfig
 		if value.Error != nil {
 			model.setMessage(value.Error.Error(), true)
 		} else if !model.mutating {
@@ -360,15 +370,30 @@ func (model dashboardModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			model.workflowCancel()
 		}
 		model.mutating, model.operation, model.workflowEvents, model.workflowCancel = false, "", nil, nil
+		quitAfterTask := model.quitAfterTask
+		model.quitAfterTask = false
 		if value.err != nil {
 			model.workflowLog = append(model.workflowLog, value.err.Error())
 			model.followVisibleLog(model.workflowRoute)
-			model.setMessage(value.label+" failed · "+value.err.Error(), true)
+			switch {
+			case errors.Is(value.err, context.Canceled):
+				model.setMessage(value.label+" cancelled", false)
+			case errors.Is(value.err, context.DeadlineExceeded):
+				model.setMessage(value.label+" timed out · "+value.err.Error(), true)
+			default:
+				model.setMessage(value.label+" failed · "+value.err.Error(), true)
+			}
+			if quitAfterTask {
+				return model, tea.Quit
+			}
 			return model, nil
 		}
 		model.setMessage(value.label+" completed", false)
 		if value.label == "Build" {
 			model.lastRun = "Completed just now"
+		}
+		if quitAfterTask {
+			return model, tea.Quit
 		}
 		model.probing = true
 		return model, tea.Batch(model.probeCommand(), pulseCommand())
@@ -403,19 +428,19 @@ func (model dashboardModel) handleKey(message tea.KeyPressMsg) (tea.Model, tea.C
 		switch key.String() {
 		case "y", "enter":
 			name := model.pendingTask
-			spec := model.pendingTaskSpec
+			preview := model.pendingTaskPreview
 			model.pendingTask = ""
-			model.pendingTaskSpec = config.Task{}
+			model.pendingTaskPreview = config.TaskPreview{}
 			if model.services.RunTask == nil {
 				model.setMessage("Task service is unavailable", true)
 				return model, nil
 			}
 			return model.startWorkflow("Task "+name, func(ctx context.Context, progress func(string)) error {
-				return model.services.RunTask(ctx, name, spec, progress)
+				return model.services.RunTask(ctx, name, preview, progress)
 			})
 		case "n", "esc", "q":
 			model.pendingTask = ""
-			model.pendingTaskSpec = config.Task{}
+			model.pendingTaskPreview = config.TaskPreview{}
 			model.setMessage("Task cancelled", false)
 		}
 		return model, nil
@@ -429,8 +454,19 @@ func (model dashboardModel) handleKey(message tea.KeyPressMsg) (tea.Model, tea.C
 		}
 		return model, nil
 	}
+	if (key.String() == "esc" || key.String() == "ctrl+c") && model.mutating && model.workflowRoute == TasksRoute && model.workflowCancel != nil {
+		model.workflowCancel()
+		model.setMessage("Cancelling task…", false)
+		return model, nil
+	}
 	switch key.String() {
 	case "q", "ctrl+c":
+		if model.mutating && model.workflowRoute == TasksRoute && model.workflowCancel != nil {
+			model.quitAfterTask = true
+			model.workflowCancel()
+			model.setMessage("Stopping task before exit…", false)
+			return model, nil
+		}
 		if model.installCancel != nil {
 			model.installCancel()
 		}
@@ -484,8 +520,17 @@ func (model dashboardModel) handleKey(message tea.KeyPressMsg) (tea.Model, tea.C
 			return model.startProjectImport()
 		} else if model.route == TasksRoute {
 			if name, ok := model.selectedTask(); ok {
+				if model.services.PreviewTask == nil {
+					model.setMessage("Task preview service is unavailable", true)
+					return model, nil
+				}
+				preview, err := model.services.PreviewTask(context.Background(), name)
+				if err != nil {
+					model.setMessage(err.Error(), true)
+					return model, nil
+				}
 				model.pendingTask = name
-				model.pendingTaskSpec = model.config.Tasks[name]
+				model.pendingTaskPreview = preview
 				model.setMessage("Review task and press y to run, n to cancel", false)
 			}
 			return model, nil
@@ -508,13 +553,13 @@ func (model dashboardModel) handleKey(message tea.KeyPressMsg) (tea.Model, tea.C
 	case "down", "j":
 		model.move(1)
 	case "pgup":
-		if model.focus == focusContent && model.routeHasLog() {
+		if model.focus == focusContent && (model.routeHasLog() || model.route == SettingsRoute && model.rulesView) {
 			model.scrollContent(-max(1, model.viewportHeight()/2))
 		} else {
 			model.move(-max(1, model.viewportHeight()/2))
 		}
 	case "pgdown":
-		if model.focus == focusContent && model.routeHasLog() {
+		if model.focus == focusContent && (model.routeHasLog() || model.route == SettingsRoute && model.rulesView) {
 			model.scrollContent(max(1, model.viewportHeight()/2))
 		} else {
 			model.move(max(1, model.viewportHeight()/2))
@@ -523,7 +568,7 @@ func (model dashboardModel) handleKey(message tea.KeyPressMsg) (tea.Model, tea.C
 		model.cursor, model.scroll = 0, 0
 		model.logFollow = false
 	case "end", "G":
-		if model.focus == focusContent && model.routeHasLog() {
+		if model.focus == focusContent && (model.routeHasLog() || model.route == SettingsRoute && model.rulesView) {
 			model.scroll = model.maxContentScroll()
 			model.logFollow = true
 		} else {
@@ -638,6 +683,9 @@ func (model dashboardModel) handleKey(message tea.KeyPressMsg) (tea.Model, tea.C
 				}
 				return model.services.SetVulkan(false, "", "native", "")
 			})
+		} else if model.route == SettingsRoute {
+			model.rulesView = !model.rulesView
+			model.cursor, model.scroll, model.logFollow = 0, 0, false
 		} else if model.route == PackagesRoute {
 			model.openInput("version", "Set package version (name@version)")
 			names := sortedPackageNames(model.config.Packages)
@@ -920,7 +968,7 @@ func settingsRows(cfg config.Config) []settingRow {
 		target := cfg.Targets[name]
 		prefix := "target:" + name + ":"
 		label := "[" + name + "] "
-		rows = append(rows, settingRow{prefix + "type", label + "Type", target.Type}, settingRow{prefix + "sources", label + "Sources", strings.Join(target.Sources, ",")}, settingRow{prefix + "output_name", label + "Output name", target.OutputName}, settingRow{prefix + "c_standard", label + "C standard", target.CStandard}, settingRow{prefix + "cxx_standard", label + "C++ standard", target.CXXStandard}, settingRow{prefix + "include_dirs", label + "Include dirs", strings.Join(target.IncludeDirs, ",")}, settingRow{prefix + "private_include_dirs", label + "Private includes", strings.Join(target.PrivateIncludeDirs, ",")}, settingRow{prefix + "defines", label + "Defines", strings.Join(target.Defines, ",")}, settingRow{prefix + "private_defines", label + "Private defines", strings.Join(target.PrivateDefines, ",")}, settingRow{prefix + "compile_options", label + "Compile options", strings.Join(target.CompileOptions, " ")}, settingRow{prefix + "library_dirs", label + "Library dirs", strings.Join(target.LibraryDirs, ",")}, settingRow{prefix + "libraries", label + "Libraries", strings.Join(target.Libraries, ",")}, settingRow{prefix + "link_options", label + "Link options", strings.Join(target.LinkOptions, " ")}, settingRow{prefix + "export_all_symbols", label + "Export all symbols", fmt.Sprint(target.ExportAllSymbols)})
+		rows = append(rows, settingRow{prefix + "type", label + "Type", target.Type}, settingRow{prefix + "sources", label + "Sources", strings.Join(target.Sources, ",")}, settingRow{prefix + "output_name", label + "Output name", target.OutputName}, settingRow{prefix + "c_standard", label + "C standard", target.CStandard}, settingRow{prefix + "cxx_standard", label + "C++ standard", target.CXXStandard}, settingRow{prefix + "include_dirs", label + "Include dirs", strings.Join(target.IncludeDirs, ",")}, settingRow{prefix + "private_include_dirs", label + "Private includes", strings.Join(target.PrivateIncludeDirs, ",")}, settingRow{prefix + "defines", label + "Defines", strings.Join(target.Defines, ",")}, settingRow{prefix + "private_defines", label + "Private defines", strings.Join(target.PrivateDefines, ",")}, settingRow{prefix + "compile_options", label + "Compile options", strings.Join(target.CompileOptions, " ")}, settingRow{prefix + "c_flags", label + "C flags", strings.Join(target.CFlags, " ")}, settingRow{prefix + "cxx_flags", label + "C++ flags", strings.Join(target.CXXFlags, " ")}, settingRow{prefix + "library_dirs", label + "Library dirs", strings.Join(target.LibraryDirs, ",")}, settingRow{prefix + "libraries", label + "Libraries", strings.Join(target.Libraries, ",")}, settingRow{prefix + "link_options", label + "Link options", strings.Join(target.LinkOptions, " ")}, settingRow{prefix + "export_all_symbols", label + "Export all symbols", fmt.Sprint(target.ExportAllSymbols)})
 	}
 	presetNames := make([]string, 0, len(cfg.CompilerPresets))
 	for name := range cfg.CompilerPresets {
@@ -936,7 +984,7 @@ func settingsRows(cfg config.Config) []settingRow {
 	return rows
 }
 func (model *dashboardModel) openSelectedSetting() {
-	rows := settingsRows(model.config)
+	rows := settingsRows(model.editableConfig())
 	if model.cursor < 0 || model.cursor >= len(rows) {
 		return
 	}
@@ -1100,10 +1148,7 @@ func (model dashboardModel) startWorkflow(label string, action func(context.Cont
 				case <-workflowCtx.Done():
 				}
 			})
-			select {
-			case events <- workflowEvent{label: label, done: true, err: err}:
-			case <-workflowCtx.Done():
-			}
+			events <- workflowEvent{label: label, done: true, err: err}
 			close(events)
 		}()
 		return <-events
@@ -1362,7 +1407,10 @@ func (model dashboardModel) itemCount() int {
 	case ReleaseRoute:
 		return len(model.optimizationNames())
 	case SettingsRoute:
-		return len(settingsRows(model.config))
+		if model.rulesView {
+			return 0
+		}
+		return len(settingsRows(model.editableConfig()))
 	}
 	return 0
 }
@@ -1717,11 +1765,21 @@ func (model dashboardModel) taskLines(p palette, width int) []string {
 	lines := []string{p.warning.Render("来源不明的 DSL 任务可能损害您的设备。仅运行可信项目中的任务。"), ""}
 	for index, name := range names {
 		task := model.config.Tasks[name]
+		if model.pendingTask == name {
+			task = model.pendingTaskPreview.Task
+		}
 		lines = append(lines, model.selectableRow(p, index, ansi.Truncate(name+"  "+task.Description, width-3, "…")))
 		if index == model.cursor && model.focus == focusContent {
+			preview := model.pendingTaskPreview
+			if model.pendingTask != name {
+				preview = config.TaskPreview{}
+			}
 			if len(task.Command) > 0 {
 				lines = appendWrappedLog(lines, p.text, "command: "+fmt.Sprintf("%q", task.Command), width)
 			}
+			workingDir := fallback(preview.WorkingDir, fallback(task.WorkingDir, "project directory"))
+			lines = appendWrappedLog(lines, p.muted, "working directory: "+workingDir, width)
+			lines = appendWrappedLog(lines, p.muted, "timeout: "+fallback(task.Timeout, "none"), width)
 			keys := make([]string, 0, len(task.Set))
 			for key := range task.Set {
 				keys = append(keys, key)
@@ -1730,12 +1788,22 @@ func (model dashboardModel) taskLines(p palette, width int) []string {
 			for _, key := range keys {
 				lines = appendWrappedLog(lines, p.muted, "set "+key+" = "+task.Set[key], width)
 			}
+			if model.pendingTask == name {
+				lines = append(lines, "", p.faint.Render(" CONFIGURATION CHANGES AFTER SUCCESS"))
+				if len(preview.Changes) == 0 {
+					lines = append(lines, p.muted.Render("  no configuration value changes"))
+				}
+				for _, change := range preview.Changes {
+					lines = appendWrappedLog(lines, p.text, change.Field+": "+fallback(change.Before, "(empty)")+" → "+fallback(change.After, "(empty)"), width)
+				}
+				lines = append(lines, p.faint.Render("  Files changed by the command itself are not rolled back."))
+			}
 		}
 	}
 	if model.pendingTask != "" {
 		lines = append(lines, "", p.warning.Render("Run "+model.pendingTask+"?  y / enter confirm · n / esc cancel"))
 	} else {
-		lines = append(lines, "", p.faint.Render("enter preview and confirm selected task"))
+		lines = append(lines, "", p.faint.Render("enter preview · esc / ctrl+c cancel a running task"))
 	}
 	if len(model.workflowLog) > 0 && model.workflowRoute == TasksRoute {
 		lines = append(lines, "", p.faint.Render(" TASK OUTPUT"))
@@ -2025,12 +2093,75 @@ func (model dashboardModel) doctorLines(p palette) []string {
 }
 
 func (model dashboardModel) settingsLines(p palette, width int) []string {
-	lines := []string{p.faint.Render(" PROJECT / LANGUAGE / TOOLCHAIN / VCPKG / RELEASE")}
-	for index, row := range settingsRows(model.config) {
+	if model.rulesView {
+		return model.ruleLines(p, width)
+	}
+	matched := 0
+	for _, rule := range model.probe.Rules.Rules {
+		if rule.Matched {
+			matched++
+		}
+	}
+	lines := []string{p.faint.Render(fmt.Sprintf(" BASE CONFIG · %d/%d RULES MATCHED · v EFFECTIVE VIEW", matched, len(model.probe.Rules.Rules)))}
+	for index, row := range settingsRows(model.editableConfig()) {
 		value := fallback(row.value, "not set")
 		lines = append(lines, model.selectableRow(p, index, ansi.Truncate(fmt.Sprintf("%-24s %s", row.label, value), width-3, "…")))
 	}
-	return append(lines, "", p.faint.Render("enter / e edit selected field · changes are validated before saving"))
+	return append(lines, "", p.faint.Render("enter / e edit selected field · v inspect rule effects"))
+}
+
+func (model dashboardModel) editableConfig() config.Config {
+	if model.baseConfig.SchemaVersion != 0 {
+		return model.baseConfig
+	}
+	return model.config
+}
+
+func (model dashboardModel) ruleLines(p palette, width int) []string {
+	lines := []string{p.faint.Render(" RESOLVED RULES · v BACK TO SETTINGS"), "", p.title.Render("Effective selection")}
+	for _, item := range []struct{ label, value string }{
+		{"Configured C", model.config.Toolchain.C}, {"Configured C++", model.config.Toolchain.CXX},
+		{"Resolved C", model.probe.Rules.Toolchain.CC}, {"Resolved C++", model.probe.Rules.Toolchain.CXX},
+		{"Resolved linker", model.probe.Rules.Toolchain.Linker}, {"Resolved archiver", model.probe.Rules.Toolchain.Archiver},
+		{"Mode", model.config.Toolchain.Mode}, {"WSL distribution", model.config.Toolchain.WSLDistribution},
+		{"Project compile flags", strings.Join(model.config.Build.CompileFlags, " ")},
+		{"Project C flags", strings.Join(model.config.Build.CFlags, " ")},
+		{"Project C++ flags", strings.Join(model.config.Build.CXXFlags, " ")},
+		{"Project link flags", strings.Join(model.config.Build.LinkFlags, " ")},
+		{"Default targets", strings.Join(model.config.Build.DefaultTargets, ", ")},
+	} {
+		lines = appendWrappedLog(lines, p.text, item.label+": "+fallback(item.value, "(none)"), width)
+	}
+	if model.probe.Rules.ToolchainError != "" {
+		lines = appendWrappedLog(lines, p.warning, "Toolchain detection: "+model.probe.Rules.ToolchainError, width)
+	}
+	lines = append(lines, "", p.title.Render("Rules in TOML order"))
+	if len(model.probe.Rules.Rules) == 0 {
+		lines = append(lines, p.muted.Render("  No conditional rules configured."))
+	}
+	for _, result := range model.probe.Rules.Rules {
+		state, style := "skipped", p.muted
+		if result.Matched {
+			state, style = "matched", p.good
+		}
+		label := fmt.Sprintf("#%d %s", result.Index, state)
+		if result.Target != "" {
+			label += " · target " + result.Target
+		}
+		lines = append(lines, style.Render("  "+label))
+		lines = appendWrappedLog(lines, p.faint, "when: "+result.When, width)
+		for _, change := range result.Changes {
+			lines = appendWrappedLog(lines, p.text, change.Field+": "+fallback(change.Before, "(empty)")+" → "+fallback(change.After, "(empty)"), width)
+		}
+	}
+	lines = append(lines, "", p.title.Render("Final changes from trestle.toml"))
+	if len(model.probe.Rules.Changes) == 0 {
+		lines = append(lines, p.muted.Render("  No configuration values changed."))
+	}
+	for _, change := range model.probe.Rules.Changes {
+		lines = appendWrappedLog(lines, p.text, change.Field+": "+fallback(change.Before, "(empty)")+" → "+fallback(change.After, "(empty)"), width)
+	}
+	return append(lines, "", p.faint.Render("Target-specific C/C++/link flags apply only to that target."))
 }
 
 func (model dashboardModel) selectableRow(p palette, index int, row string) string {
@@ -2148,11 +2279,11 @@ func (model dashboardModel) shortcutLine(p palette, width int) string {
 	case TestsRoute:
 		contextKeys = "↵ selected   g group   a all   f files   m group"
 	case SettingsRoute:
-		contextKeys = "↵ / e edit selected field   p profile"
+		contextKeys = "↵ / e edit selected field   v rule effects"
 	case BuildRoute:
 		contextKeys = "↵ selected   f force   b default   a all"
 	case TasksRoute:
-		contextKeys = "↵ preview task   y confirm   n cancel"
+		contextKeys = "↵ preview   y confirm   esc cancel running"
 	case ReleaseRoute:
 		contextKeys = "↵ optimization   r release ZIP   t targets   o output"
 	case TargetsRoute:

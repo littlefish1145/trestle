@@ -5,14 +5,19 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"time"
 
 	"trestle/internal/condition"
 	"trestle/internal/config"
 	"trestle/internal/deps/vcpkg"
+	"trestle/internal/model"
+	"trestle/internal/sdk/vulkan"
 	"trestle/internal/toolchain"
+	"trestle/internal/toolchain/cuda"
 )
 
 type Status struct {
@@ -20,20 +25,59 @@ type Status struct {
 	Reasons []string
 }
 
+type Change struct {
+	Field  string
+	Before string
+	After  string
+}
+
+type RuleResult struct {
+	Index   int
+	When    string
+	Target  string
+	Matched bool
+	Changes []Change
+}
+
+type Report struct {
+	Rules          []RuleResult
+	Changes        []Change
+	Toolchain      toolchain.Toolchain
+	ToolchainError string
+}
+
 type Probe struct {
-	ctx             context.Context
-	cfg             config.Config
-	packages        map[string]bool
-	packageErrors   map[string]string
-	tools           map[string]bool
-	wsl             map[string]bool
-	compilerChecked bool
-	compilerReady   bool
-	compilerError   string
+	ctx              context.Context
+	cfg              config.Config
+	root             string
+	packages         map[string]bool
+	packageErrors    map[string]string
+	pathChecked      map[string]bool
+	pathErrors       map[string]error
+	tools            map[string]bool
+	wsl              map[string]bool
+	cudaChecked      bool
+	cudaError        error
+	vulkanChecked    map[string]bool
+	vulkanErrors     map[string]error
+	toolchainChecked bool
+	toolchainResult  toolchain.Toolchain
+	toolchainError   error
 }
 
 func NewProbe(ctx context.Context, cfg config.Config) *Probe {
-	return &Probe{ctx: ctx, cfg: cfg, packages: map[string]bool{}, packageErrors: map[string]string{}, tools: map[string]bool{}, wsl: map[string]bool{}}
+	return NewProbeAt(ctx, cfg, ".")
+}
+
+func NewProbeAt(ctx context.Context, cfg config.Config, root string) *Probe {
+	if root == "" {
+		root = "."
+	}
+	absolute, err := filepath.Abs(root)
+	if err == nil {
+		root = absolute
+	}
+	return &Probe{ctx: ctx, cfg: cfg, root: root, packages: map[string]bool{}, packageErrors: map[string]string{}, pathChecked: map[string]bool{}, pathErrors: map[string]error{}, tools: map[string]bool{}, wsl: map[string]bool{}, vulkanChecked: map[string]bool{}, vulkanErrors: map[string]error{}}
 }
 
 func (p *Probe) facts(mode, distribution string) condition.Facts {
@@ -42,7 +86,13 @@ func (p *Probe) facts(mode, distribution string) condition.Facts {
 		WSL:  p.hasWSL, Package: p.hasPackage,
 		WSLTool: func(distribution, name string) bool { return p.tool("wsl", distribution, name) },
 		Env:     os.Getenv,
-		Path:    func(path string) bool { _, err := os.Stat(path); return err == nil },
+		Path: func(path string) bool {
+			if !filepath.IsAbs(path) {
+				path = filepath.Join(p.root, path)
+			}
+			_, err := os.Stat(path)
+			return err == nil
+		},
 	}
 }
 
@@ -51,18 +101,27 @@ func (p *Probe) tool(mode, distribution, name string) bool {
 	if found, ok := p.tools[key]; ok {
 		return found
 	}
-	var found bool
+	found := p.commandAvailable(mode, distribution, name)
+	p.tools[key] = found
+	return found
+}
+
+func (p *Probe) commandAvailable(mode, distribution, name string) bool {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return false
+	}
 	if mode == "wsl" {
 		ctx, cancel := context.WithTimeout(p.ctx, 4*time.Second)
 		defer cancel()
 		_, err := toolchain.WSLExecutable(ctx, distribution, name)
-		found = err == nil
-	} else {
-		_, err := exec.LookPath(name)
-		found = err == nil
+		return err == nil
 	}
-	p.tools[key] = found
-	return found
+	if (strings.ContainsRune(name, '/') || strings.ContainsRune(name, '\\')) && !filepath.IsAbs(name) {
+		name = filepath.Join(p.root, name)
+	}
+	_, err := exec.LookPath(name)
+	return err == nil
 }
 
 func (p *Probe) hasWSL(distribution string) bool {
@@ -86,7 +145,18 @@ func (p *Probe) hasPackage(name string) bool {
 		p.packageErrors[name] = "package is not declared in [packages]"
 		return false
 	}
-	_, err := (vcpkg.Resolver{Root: p.cfg.Vcpkg.Root, Profile: p.cfg.Build.Profile, CRTLinkage: p.cfg.Vcpkg.CRTLinkage, LibraryLinkage: p.cfg.Vcpkg.LibraryLinkage}).Resolve(p.ctx, pkg)
+	root := p.cfg.Vcpkg.Root
+	if root != "" && !filepath.IsAbs(root) {
+		root = filepath.Join(p.root, root)
+	}
+	resolved, err := (vcpkg.Resolver{Root: root, Profile: p.cfg.Build.Profile, CRTLinkage: p.cfg.Vcpkg.CRTLinkage, LibraryLinkage: p.cfg.Vcpkg.LibraryLinkage}).Resolve(p.ctx, pkg)
+	if err == nil {
+		if resolved.Method == vcpkg.ResolutionManual {
+			err = p.checkManualPackagePaths(pkg)
+		} else {
+			err = p.checkPackageUsagePaths(resolved.Usage)
+		}
+	}
 	if err != nil {
 		p.packageErrors[name] = err.Error()
 	}
@@ -95,63 +165,311 @@ func (p *Probe) hasPackage(name string) bool {
 	return found
 }
 
-func (p *Probe) hasCompiler(mode, distribution, requested string) bool {
-	if p.compilerChecked {
-		return p.compilerReady
+func (p *Probe) checkManualPackagePaths(pkg config.Package) error {
+	return p.checkPackagePaths(pkg.IncludeDirs, pkg.LibraryDirs, pkg.RuntimeFiles)
+}
+
+func (p *Probe) checkPackageUsagePaths(usage model.Usage) error {
+	return p.checkPackagePaths(usage.Compile.IncludeDirs, usage.Link.LibraryDirs, usage.Link.RuntimeFiles)
+}
+
+func (p *Probe) checkPackagePaths(includeDirs, libraryDirs, runtimeFiles []string) error {
+	for _, path := range includeDirs {
+		if err := p.checkPath(path, true); err != nil {
+			return fmt.Errorf("package include directory is unavailable: %s (%v)", path, err)
+		}
 	}
-	p.compilerChecked = true
+	for _, path := range libraryDirs {
+		if err := p.checkPath(path, true); err != nil {
+			return fmt.Errorf("package library directory is unavailable: %s (%v)", path, err)
+		}
+	}
+	for _, path := range runtimeFiles {
+		if err := p.checkPath(path, false); err != nil {
+			return fmt.Errorf("package runtime file is unavailable: %s (%v)", path, err)
+		}
+	}
+	return nil
+}
+
+func (p *Probe) checkPath(path string, directory bool) error {
+	mode, distribution := p.cfg.Toolchain.Mode, p.cfg.Toolchain.WSLDistribution
+	kind := "file"
+	if directory {
+		kind = "directory"
+	}
+	key := strings.Join([]string{mode, distribution, kind, path}, "|")
+	if p.pathChecked[key] {
+		return p.pathErrors[key]
+	}
+	err := p.probePath(mode, distribution, path, directory)
+	p.pathChecked[key] = true
+	p.pathErrors[key] = err
+	return err
+}
+
+func (p *Probe) probePath(mode, distribution, path string, directory bool) error {
+	if mode == "wsl" && strings.HasPrefix(path, "/") {
+		ctx, cancel := context.WithTimeout(p.ctx, 4*time.Second)
+		defer cancel()
+		wsl, base, err := toolchain.WSLRunner(distribution)
+		if err != nil {
+			return err
+		}
+		check := "-f"
+		if directory {
+			check = "-d"
+		}
+		args := append(append([]string{}, base...), "--exec", "sh", "-lc", `test "$1" "$2"`, "trestle", check, path)
+		if err := exec.CommandContext(ctx, wsl, args...).Run(); err != nil {
+			return err
+		}
+		return nil
+	}
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(p.root, path)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	if directory && !info.IsDir() {
+		return fmt.Errorf("not a directory")
+	}
+	if !directory && !info.Mode().IsRegular() {
+		return fmt.Errorf("not a regular file")
+	}
+	return nil
+}
+
+func (p *Probe) resolveSources(patterns []string) ([]string, []string) {
+	var sources, reasons []string
+	seen := map[string]bool{}
+	for _, pattern := range patterns {
+		resolvedPattern := pattern
+		if !filepath.IsAbs(resolvedPattern) {
+			resolvedPattern = filepath.Join(p.root, resolvedPattern)
+		}
+		matches := []string{resolvedPattern}
+		if strings.ContainsAny(resolvedPattern, "*?[") {
+			var err error
+			matches, err = filepath.Glob(resolvedPattern)
+			if err != nil {
+				reasons = append(reasons, fmt.Sprintf("invalid source pattern %q: %v", pattern, err))
+				continue
+			}
+		}
+		if len(matches) == 0 {
+			reasons = append(reasons, fmt.Sprintf("source pattern matched no files: %s", pattern))
+			continue
+		}
+		for _, match := range matches {
+			info, err := os.Stat(match)
+			if err != nil {
+				reasons = append(reasons, fmt.Sprintf("source is unavailable: %s (%v)", match, err))
+				continue
+			}
+			if !info.Mode().IsRegular() {
+				reasons = append(reasons, fmt.Sprintf("source is not a regular file: %s", match))
+				continue
+			}
+			clean := filepath.Clean(match)
+			if !seen[clean] {
+				sources = append(sources, clean)
+				seen[clean] = true
+			}
+		}
+	}
+	return sources, reasons
+}
+
+func (p *Probe) checkCUDA(host toolchain.Toolchain) error {
+	if p.cudaChecked {
+		return p.cudaError
+	}
+	p.cudaChecked = true
+	p.cudaError = p.probeCUDA(host)
+	return p.cudaError
+}
+
+func (p *Probe) probeCUDA(host toolchain.Toolchain) error {
 	ctx, cancel := context.WithTimeout(p.ctx, 8*time.Second)
 	defer cancel()
-	var err error
+	mode := p.cfg.Toolchain.CUDAExecution
+	if mode == "" {
+		mode = "native"
+	}
+	distribution := p.cfg.Toolchain.CUDAWSLDistribution
+	if distribution == "" {
+		distribution = p.cfg.Toolchain.WSLDistribution
+	}
+	root := p.cfg.Toolchain.CUDA
 	if mode == "wsl" {
-		_, err = toolchain.DetectWSL(ctx, distribution, requested)
+		if p.cfg.Toolchain.Mode != "wsl" || host.Runner == "" {
+			return fmt.Errorf("WSL CUDA requires a WSL host compiler")
+		}
+		if p.cfg.Toolchain.WSLDistribution != "" && !strings.EqualFold(distribution, p.cfg.Toolchain.WSLDistribution) {
+			return fmt.Errorf("E_CUDA_WSL_DISTRIBUTION: CUDA is in %s but the compiler is in %s", distribution, p.cfg.Toolchain.WSLDistribution)
+		}
+		_, err := cuda.DetectWSL(ctx, distribution, root, host)
+		return err
+	}
+	if host.Runner != "" {
+		return fmt.Errorf("E_CUDA_NATIVE_HOST: native CUDA cannot use a WSL host compiler; connect CUDA from the same WSL distribution")
+	}
+	if root != "" && !filepath.IsAbs(root) {
+		root = filepath.Join(p.root, root)
+	}
+	_, err := cuda.DetectWithHost(ctx, root, host)
+	return err
+}
+
+func (p *Probe) checkVulkan(target config.Target) error {
+	mode := p.cfg.Toolchain.VulkanExecution
+	if mode == "" {
+		mode = "native"
+	}
+	distribution := p.cfg.Toolchain.VulkanWSLDistribution
+	if distribution == "" {
+		distribution = p.cfg.Toolchain.WSLDistribution
+	}
+	root := p.cfg.Toolchain.Vulkan
+	key := strings.Join([]string{mode, distribution, root}, "|")
+	if !p.vulkanChecked[key] {
+		p.vulkanChecked[key] = true
+		ctx, cancel := context.WithTimeout(p.ctx, 8*time.Second)
+		var err error
+		if mode == "wsl" {
+			_, err = vulkan.DetectWSL(ctx, distribution, root)
+		} else if root == "" {
+			_, err = vulkan.Detect()
+		} else {
+			if !filepath.IsAbs(root) {
+				root = filepath.Join(p.root, root)
+			}
+			_, err = vulkan.DetectRoot(root)
+		}
+		cancel()
+		p.vulkanErrors[key] = err
+	}
+	if err := p.vulkanErrors[key]; err != nil {
+		return err
+	}
+	if target.ShaderTool != "" && !p.tool(mode, distribution, target.ShaderTool) {
+		return fmt.Errorf("configured shader tool %q was not found", target.ShaderTool)
+	}
+	return nil
+}
+
+func (p *Probe) checkModuleScanner() error {
+	requested := p.cfg.Toolchain.ModuleScanner
+	if requested == "" {
+		requested = os.Getenv("CLANG_SCAN_DEPS")
+	}
+	mode, distribution := p.cfg.Toolchain.Mode, p.cfg.Toolchain.WSLDistribution
+	if requested == "" {
+		requested = "clang-scan-deps"
+		if mode == "wsl" {
+			ctx, cancel := context.WithTimeout(p.ctx, 4*time.Second)
+			defer cancel()
+			_, err := toolchain.WSLExecutable(ctx, distribution, requested)
+			if err != nil {
+				return err
+			}
+			return nil
+		}
+	}
+	if mode == "wsl" && (filepath.VolumeName(requested) != "" || strings.Contains(requested, `\`)) {
+		return fmt.Errorf("WSL requires a Linux clang-scan-deps path, got %q", requested)
+	}
+	if !p.tool(mode, distribution, requested) {
+		return fmt.Errorf("%s was not found", requested)
+	}
+	return nil
+}
+
+func (p *Probe) resolveToolchain() (toolchain.Toolchain, error) {
+	if p.toolchainChecked {
+		return p.toolchainResult, p.toolchainError
+	}
+	p.toolchainChecked = true
+	ctx, cancel := context.WithTimeout(p.ctx, 8*time.Second)
+	defer cancel()
+	var tc toolchain.Toolchain
+	if p.cfg.Toolchain.Mode == "wsl" {
+		tc, p.toolchainError = toolchain.DetectWSL(ctx, p.cfg.Toolchain.WSLDistribution, p.cfg.Toolchain.CXX)
 	} else {
 		detector := toolchain.NewDetector()
 		setup := p.cfg.Toolchain.Setup
-		if toolchain.NeedsMSVCEnvironment(ctx, requested) {
-			setup = toolchain.ResolveMSVCSetup(ctx, setup, p.cfg.Toolchain.Archiver, p.cfg.Toolchain.Linker, p.cfg.Toolchain.C, requested)
+		if toolchain.NeedsMSVCEnvironment(ctx, p.cfg.Toolchain.CXX) {
+			setup = toolchain.ResolveMSVCSetup(ctx, setup, p.cfg.Toolchain.Archiver, p.cfg.Toolchain.Linker, p.cfg.Toolchain.C, p.cfg.Toolchain.CXX)
 		}
 		if setup != "" {
 			if setupDetector, ok := detector.(interface {
 				DetectWithSetup(context.Context, string, string) (toolchain.Toolchain, error)
 			}); ok {
-				_, err = setupDetector.DetectWithSetup(ctx, requested, setup)
+				tc, p.toolchainError = setupDetector.DetectWithSetup(ctx, p.cfg.Toolchain.CXX, setup)
 			} else {
-				_, err = detector.Detect(ctx, requested)
+				tc, p.toolchainError = detector.Detect(ctx, p.cfg.Toolchain.CXX)
 			}
 		} else {
-			_, err = detector.Detect(ctx, requested)
+			tc, p.toolchainError = detector.Detect(ctx, p.cfg.Toolchain.CXX)
 		}
 	}
-	p.compilerReady = err == nil
-	if err != nil {
-		p.compilerError = err.Error()
+	if p.toolchainError == nil {
+		if p.cfg.Toolchain.C != "" && p.cfg.Toolchain.C != "auto" {
+			tc.CC = p.cfg.Toolchain.C
+		}
+		if p.cfg.Toolchain.Archiver != "" && p.cfg.Toolchain.Archiver != "auto" && p.cfg.Toolchain.Archiver != "lib" {
+			tc.Archiver = p.cfg.Toolchain.Archiver
+		}
+		if p.cfg.Toolchain.Linker != "" && p.cfg.Toolchain.Linker != "auto" {
+			tc.Linker = p.cfg.Toolchain.Linker
+		}
 	}
-	return p.compilerReady
+	p.toolchainResult = tc
+	return tc, p.toolchainError
 }
 
 // Apply resolves conditional declarations in order, without changing the TOML.
 func Apply(ctx context.Context, source config.Config) (config.Config, error) {
+	return ApplyAt(ctx, source, ".")
+}
+
+func ApplyAt(ctx context.Context, source config.Config, root string) (config.Config, error) {
+	cfg, _, err := ApplyWithReportAt(ctx, source, root)
+	return cfg, err
+}
+
+func ApplyWithReportAt(ctx context.Context, source config.Config, root string) (config.Config, Report, error) {
 	cfg := source
+	report := Report{}
 	cfg.Targets = make(map[string]config.Target, len(source.Targets))
 	for name, target := range source.Targets {
 		target.Dependencies = append([]config.Dependency(nil), target.Dependencies...)
 		target.CompileOptions = append([]string(nil), target.CompileOptions...)
+		target.CFlags = append([]string(nil), target.CFlags...)
+		target.CXXFlags = append([]string(nil), target.CXXFlags...)
+		target.LinkOptions = append([]string(nil), target.LinkOptions...)
 		cfg.Targets[name] = target
 	}
 	cfg.Build.CompileFlags = append([]string(nil), source.Build.CompileFlags...)
 	cfg.Build.CFlags = append([]string(nil), source.Build.CFlags...)
 	cfg.Build.CXXFlags = append([]string(nil), source.Build.CXXFlags...)
 	cfg.Build.LinkFlags = append([]string(nil), source.Build.LinkFlags...)
-	p := NewProbe(ctx, cfg)
+	p := NewProbeAt(ctx, cfg, root)
 	for index, rule := range source.Rules {
+		result := RuleResult{Index: index + 1, When: rule.When, Target: rule.Target}
 		match, err := condition.Evaluate(rule.When, p.facts(cfg.Toolchain.Mode, cfg.Toolchain.WSLDistribution))
 		if err != nil {
-			return cfg, fmt.Errorf("rule %d: %w", index+1, err)
+			return cfg, report, fmt.Errorf("rule %d: %w", index+1, err)
 		}
+		result.Matched = match
 		if !match {
+			report.Rules = append(report.Rules, result)
 			continue
 		}
+		before := ruleValues(cfg)
 		if rule.C != "" {
 			cfg.Toolchain.C = rule.C
 		}
@@ -166,13 +484,16 @@ func Apply(ctx context.Context, source config.Config) (config.Config, error) {
 		}
 		if rule.Target == "" {
 			cfg.Build.CompileFlags = append(cfg.Build.CompileFlags, rule.CompileFlags...)
+			cfg.Build.CFlags = append(cfg.Build.CFlags, rule.CFlags...)
+			cfg.Build.CXXFlags = append(cfg.Build.CXXFlags, rule.CXXFlags...)
+			cfg.Build.LinkFlags = append(cfg.Build.LinkFlags, rule.LinkFlags...)
 		}
-		cfg.Build.CFlags = append(cfg.Build.CFlags, rule.CFlags...)
-		cfg.Build.CXXFlags = append(cfg.Build.CXXFlags, rule.CXXFlags...)
-		cfg.Build.LinkFlags = append(cfg.Build.LinkFlags, rule.LinkFlags...)
 		if rule.Target != "" {
 			target := cfg.Targets[rule.Target]
 			target.CompileOptions = append(target.CompileOptions, rule.CompileFlags...)
+			target.CFlags = append(target.CFlags, rule.CFlags...)
+			target.CXXFlags = append(target.CXXFlags, rule.CXXFlags...)
+			target.LinkOptions = append(target.LinkOptions, rule.LinkFlags...)
 			for _, name := range rule.Packages {
 				found := false
 				for _, dep := range target.Dependencies {
@@ -202,15 +523,78 @@ func Apply(ctx context.Context, source config.Config) (config.Config, error) {
 		if len(rule.Targets) > 0 {
 			cfg.Build.DefaultTargets = append([]string(nil), rule.Targets...)
 		}
+		result.Changes = diffRuleValues(before, ruleValues(cfg))
+		report.Rules = append(report.Rules, result)
 	}
 	if err := config.Validate(cfg); err != nil {
-		return cfg, fmt.Errorf("resolved rules: %w", err)
+		return cfg, report, fmt.Errorf("resolved rules: %w", err)
 	}
-	return cfg, nil
+	report.Changes = diffRuleValues(ruleValues(source), ruleValues(cfg))
+	return cfg, report, nil
+}
+
+func ruleValues(cfg config.Config) map[string]string {
+	values := map[string]string{
+		"toolchain.c": cfg.Toolchain.C, "toolchain.cxx": cfg.Toolchain.CXX,
+		"toolchain.mode": cfg.Toolchain.Mode, "toolchain.wsl_distribution": cfg.Toolchain.WSLDistribution,
+		"build.compile_flags":   formatRuleList(cfg.Build.CompileFlags),
+		"build.c_flags":         formatRuleList(cfg.Build.CFlags),
+		"build.cxx_flags":       formatRuleList(cfg.Build.CXXFlags),
+		"build.link_flags":      formatRuleList(cfg.Build.LinkFlags),
+		"build.default_targets": formatRuleList(cfg.Build.DefaultTargets),
+	}
+	for name, target := range cfg.Targets {
+		prefix := "targets." + name + "."
+		values[prefix+"compile_options"] = formatRuleList(target.CompileOptions)
+		values[prefix+"c_flags"] = formatRuleList(target.CFlags)
+		values[prefix+"cxx_flags"] = formatRuleList(target.CXXFlags)
+		values[prefix+"link_options"] = formatRuleList(target.LinkOptions)
+		dependencies := make([]string, 0, len(target.Dependencies))
+		for _, dep := range target.Dependencies {
+			if dep.Package != "" {
+				dependencies = append(dependencies, "package:"+dep.Package+" ("+dep.Scope+")")
+			} else {
+				dependencies = append(dependencies, "target:"+dep.Target+" ("+dep.Scope+")")
+			}
+		}
+		values[prefix+"dependencies"] = formatRuleList(dependencies)
+	}
+	return values
+}
+
+func formatRuleList(values []string) string {
+	if len(values) == 0 {
+		return "(none)"
+	}
+	return fmt.Sprintf("%q", values)
+}
+
+func diffRuleValues(before, after map[string]string) []Change {
+	keys := make([]string, 0, len(after))
+	for key := range after {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	changes := make([]Change, 0)
+	for _, key := range keys {
+		if before[key] != after[key] {
+			changes = append(changes, Change{Field: key, Before: before[key], After: after[key]})
+		}
+	}
+	return changes
 }
 
 func Assess(ctx context.Context, cfg config.Config) map[string]Status {
-	p := NewProbe(ctx, cfg)
+	return AssessAt(ctx, cfg, ".")
+}
+
+func AssessAt(ctx context.Context, cfg config.Config, root string) map[string]Status {
+	statuses, _, _ := AssessWithToolchainAt(ctx, cfg, root)
+	return statuses
+}
+
+func AssessWithToolchainAt(ctx context.Context, cfg config.Config, root string) (map[string]Status, toolchain.Toolchain, error) {
+	p := NewProbeAt(ctx, cfg, root)
 	_, ninjaErr := exec.LookPath("ninja")
 	results := map[string]Status{}
 	var visit func(string) Status
@@ -225,6 +609,31 @@ func Assess(ctx context.Context, cfg config.Config) map[string]Status {
 		visiting[name] = true
 		target := cfg.Targets[name]
 		var reasons []string
+		sources, sourceReasons := p.resolveSources(target.Sources)
+		reasons = append(reasons, sourceReasons...)
+		if target.Type != "shader" {
+			for _, path := range append(append([]string{}, target.IncludeDirs...), target.PrivateIncludeDirs...) {
+				if err := p.checkPath(path, true); err != nil {
+					reasons = append(reasons, fmt.Sprintf("include directory is unavailable: %s (%v)", path, err))
+				}
+			}
+			for _, path := range target.LibraryDirs {
+				if err := p.checkPath(path, true); err != nil {
+					reasons = append(reasons, fmt.Sprintf("library directory is unavailable: %s (%v)", path, err))
+				}
+			}
+		}
+		needsC, needsCUDA := false, false
+		if target.Type != "shader" {
+			for _, source := range sources {
+				switch strings.ToLower(filepath.Ext(source)) {
+				case ".c":
+					needsC = true
+				case ".cu":
+					needsCUDA = true
+				}
+			}
+		}
 		if ninjaErr != nil {
 			reasons = append(reasons, "host Ninja executable is unavailable")
 		}
@@ -244,24 +653,52 @@ func Assess(ctx context.Context, cfg config.Config) map[string]Status {
 		if mode == "wsl" && !p.hasWSL(distribution) {
 			reasons = append(reasons, "configured WSL distribution unavailable: "+fallback(distribution, "default"))
 		}
-		if target.Type == "shader" {
-			shaderMode, shaderDistribution := cfg.Toolchain.VulkanExecution, cfg.Toolchain.VulkanWSLDistribution
-			if shaderMode == "" {
-				shaderMode = "native"
-			}
-			if shaderDistribution == "" {
-				shaderDistribution = distribution
-			}
-			if target.ShaderTool != "" {
-				if !p.tool(shaderMode, shaderDistribution, target.ShaderTool) {
-					reasons = append(reasons, "shader compiler unavailable: "+target.ShaderTool+" ("+shaderMode+")")
-				}
-			} else if !p.tool(shaderMode, shaderDistribution, "glslc") && !p.tool(shaderMode, shaderDistribution, "glslangValidator") {
-				reasons = append(reasons, "no glslc or glslangValidator shader compiler in "+shaderMode)
+		var tc toolchain.Toolchain
+		var tcErr error
+		needsResolvedToolchain := target.Type != "shader" || cfg.Toolchain.CUDA != "" || cfg.Build.Modules
+		if needsResolvedToolchain {
+			tc, tcErr = p.resolveToolchain()
+			if tcErr != nil {
+				reasons = append(reasons, "configured toolchain unavailable: "+tcErr.Error())
 			}
 		}
-		if target.Type != "shader" && !p.hasCompiler(mode, distribution, cfg.Toolchain.CXX) {
-			reasons = append(reasons, "no usable "+mode+" C/C++ compiler (configured: "+fallback(cfg.Toolchain.CXX, "auto")+"): "+p.compilerError)
+		cCompiler := tc.CC
+		if cCompiler == "" {
+			cCompiler = tc.CXX
+		}
+		if needsC && tcErr == nil && !p.tool(mode, distribution, cCompiler) {
+			reasons = append(reasons, "C compiler unavailable: "+fallback(cCompiler, "no C compiler resolved from the selected toolchain"))
+		}
+		if target.Type == "static" && tcErr == nil && !p.tool(mode, distribution, tc.Archiver) {
+			reasons = append(reasons, "static target archiver unavailable: "+fallback(tc.Archiver, "no archiver resolved from the selected toolchain"))
+		}
+		linker := tc.Linker
+		if linker == "" {
+			linker = tc.CXX
+		}
+		if (target.Type == "shared" || target.Type == "executable" || target.Type == "test") && tcErr == nil && !p.tool(mode, distribution, linker) {
+			reasons = append(reasons, "target linker unavailable: "+fallback(linker, "no linker resolved from the selected toolchain"))
+		}
+		if needsCUDA && cfg.Toolchain.CUDA == "" {
+			reasons = append(reasons, "CUDA source requires [toolchain].cuda to configure an nvcc toolkit")
+		}
+		if cfg.Toolchain.CUDA != "" && tcErr == nil {
+			if err := p.checkCUDA(tc); err != nil {
+				reasons = append(reasons, "CUDA toolchain unavailable: "+err.Error())
+			}
+		}
+		if target.Type == "shader" {
+			if err := p.checkVulkan(target); err != nil {
+				reasons = append(reasons, "Vulkan shader toolchain unavailable: "+err.Error())
+			}
+		}
+		if cfg.Build.Modules {
+			if tcErr == nil && tc.Kind != toolchain.Clang {
+				reasons = append(reasons, "C++ modules require Clang; selected toolchain is "+string(tc.Kind))
+			}
+			if err := p.checkModuleScanner(); err != nil {
+				reasons = append(reasons, "module scanner unavailable: "+err.Error())
+			}
 		}
 		for _, name := range target.RequiresTools {
 			if !p.tool(mode, distribution, name) {
@@ -286,7 +723,7 @@ func Assess(ctx context.Context, cfg config.Config) map[string]Status {
 	for name := range cfg.Targets {
 		visit(name)
 	}
-	return results
+	return results, p.toolchainResult, p.toolchainError
 }
 
 func fallback(value, replacement string) string {

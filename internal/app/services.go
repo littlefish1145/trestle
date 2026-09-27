@@ -660,6 +660,10 @@ func SetProjectSetting(path, key, value string) error {
 				target.PrivateDefines = csv()
 			case "compile_options":
 				target.CompileOptions = values
+			case "c_flags":
+				target.CFlags = values
+			case "cxx_flags":
+				target.CXXFlags = values
 			case "library_dirs":
 				target.LibraryDirs = csv()
 			case "libraries":
@@ -1097,7 +1101,7 @@ func GenerateWithContext(ctx context.Context, path string) (BuildResult, error) 
 	if err != nil {
 		return BuildResult{}, err
 	}
-	cfg, err = policy.Apply(ctx, cfg)
+	cfg, err = policy.ApplyAt(ctx, cfg, filepath.Dir(path))
 	if err != nil {
 		return BuildResult{}, err
 	}
@@ -1266,7 +1270,7 @@ func generateWithConfig(ctx context.Context, path string, cfg config.Config) (Bu
 					if target.CXXStandard != "" {
 						standard = target.CXXStandard
 					}
-					options := append(append(append([]string{}, cfg.Build.CompileFlags...), cfg.Build.CXXFlags...), target.CompileSelf.Options...)
+					options := append(append(append(append([]string{}, cfg.Build.CompileFlags...), cfg.Build.CXXFlags...), target.CXXFlags...), target.CompileSelf.Options...)
 					if target.Type == model.SharedLibrary && !hasPICOption(options) {
 						options = append(options, "-fPIC")
 					}
@@ -1506,7 +1510,7 @@ func BuildTargetsWithOptions(ctx context.Context, path string, targets []string,
 	if err != nil {
 		return err
 	}
-	cfg, err = policy.Apply(ctx, cfg)
+	cfg, err = policy.ApplyAt(ctx, cfg, filepath.Dir(path))
 	if err != nil {
 		return err
 	}
@@ -1515,7 +1519,9 @@ func BuildTargetsWithOptions(ctx context.Context, path string, targets []string,
 		return err
 	}
 	if !force {
-		if err := policy.CheckSelected(policy.Assess(ctx, cfg), selected); err != nil {
+		// Manifest generation resolves sources and package metadata for the whole
+		// project, even when Ninja will build only one requested goal.
+		if err := policy.CheckSelected(policy.AssessAt(ctx, cfg, filepath.Dir(path)), sortedTargetNames(cfg.Targets)); err != nil {
 			return err
 		}
 	} else if progress != nil {

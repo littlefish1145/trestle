@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"time"
 	"trestle/internal/condition"
 )
 
@@ -114,6 +115,12 @@ func Validate(cfg Config) error {
 	for name, task := range cfg.Tasks {
 		if len(task.Command) > 0 && strings.TrimSpace(task.Command[0]) == "" {
 			return fmt.Errorf("task %q has an empty command", name)
+		}
+		if task.Timeout != "" {
+			duration, err := time.ParseDuration(task.Timeout)
+			if err != nil || duration <= 0 {
+				return fmt.Errorf("task %q timeout must be a positive duration such as 30s or 5m", name)
+			}
 		}
 		for key := range task.Set {
 			if !taskSettingAllowed(key) {
