@@ -1,0 +1,39 @@
+schema_version = 6
+
+[project]
+name = "hello-fmt"
+
+[build]
+profile = "debug"
+build_dir = "build"
+c_standard = "c17"
+cxx_standard = "c++20"
+default_targets = ["app"]
+
+[toolchain]
+c = "auto"
+cxx = "auto"
+mode = "native"
+
+[vcpkg]
+# Run configure with the actual vcpkg root and target triplet before building.
+triplet = "auto"
+crt_linkage = "dynamic"
+
+[targets.app]
+type = "executable"
+sources = ["src/main.cpp"]
+output_name = "hello-fmt"
+
+[[targets.app.dependencies]]
+package = "fmt"
+scope = "private"
+
+[packages.fmt]
+provider = "vcpkg"
+port = "fmt"
+
+[package]
+format = "zip"
+output = "dist/hello-fmt.zip"
+optimization = "balanced"

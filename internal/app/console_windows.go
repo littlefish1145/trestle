@@ -2,37 +2,6 @@
 
 package app
 
-import (
-	"bytes"
-	"strings"
-	"unicode/utf8"
+import "trestle/internal/processx"
 
-	"golang.org/x/sys/windows"
-)
-
-func decodeConsoleOutput(data []byte) string {
-	// wsl.exe may write startup diagnostics as UTF-16LE while the child process
-	// writes UTF-8 to the same pipe. Removing NUL code-unit bytes preserves the
-	// ASCII prefix used to identify the WSL warning and avoids terminal NULs.
-	data = bytes.ReplaceAll(data, []byte{0}, nil)
-	if utf8.Valid(data) {
-		return string(data)
-	}
-	if len(data) == 0 {
-		return ""
-	}
-	codePage, err := windows.GetConsoleOutputCP()
-	if err != nil || codePage == 0 {
-		codePage = windows.GetACP()
-	}
-	size, err := windows.MultiByteToWideChar(codePage, 0, &data[0], int32(len(data)), nil, 0)
-	if err != nil || size <= 0 {
-		return strings.ToValidUTF8(string(data), "�")
-	}
-	wide := make([]uint16, size)
-	written, err := windows.MultiByteToWideChar(codePage, 0, &data[0], int32(len(data)), &wide[0], size)
-	if err != nil || written <= 0 {
-		return strings.ToValidUTF8(string(data), "�")
-	}
-	return windows.UTF16ToString(wide[:written])
-}
+func decodeConsoleOutput(data []byte) string { return processx.DecodeOutput(data) }

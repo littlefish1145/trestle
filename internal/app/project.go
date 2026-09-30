@@ -69,10 +69,13 @@ func ensureProjectConfig(path string) (config.Config, error) {
 			break
 		}
 	}
-	if err := config.Save(path, cfg); err != nil {
+	if _, ok := cfg.Targets["app"]; !ok {
+		cfg.Build.DefaultTargets = nil
+	}
+	if err := config.SaveExpected(path, cfg, "missing"); err != nil {
 		return config.Config{}, err
 	}
-	return cfg, nil
+	return config.Load(path)
 }
 
 func hasIncludeDirectory(root string) bool {

@@ -65,3 +65,24 @@ func TestFinalizeUsageSelectsOneRuntimeForProfile(t *testing.T) {
 		t.Fatalf("debug runtime selection = %#v", got.Link.RuntimeFiles)
 	}
 }
+
+func TestManifestDebugDLLWithDifferentName(t *testing.T) {
+	root := t.TempDir()
+	info := filepath.Join(root, "installed", "vcpkg", "info")
+	if err := os.MkdirAll(info, 0700); err != nil {
+		t.Fatal(err)
+	}
+	data := "x64-windows/lib/fmt.lib\nx64-windows/bin/fmt.dll\nx64-windows/debug/lib/fmtd.lib\nx64-windows/debug/bin/fmtd.dll\n"
+	if err := os.WriteFile(filepath.Join(info, "fmt_1_x64-windows.list"), []byte(data), 0600); err != nil {
+		t.Fatal(err)
+	}
+	layout := Layout{Root: root, Triplet: "x64-windows"}
+	usage, ok := ResolveInstalledManifestForProfile(layout, "fmt", "debug")
+	if !ok || len(usage.Link.Items) != 1 || usage.Link.Items[0].Name != "fmtd" || len(usage.Link.RuntimeFiles) != 1 || filepath.Base(usage.Link.RuntimeFiles[0]) != "fmtd.dll" {
+		t.Fatalf("wrong debug package: %+v", usage)
+	}
+	usage, ok = ResolveInstalledManifestForProfile(layout, "fmt", "release")
+	if !ok || len(usage.Link.Items) != 1 || usage.Link.Items[0].Name != "fmt" || filepath.Base(usage.Link.RuntimeFiles[0]) != "fmt.dll" {
+		t.Fatalf("wrong release package: %+v", usage)
+	}
+}

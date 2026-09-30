@@ -4,8 +4,8 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"os/exec"
 	"strings"
+	"trestle/internal/processx"
 
 	"trestle/internal/modules"
 	"trestle/internal/modules/p1689"
@@ -40,7 +40,7 @@ func (backend Backend) Scan(ctx context.Context, source string) (p1689.Document,
 		executable = backend.Runner
 		args = append(append(append([]string{}, backend.RunnerArgs...), "--exec", backend.Scanner), args...)
 	}
-	command := exec.CommandContext(ctx, executable, args...)
+	command := processx.Command(ctx, executable, args...)
 	var stderr bytes.Buffer
 	command.Stderr = &stderr
 	output, err := command.Output()

@@ -2,50 +2,83 @@ package app
 
 import (
 	"archive/zip"
+	"context"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 
 	"trestle/internal/config"
+	"trestle/internal/fsx"
 	"trestle/internal/graph"
 )
 
 func Package(path, output string) error {
-	if output != "" {
-		cfg, err := config.Load(path)
+	return PackageWithProgress(context.Background(), path, output, func(line string) { fmt.Println(line) })
+}
+
+func PackageWithProgress(ctx context.Context, path, output string, progress func(string)) error {
+	return runOperation(ctx, path, "package", progress, func(ctx context.Context, emit func(string)) error {
+		if output != "" {
+			cfg, err := config.Load(path)
+			if err != nil {
+				return err
+			}
+			cfg.Package.Output = output
+			if err := config.Save(path, cfg); err != nil {
+				return err
+			}
+		}
+		cfg, err := operationConfig(ctx, path)
 		if err != nil {
 			return err
 		}
-		cfg.Package.Output = output
-		if err := config.Save(path, cfg); err != nil {
+		ctx = context.WithValue(ctx, configurationKey{}, cfg)
+		ctx, release, err := buildResources(ctx, cfg, "package")
+		if err != nil {
 			return err
 		}
-	}
-	if err := Build(path); err != nil {
-		return err
-	}
-	cfg, err := config.Load(path)
-	if err != nil {
-		return err
-	}
-	targets := cfg.Package.Targets
-	if len(targets) == 0 {
-		targets = cfg.Build.DefaultTargets
-	}
-	return packageSelected(path, targets, nil)
+		defer release()
+		ctx, releaseOutput, err := acquireResource(ctx, cfg.Package.Output, "package archive", false)
+		if err != nil {
+			return err
+		}
+		defer releaseOutput()
+		if err := BuildWithProgress(ctx, path, emit); err != nil {
+			return err
+		}
+		targets := cfg.Package.Targets
+		if len(targets) == 0 {
+			targets = cfg.Build.DefaultTargets
+		}
+		return packageSelectedWithContext(ctx, path, targets, emit)
+	})
 }
 
 func packageSelected(path string, targets []string, progress func(string)) error {
-	result, err := Generate(path)
+	return packageSelectedWithContext(context.Background(), path, targets, progress)
+}
+
+func packageSelectedWithContext(ctx context.Context, path string, targets []string, progress func(string)) error {
+	cfg, err := operationConfig(ctx, path)
 	if err != nil {
 		return err
 	}
-	cfg, err := config.Load(path)
+	ctx, release, err := buildResources(ctx, cfg, "archive")
 	if err != nil {
 		return err
 	}
-	project, err := graph.Resolve(cfg)
+	defer release()
+	_, releaseOutput, err := acquireResource(ctx, cfg.Package.Output, "archive", false)
+	if err != nil {
+		return err
+	}
+	defer releaseOutput()
+	result, err := generateWithConfig(ctx, path, cfg)
+	if err != nil {
+		return err
+	}
+	project, err := graph.ResolveAt(ctx, cfg, filepath.Dir(path))
 	if err != nil {
 		return err
 	}
@@ -57,11 +90,11 @@ func packageSelected(path string, targets []string, progress func(string)) error
 	if err := os.MkdirAll(filepath.Dir(output), 0o755); err != nil {
 		return err
 	}
-	file, err := os.Create(output)
+	file, err := os.CreateTemp(filepath.Dir(output), ".trestle-archive-*")
 	if err != nil {
 		return err
 	}
-	defer file.Close()
+	defer func() { _ = file.Close(); _ = os.Remove(file.Name()) }()
 	archive := zip.NewWriter(file)
 	defer archive.Close()
 	manifestDir := filepath.Dir(result.Manifest)
@@ -71,6 +104,9 @@ func packageSelected(path string, targets []string, progress func(string)) error
 	}
 	count := 0
 	for _, target := range project.Targets {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if !wanted[string(target.ID)] {
 			continue
 		}
@@ -95,6 +131,18 @@ func packageSelected(path string, targets []string, progress func(string)) error
 	if err := archive.Close(); err != nil {
 		return err
 	}
+	if count == 0 {
+		return fmt.Errorf("E_PACKAGE_EMPTY: no selected artifacts; build the requested targets before packaging")
+	}
+	if err := file.Sync(); err != nil {
+		return err
+	}
+	if err := file.Close(); err != nil {
+		return err
+	}
+	if err := fsx.Replace(file.Name(), output); err != nil {
+		return err
+	}
 	if progress != nil {
 		progress(fmt.Sprintf("Release ZIP: %s · %d target artifacts", output, count))
 	}
@@ -103,9 +151,6 @@ func packageSelected(path string, targets []string, progress func(string)) error
 
 func addFile(archive *zip.Writer, source, name string) error {
 	if _, err := os.Stat(source); err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
 		return err
 	}
 	file, err := os.Open(source)

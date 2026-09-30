@@ -2,8 +2,6 @@
 
 package app
 
-import "strings"
+import "trestle/internal/processx"
 
-func decodeConsoleOutput(data []byte) string {
-	return strings.ToValidUTF8(string(data), "�")
-}
+func decodeConsoleOutput(data []byte) string { return processx.DecodeOutput(data) }

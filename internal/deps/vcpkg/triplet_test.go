@@ -18,3 +18,16 @@ func TestSelectAutoRejectsAmbiguous(t *testing.T) {
 		t.Fatal("expected ambiguous triplet error")
 	}
 }
+
+func TestTripletsMatchTargetArchitectureAndABI(t *testing.T) {
+	if got := TripletFor("darwin", "arm64"); got != "arm64-osx" {
+		t.Fatal(got)
+	}
+	if got := TripletFor("linux", "386"); got != "x86-linux" {
+		t.Fatal(got)
+	}
+	candidates, err := RankTriplets(TripletRequest{OS: "windows", Arch: "amd64", Compiler: "gcc", Available: []string{"x64-windows", "arm64-mingw-dynamic", "x64-mingw-dynamic"}})
+	if err != nil || len(candidates) != 1 || candidates[0].Name != "x64-mingw-dynamic" {
+		t.Fatalf("wrong ABI: %+v %v", candidates, err)
+	}
+}

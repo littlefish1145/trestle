@@ -55,7 +55,7 @@ func (resolver Resolver) Resolve(ctx context.Context, pkg config.Package) (Resol
 		if err != nil {
 			return ResolvedPackage{}, err
 		}
-		if owned, ok := ResolveInstalledManifest(layout, port); ok {
+		if owned, ok := ResolveInstalledManifestForProfile(layout, port, resolver.Profile); ok {
 			usage.Link.RuntimeFiles = owned.Link.RuntimeFiles
 		}
 		return ResolvedPackage{Name: port, Port: port, Triplet: layout.Triplet, Usage: resolver.finalizeUsage(layout, usage), Method: ResolutionPkgConfig}, nil
@@ -63,7 +63,7 @@ func (resolver Resolver) Resolve(ctx context.Context, pkg config.Package) (Resol
 	if usage, ok := ResolveAdapter(port, layout); ok {
 		return ResolvedPackage{Name: port, Port: port, Triplet: layout.Triplet, Usage: resolver.finalizeUsage(layout, usage), Method: ResolutionAdapter}, nil
 	}
-	if usage, ok := ResolveInstalledManifest(layout, port); ok {
+	if usage, ok := ResolveInstalledManifestForProfile(layout, port, resolver.Profile); ok {
 		usage = resolver.resolveManifestDependencies(layout, port, usage, map[string]bool{port: true})
 		return ResolvedPackage{Name: port, Port: port, Triplet: layout.Triplet, Usage: resolver.finalizeUsage(layout, usage), Method: ResolutionManifest}, nil
 	}
@@ -79,7 +79,7 @@ func (resolver Resolver) resolveManifestDependencies(layout Layout, port string,
 			continue
 		}
 		visiting[dependency] = true
-		if child, ok := ResolveInstalledManifest(layout, dependency); ok {
+		if child, ok := ResolveInstalledManifestForProfile(layout, dependency, resolver.Profile); ok {
 			child = resolver.resolveManifestDependencies(layout, dependency, child, visiting)
 			usage = mergeUsage(usage, child)
 		}

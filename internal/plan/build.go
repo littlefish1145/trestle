@@ -2,6 +2,7 @@ package plan
 
 import (
 	"fmt"
+	pathpkg "path"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -344,9 +345,10 @@ func targetOutput(target model.ResolvedTarget, buildDir string, tc toolchain.Too
 		name = string(target.ID)
 	}
 	extension := ""
+	targetOS, _ := toolchain.TargetPlatform(tc)
 	switch target.Type {
 	case model.Executable, model.Test:
-		if tc.Kind == toolchain.MSVC || runtime.GOOS == "windows" {
+		if targetOS == "windows" {
 			extension = ".exe"
 		}
 	case model.Shader:
@@ -358,10 +360,13 @@ func targetOutput(target model.ResolvedTarget, buildDir string, tc toolchain.Too
 			extension = ".a"
 		}
 	case model.SharedLibrary:
-		if tc.Kind == toolchain.MSVC {
+		if targetOS == "windows" {
 			extension = ".dll"
 		} else {
 			extension = ".so"
+			if targetOS == "darwin" {
+				extension = ".dylib"
+			}
 		}
 	}
 	return filepath.Join(buildDir, "bin", name+extension), nil
@@ -392,6 +397,9 @@ func objectExtension(source string, tc toolchain.Toolchain) string {
 }
 
 func relative(root, buildDir, path string) string {
+	if runtime.GOOS == "windows" && strings.HasPrefix(path, "/") {
+		return pathpkg.Clean(path)
+	}
 	if filepath.IsAbs(path) {
 		if rel, err := filepath.Rel(buildDir, path); err == nil {
 			return filepath.ToSlash(rel)

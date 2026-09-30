@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"trestle/internal/processx"
 )
 
 type CapabilityProbe struct {
@@ -36,11 +37,11 @@ func ProbeClang(ctx context.Context, compiler, scanner string) CapabilityProbe {
 	if err := os.WriteFile(source, []byte("export module probe; export int value() { return 1; }\n"), 0o644); err != nil {
 		return probe
 	}
-	scan := exec.CommandContext(ctx, scanner, "-format=p1689", "--", compiler, "-std=c++20", "-c", source)
+	scan := processx.Command(ctx, scanner, "-format=p1689", "--", compiler, "-std=c++20", "-c", source)
 	if scan.Run() == nil {
 		probe.P1689Scan = true
 	}
-	compile := exec.CommandContext(ctx, compiler, "-std=c++20", "--precompile", source, "-o", module)
+	compile := processx.Command(ctx, compiler, "-std=c++20", "--precompile", source, "-o", module)
 	if compile.Run() == nil {
 		probe.NamedModules = true
 		probe.ExplicitArtifact = true

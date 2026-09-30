@@ -3,20 +3,9 @@
 package app
 
 import (
-	"context"
 	"os/exec"
-	"strconv"
-	"time"
+	"trestle/internal/processx"
 )
 
-func prepareTaskProcess(_ *exec.Cmd) {}
-
-func terminateTaskProcess(command *exec.Cmd) {
-	if command.Process == nil {
-		return
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	_ = exec.CommandContext(ctx, "taskkill.exe", "/T", "/F", "/PID", strconv.Itoa(command.Process.Pid)).Run()
-	_ = command.Process.Kill()
-}
+func prepareTaskProcess(command *exec.Cmd)   { processx.Prepare(command) }
+func terminateTaskProcess(command *exec.Cmd) { processx.Terminate(command) }

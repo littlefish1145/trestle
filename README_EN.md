@@ -72,6 +72,8 @@ go vet ./...
 
 ## Quick start
 
+Start with [the complete C++ + fmt tutorial](docs/tutorial.en.md) for Windows, Linux, macOS and WSL, including logs and recovery. A runnable project is in [examples/hello-fmt](examples/hello-fmt/).
+
 ```powershell
 trestle init -C hello -name hello
 cd hello

@@ -5,9 +5,9 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
+	"trestle/internal/processx"
 
 	"trestle/internal/modules"
 	"trestle/internal/modules/p1689"
@@ -29,7 +29,7 @@ func (backend Backend) Scan(ctx context.Context, source string) (p1689.Document,
 	objectFile := filepath.Join(directory, "scan.obj")
 	args := []string{"/nologo", "/std:c++20", "/scanDependencies", scanFile, "/c", source, "/Fo" + objectFile}
 	args = append(args, backend.Options...)
-	command := exec.CommandContext(ctx, backend.Compiler, args...)
+	command := processx.Command(ctx, backend.Compiler, args...)
 	var stderr bytes.Buffer
 	command.Stderr = &stderr
 	if err := command.Run(); err != nil {

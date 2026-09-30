@@ -5,8 +5,10 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"golang.org/x/term"
 	"trestle/internal/app"
@@ -14,6 +16,7 @@ import (
 	"trestle/internal/deps/vcpkg"
 	"trestle/internal/diag"
 	"trestle/internal/policy"
+	"trestle/internal/runlog"
 	tuimodel "trestle/internal/tui"
 )
 
@@ -59,7 +62,9 @@ func main() {
 	}
 }
 
-func run(command string, args []string) error {
+func run(command string, args []string) (result error) {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 	set := flag.NewFlagSet(command, flag.ContinueOnError)
 	set.SetOutput(os.Stderr)
 	directory := set.String("C", ".", "run from this directory")
@@ -141,7 +146,14 @@ func run(command string, args []string) error {
 		return app.AnalyzeProject(".", os.Stdout)
 	}
 	path := config.DefaultFileName
+	defer func() {
+		if result != nil {
+			result = runlog.Failure(path, command, result)
+		}
+	}()
 	switch command {
+	case "tui":
+		return tuimodel.RunDashboard(path, dashboardServices(path))
 	case "configure":
 		if *interactive {
 			return app.ConfigureInteractive(path, os.Stdin, os.Stdout)
@@ -194,17 +206,17 @@ func run(command string, args []string) error {
 		if *dashboard && term.IsTerminal(int(os.Stdin.Fd())) {
 			return tuimodel.RunDashboard(path, dashboardServices(path))
 		}
-		return app.BuildTargetsWithOptions(context.Background(), path, set.Args(), testAll, force, func(line string) { fmt.Println(line) })
+		return app.BuildTargetsWithOptions(ctx, path, set.Args(), testAll, force, func(line string) { fmt.Println(line) })
 	case "test":
 		selection := app.TestSelection{Job: testJob, Group: testGroup, File: testFile, All: testAll || (testJob == "" && testGroup == "" && testFile == "")}
-		return app.RunTests(context.Background(), path, selection, func(line string) { fmt.Println(line) })
+		return app.RunTests(ctx, path, selection, func(line string) { fmt.Println(line) })
 	case "import", "import-cmake":
 		if command == "import" {
 			if _, err := os.Stat("xmake.lua"); err == nil {
-				return app.ImportXmake(context.Background(), path, func(line string) { fmt.Println(line) })
+				return app.ImportXmake(ctx, path, func(line string) { fmt.Println(line) })
 			}
 		}
-		result, err := app.ImportCMake(context.Background(), path, func(line string) { fmt.Println(line) })
+		result, err := app.ImportCMake(ctx, path, func(line string) { fmt.Println(line) })
 		if err == nil {
 			for _, warning := range result.Warnings {
 				fmt.Println("warning:", warning)
@@ -212,9 +224,9 @@ func run(command string, args []string) error {
 		}
 		return err
 	case "import-xmake":
-		return app.ImportXmake(context.Background(), path, func(line string) { fmt.Println(line) })
+		return app.ImportXmake(ctx, path, func(line string) { fmt.Println(line) })
 	case "package":
-		return app.Package(path, *output)
+		return app.PackageWithProgress(ctx, path, *output, func(line string) { fmt.Println(line) })
 	case "release":
 		var targets []string
 		if releaseTargets != "" {
@@ -227,7 +239,7 @@ func run(command string, args []string) error {
 		if err := app.ConfigureRelease(path, *preset, targets, *output); err != nil {
 			return err
 		}
-		return app.ReleaseWithProgress(context.Background(), path, func(line string) { fmt.Println(line) })
+		return app.ReleaseWithProgress(ctx, path, func(line string) { fmt.Println(line) })
 	case "vcpkg":
 		if portsText != "" {
 			for _, port := range strings.Split(portsText, ",") {
@@ -236,11 +248,17 @@ func run(command string, args []string) error {
 				}
 			}
 		}
-		return app.Vcpkg(context.Background(), *vcpkgRoot, query, ports, vcpkgTriplet, install)
+		return app.Vcpkg(ctx, *vcpkgRoot, query, ports, vcpkgTriplet, install)
 	case "toolchain":
-		return app.Toolchains(context.Background())
+		return app.Toolchains(ctx)
 	case "doctor":
-		return app.Doctor(path)
+		return app.DoctorWithContext(ctx, path, func(line string) { fmt.Println(line) })
+	case "logs":
+		id := ""
+		if len(set.Args()) > 0 {
+			id = set.Args()[0]
+		}
+		return app.Logs(path, id, os.Stdout)
 	default:
 		return fmt.Errorf("unknown command %q", command)
 	}
@@ -248,6 +266,9 @@ func run(command string, args []string) error {
 
 func dashboardServices(path string) tuimodel.Services {
 	return tuimodel.Services{
+		Doctor: func(ctx context.Context, progress func(string)) error {
+			return app.DoctorWithContext(ctx, path, progress)
+		},
 		Build: func(ctx context.Context, progress func(string)) error {
 			return app.BuildWithProgress(ctx, path, progress)
 		},
@@ -344,6 +365,7 @@ func usage() {
 	fmt.Println()
 	fmt.Println("Usage:")
 	fmt.Println("  trestle                         open Project Console TUI")
+	fmt.Println("  trestle tui [-C dir]            open Project Console TUI")
 	fmt.Println("  trestle init [-C dir] [-name project]")
 	fmt.Println("  trestle configure [-C dir] [-toolchain clang++] [-mode native|wsl] [-wsl-distribution Ubuntu] [-cuda path] [-cuda-execution native|wsl] [-vulkan path] [-vulkan-execution native|wsl]")
 	fmt.Println("  trestle analyze [-C dir]")
@@ -354,6 +376,7 @@ func usage() {
 	fmt.Println("  trestle package [-C dir] [-output dist/app.zip]")
 	fmt.Println("  trestle release [-C dir] [-optimization balanced|speed|size|custom:name] [-targets app,tool] [-output dist/app.zip]")
 	fmt.Println("  trestle doctor [-C dir]")
+	fmt.Println("  trestle logs [-C dir] [operation-id]")
 	fmt.Println("  trestle toolchain [-C dir]")
 	fmt.Println("  trestle vcpkg [-C dir] [-root path] [-search query] | [-install -ports zlib,fmt]")
 	fmt.Println("  trestle version")

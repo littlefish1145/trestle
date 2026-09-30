@@ -24,6 +24,12 @@ type Component struct {
 }
 
 func Discover(ctx context.Context) []Component {
+	return append(DiscoverNative(ctx), discoverWSL(ctx)...)
+}
+
+func DiscoverWSL(ctx context.Context) []Component { return discoverWSL(ctx) }
+
+func DiscoverNative(ctx context.Context) []Component {
 	var components []Component
 	addExecutables := func(family string, names ...string) {
 		seen := map[string]bool{}
@@ -64,7 +70,6 @@ func Discover(ctx context.Context) []Component {
 	components = append(components, discoverMSVC(ctx)...)
 	components = append(components, discoverCUDA(ctx)...)
 	components = append(components, discoverVulkan(ctx)...)
-	components = append(components, discoverWSL(ctx)...)
 	seenFamilies := map[string]bool{}
 	for _, component := range components {
 		seenFamilies[component.Family] = true
@@ -87,7 +92,7 @@ func discoverWSL(ctx context.Context) []Component {
 	}
 	probeCtx, cancel := context.WithTimeout(ctx, 12*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(probeCtx, wsl, "--list", "--quiet").CombinedOutput()
+	out, err := exec.CommandContext(probeCtx, wsl, "--list", "--quiet").Output()
 	if err != nil {
 		detail := strings.TrimSpace(decodeWindowsCommand(out))
 		if detail == "" {
@@ -95,51 +100,89 @@ func discoverWSL(ctx context.Context) []Component {
 		}
 		return []Component{{Name: "unavailable", Family: "WSL", Ready: false, Detail: detail}}
 	}
-	var result []Component
-	compilerFound := false
-	for _, distribution := range strings.Fields(decodeWindowsCommand(out)) {
-		for _, compiler := range []string{"clang++", "g++"} {
-			compilerPath, findErr := WSLExecutable(probeCtx, distribution, compiler)
-			if findErr != nil || compilerPath == "" {
-				continue
-			}
-			versionOut, _ := exec.CommandContext(probeCtx, wsl, "-d", distribution, "--exec", compilerPath, "--version").Output()
-			version := strings.TrimSpace(strings.Split(string(versionOut), "\n")[0])
-			if version == "" {
-				version = "version unavailable"
-			}
-			compilerFound = true
-			result = append(result, Component{Name: compiler + " @ " + distribution, Family: "WSL", Path: compilerPath, Version: version, Ready: true, Detail: "runs inside WSL; Windows paths are translated automatically", Execution: "wsl", Distribution: distribution})
-		}
-
-		if nvcc, findErr := WSLExecutable(probeCtx, distribution, "nvcc"); findErr == nil {
-			root := WSLVariable(probeCtx, distribution, "CUDA_HOME")
-			if root == "" {
-				root = WSLVariable(probeCtx, distribution, "CUDA_PATH")
-			}
-			if root == "" {
-				root = pathpkg.Dir(pathpkg.Dir(nvcc))
-			}
-			versionOut, _ := exec.CommandContext(probeCtx, wsl, "-d", distribution, "--exec", nvcc, "--version").Output()
-			result = append(result, Component{Name: "CUDA @ " + distribution, Family: "CUDA", Path: nvcc, Version: lastNonEmptyLine(string(versionOut)), Ready: true, Detail: root, Execution: "wsl", Distribution: distribution})
-		}
-
-		vulkanRoot := WSLVariable(probeCtx, distribution, "VULKAN_SDK")
-		for _, shaderTool := range []string{"glslc", "glslangValidator"} {
-			shaderPath, findErr := WSLExecutable(probeCtx, distribution, shaderTool)
-			if findErr != nil {
-				continue
-			}
-			root := vulkanRoot
-			if root == "" {
-				root = pathpkg.Dir(pathpkg.Dir(shaderPath))
-			}
-			versionOut, _ := exec.CommandContext(probeCtx, wsl, "-d", distribution, "--exec", shaderPath, "--version").Output()
-			result = append(result, Component{Name: shaderTool + " @ " + distribution, Family: "Vulkan", Path: shaderPath, Version: firstNonEmptyLine(string(versionOut)), Ready: true, Detail: root, Execution: "wsl", Distribution: distribution})
-		}
+	distributions := WSLDistributions(out)
+	type discovered struct {
+		index      int
+		components []Component
 	}
-	if !compilerFound {
-		result = append(result, Component{Name: "no compiler", Family: "WSL", Ready: false, Detail: "WSL is installed, but clang++/g++ was not found in its distributions"})
+	results := make(chan discovered, len(distributions))
+	for index, distribution := range distributions {
+		go func(index int, distribution string) {
+			results <- discovered{index, discoverWSLDistribution(ctx, wsl, distribution)}
+		}(index, distribution)
+	}
+	ordered := make([][]Component, len(distributions))
+	for range distributions {
+		result := <-results
+		ordered[result.index] = result.components
+	}
+	var result []Component
+	for _, components := range ordered {
+		result = append(result, components...)
+	}
+	return result
+}
+
+func discoverWSLDistribution(ctx context.Context, wsl, distribution string) []Component {
+	var result []Component
+	probeCtx, distributionCancel := context.WithTimeout(ctx, 8*time.Second)
+	distributionFound := false
+	var failures []string
+	for _, compiler := range []string{"clang++", "g++"} {
+		compilerPath, findErr := WSLExecutable(probeCtx, distribution, compiler)
+		if findErr != nil || compilerPath == "" {
+			if findErr != nil {
+				failures = append(failures, findErr.Error())
+			}
+			continue
+		}
+		versionOut, _ := exec.CommandContext(probeCtx, wsl, "-d", distribution, "--exec", compilerPath, "--version").Output()
+		version := strings.TrimSpace(strings.Split(string(versionOut), "\n")[0])
+		if version == "" {
+			version = "version unavailable"
+		}
+		distributionFound = true
+		result = append(result, Component{Name: compiler + " @ " + distribution, Family: "WSL", Path: compilerPath, Version: version, Ready: true, Detail: "runs inside WSL; Windows paths are translated automatically", Execution: "wsl", Distribution: distribution})
+	}
+
+	if nvcc, findErr := WSLExecutable(probeCtx, distribution, "nvcc"); findErr == nil {
+		root := WSLVariable(probeCtx, distribution, "CUDA_HOME")
+		if root == "" {
+			root = WSLVariable(probeCtx, distribution, "CUDA_PATH")
+		}
+		if root == "" {
+			root = pathpkg.Dir(pathpkg.Dir(nvcc))
+		}
+		versionOut, _ := exec.CommandContext(probeCtx, wsl, "-d", distribution, "--exec", nvcc, "--version").Output()
+		result = append(result, Component{Name: "CUDA @ " + distribution, Family: "CUDA", Path: nvcc, Version: lastNonEmptyLine(string(versionOut)), Ready: true, Detail: root, Execution: "wsl", Distribution: distribution})
+	}
+
+	vulkanRoot := WSLVariable(probeCtx, distribution, "VULKAN_SDK")
+	for _, shaderTool := range []string{"glslc", "glslangValidator"} {
+		shaderPath, findErr := WSLExecutable(probeCtx, distribution, shaderTool)
+		if findErr != nil {
+			continue
+		}
+		root := vulkanRoot
+		if root == "" {
+			root = pathpkg.Dir(pathpkg.Dir(shaderPath))
+		}
+		versionOut, _ := exec.CommandContext(probeCtx, wsl, "-d", distribution, "--exec", shaderPath, "--version").Output()
+		result = append(result, Component{Name: shaderTool + " @ " + distribution, Family: "Vulkan", Path: shaderPath, Version: firstNonEmptyLine(string(versionOut)), Ready: true, Detail: root, Execution: "wsl", Distribution: distribution})
+	}
+	if !distributionFound {
+		result = append(result, Component{Name: "not ready @ " + distribution, Family: "WSL", Distribution: distribution, Execution: "wsl", Detail: strings.Join(failures, "; ") + ". Check this distribution with wsl -d <name> --exec clang++ --version."})
+	}
+	distributionCancel()
+	return result
+}
+
+func WSLDistributions(output []byte) []string {
+	var result []string
+	for _, line := range strings.Split(strings.ReplaceAll(decodeWindowsCommand(output), "\r\n", "\n"), "\n") {
+		if line = strings.TrimSpace(strings.TrimPrefix(line, "\ufeff")); line != "" {
+			result = append(result, line)
+		}
 	}
 	return result
 }

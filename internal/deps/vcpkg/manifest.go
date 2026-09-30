@@ -14,6 +14,10 @@ import (
 // This supports ports that expose neither pkg-config metadata nor a built-in
 // adapter without guessing from the shared installation tree.
 func ResolveInstalledManifest(layout Layout, port string) (model.Usage, bool) {
+	return ResolveInstalledManifestForProfile(layout, port, "release")
+}
+
+func ResolveInstalledManifestForProfile(layout Layout, port, profile string) (model.Usage, bool) {
 	infoDir := filepath.Join(layout.Root, "installed", "vcpkg", "info")
 	patterns := []string{
 		filepath.Join(infoDir, port+"_*_"+layout.Triplet+".list"),
@@ -32,6 +36,10 @@ func ResolveInstalledManifest(layout Layout, port string) (model.Usage, bool) {
 	runtimeFiles := map[string]bool{}
 	hasHeaders := false
 	prefix := filepath.ToSlash(layout.Triplet) + "/"
+	libPrefix, binPrefix := prefix+"lib/", prefix+"bin/"
+	if strings.EqualFold(profile, "debug") {
+		libPrefix, binPrefix = prefix+"debug/lib/", prefix+"debug/bin/"
+	}
 	for _, manifest := range manifests {
 		file, err := os.Open(manifest)
 		if err != nil {
@@ -43,12 +51,12 @@ func ResolveInstalledManifest(layout Layout, port string) (model.Usage, bool) {
 			if strings.HasPrefix(entry, prefix+"include/") {
 				hasHeaders = true
 			}
-			if strings.HasPrefix(entry, prefix+"lib/") && !strings.Contains(entry, "/pkgconfig/") {
+			if strings.HasPrefix(entry, libPrefix) && !strings.Contains(entry, "/pkgconfig/") {
 				if library := libraryName(entry); library != "" {
 					libraries[library] = true
 				}
 			}
-			if strings.HasPrefix(entry, prefix+"bin/") && strings.EqualFold(filepath.Ext(entry), ".dll") {
+			if strings.HasPrefix(entry, binPrefix) && strings.EqualFold(filepath.Ext(entry), ".dll") {
 				runtimeFiles[filepath.Join(layout.Root, "installed", filepath.FromSlash(entry))] = true
 			}
 		}

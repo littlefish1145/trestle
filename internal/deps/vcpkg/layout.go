@@ -49,13 +49,20 @@ func DetectLayout(root, triplet string) (Layout, error) {
 }
 
 func DefaultTriplet() string {
-	if runtime.GOOS == "windows" {
-		return "x64-windows"
+	return TripletFor(runtime.GOOS, runtime.GOARCH)
+}
+
+func TripletFor(osName, arch string) string {
+	if arch == "amd64" {
+		arch = "x64"
 	}
-	if runtime.GOOS == "darwin" {
-		return "x64-osx"
+	if arch == "386" {
+		arch = "x86"
 	}
-	return "x64-linux"
+	if osName == "darwin" {
+		osName = "osx"
+	}
+	return arch + "-" + osName
 }
 
 func ValidTripletName(value string) bool {

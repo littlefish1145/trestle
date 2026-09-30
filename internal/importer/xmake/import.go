@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"trestle/internal/processx"
 
 	"trestle/internal/config"
 )
@@ -333,9 +334,9 @@ func uniqueStable(values []string) []string {
 }
 
 func runCommand(ctx context.Context, executable, root string, args ...string) ([]byte, error) {
-	cmd := exec.CommandContext(ctx, executable, args...)
+	cmd := processx.Command(ctx, executable, args...)
 	cmd.Dir = root
-	return cmd.CombinedOutput()
+	return processx.Capture(ctx, cmd)
 }
 
 func introspect(ctx context.Context, executable, root string, progress func(string), run commandRunner) ([]target, error) {
@@ -449,6 +450,10 @@ func formatAttempt(args []string, err error, output []byte) string {
 }
 
 func Import(ctx context.Context, root, configPath string, progress func(string)) error {
+	expected, snapshotErr := config.Snapshot(configPath)
+	if snapshotErr != nil {
+		return snapshotErr
+	}
 	if _, err := os.Stat(filepath.Join(root, "xmake.lua")); err != nil {
 		return fmt.Errorf("xmake.lua was not found in %s", root)
 	}
@@ -501,5 +506,5 @@ func Import(ctx context.Context, root, configPath string, progress func(string))
 	if progress != nil {
 		progress(fmt.Sprintf("Imported %d Xmake targets; default target: %s", len(cfg.Targets), cfg.Build.DefaultTargets[0]))
 	}
-	return config.Save(configPath, cfg)
+	return config.SaveExpected(configPath, cfg, expected)
 }

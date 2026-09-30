@@ -4,17 +4,8 @@ package app
 
 import (
 	"os/exec"
-	"syscall"
+	"trestle/internal/processx"
 )
 
-func prepareTaskProcess(command *exec.Cmd) {
-	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-}
-
-func terminateTaskProcess(command *exec.Cmd) {
-	if command.Process == nil {
-		return
-	}
-	_ = syscall.Kill(-command.Process.Pid, syscall.SIGKILL)
-	_ = command.Process.Kill()
-}
+func prepareTaskProcess(command *exec.Cmd)   { processx.Prepare(command) }
+func terminateTaskProcess(command *exec.Cmd) { processx.Terminate(command) }

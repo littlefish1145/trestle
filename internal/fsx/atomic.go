@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 )
 
 func AtomicWrite(path string, data []byte) error {
@@ -35,15 +34,7 @@ func AtomicWrite(path string, data []byte) error {
 	if err = temporary.Close(); err != nil {
 		return err
 	}
-	if err := os.Rename(name, path); err == nil {
-		return nil
-	} else if runtime.GOOS != "windows" {
-		return err
-	}
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-		return err
-	}
-	return os.Rename(name, path)
+	return Replace(name, path)
 }
 
 func Hash(value any) string {

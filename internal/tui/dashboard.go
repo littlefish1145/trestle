@@ -4,8 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -17,8 +15,9 @@ import (
 	"github.com/charmbracelet/x/ansi"
 	"trestle/internal/config"
 	"trestle/internal/deps/vcpkg"
+	"trestle/internal/diag"
 	"trestle/internal/policy"
-	"trestle/internal/sdk/vulkan"
+	"trestle/internal/runlog"
 	"trestle/internal/toolchain"
 )
 
@@ -57,6 +56,7 @@ type Services struct {
 	DeletePreset      func(string) error
 	ConfigureRelease  func(string, []string, string) error
 	Release           func(context.Context, func(string)) error
+	Doctor            func(context.Context, func(string)) error
 }
 
 type TestSelection struct {
@@ -102,9 +102,11 @@ type focusArea uint8
 const (
 	focusNavigation focusArea = iota
 	focusContent
+	focusLog
 )
 
 type probeMessage struct {
+	Fingerprint  string
 	Config       config.Config
 	BaseConfig   config.Config
 	Statuses     map[string]policy.Status
@@ -148,6 +150,9 @@ type workflowEvent struct {
 	err   error
 }
 
+type workflowBatch []workflowEvent
+type installBatch []installEvent
+
 type dashboardModel struct {
 	path               string
 	services           Services
@@ -167,6 +172,30 @@ type dashboardModel struct {
 	cursor             int
 	scroll             int
 	logFollow          bool
+	logScroll          int
+	logsCollapsed      bool
+	batchingLogs       bool
+	assessing          bool
+	discovering        bool
+	wslDiscovering     bool
+	projectFingerprint string
+	settingsCategory   string
+	settingsQuery      string
+	fullLog            bool
+	diskLog            *logView
+	latestInstall      bool
+	details            bool
+	detailText         string
+	lastError          error
+	history            bool
+	runHistory         []runlog.Record
+	historyCursor      int
+	overlayScroll      int
+	helpScroll         int
+	detailsScroll      int
+	historyScroll      int
+	pagePositions      map[Route][2]int
+	logQuery           string
 	lastRun            string
 	message            string
 	messageError       bool
@@ -221,104 +250,120 @@ func RunDashboard(path string, services Services) error {
 func newDashboard(path string, services Services) dashboardModel {
 	return dashboardModel{
 		path: path, services: services, route: OverviewRoute, focus: focusNavigation,
-		width: 100, height: 30, probing: true, lastRun: "No build in this session",
-		message: "Inspecting project and development environment…",
+		width: 100, height: 30, probing: true, discovering: true, wslDiscovering: true, lastRun: "No build in this session",
+		message: "Reading project configuration…",
 	}
 }
 
-func (model dashboardModel) Init() tea.Cmd { return tea.Batch(model.probeCommand(), pulseCommand()) }
+func (model dashboardModel) Init() tea.Cmd {
+	return tea.Batch(model.probeCommand(), model.inventoryCommand(), model.wslInventoryCommand(), pulseCommand())
+}
 
 func pulseCommand() tea.Cmd {
 	return tea.Tick(120*time.Millisecond, func(value time.Time) tea.Msg { return pulseMessage(value) })
 }
 
-func (model dashboardModel) probeCommand() tea.Cmd {
-	return func() tea.Msg {
-		cfg, err := config.Load(model.path)
-		message := probeMessage{Error: err}
-		if err == nil {
-			message.BaseConfig = cfg
-		}
-		if model.services.AssessTargets != nil {
-			cfg, message.Statuses, message.Rules, err = model.services.AssessTargets(context.Background())
-			message.Error = err
-		}
-		if err == nil {
-			message.Config = cfg
-			message.ProjectName = cfg.Project.Name
-			for name, target := range cfg.Targets {
-				message.Targets++
-				message.Sources += len(target.Sources)
-				if target.Type == "test" {
-					group := target.TestGroup
-					if group == "" {
-						group = "default"
-					}
-					message.Tests = append(message.Tests, testJob{Name: name, Group: group, Files: append([]string{}, target.Sources...)})
-				}
-			}
-			sort.Slice(message.Tests, func(i, j int) bool { return message.Tests[i].Name < message.Tests[j].Name })
-		}
-		message.Toolchains = toolchain.List(context.Background())
-		message.Components = toolchain.Discover(context.Background())
-		vcpkgRoot := ""
-		if err == nil {
-			vcpkgRoot = cfg.Vcpkg.Root
-		}
-		if client, clientErr := vcpkg.NewClient(vcpkgRoot); clientErr == nil {
-			message.Vcpkg, message.VcpkgRoot = true, client.Root
-		}
-		var vulkanError error
-		if err == nil && cfg.Toolchain.VulkanExecution == "wsl" {
-			distribution := cfg.Toolchain.VulkanWSLDistribution
-			if distribution == "" {
-				distribution = cfg.Toolchain.WSLDistribution
-			}
-			_, vulkanError = vulkan.DetectWSL(context.Background(), distribution, cfg.Toolchain.Vulkan)
-		} else if err == nil && cfg.Toolchain.Vulkan != "" {
-			_, vulkanError = vulkan.DetectRoot(cfg.Toolchain.Vulkan)
-		} else {
-			_, vulkanError = vulkan.Detect()
-		}
-		_, ninjaError := exec.LookPath("ninja")
-		_, cmakeError := exec.LookPath("cmake")
-		message.Vulkan = vulkanError == nil
-		message.Ninja = ninjaError == nil
-		message.CMake = cmakeError == nil
-		_, cmakeProjectError := os.Stat(filepath.Join(filepath.Dir(model.path), "CMakeLists.txt"))
-		message.CMakeProject = cmakeProjectError == nil
-		_, xmakeError := exec.LookPath("xmake")
-		message.Xmake = xmakeError == nil
-		_, xmakeProjectError := os.Stat(filepath.Join(filepath.Dir(model.path), "xmake.lua"))
-		message.XmakeProject = xmakeProjectError == nil
-		return message
-	}
-}
-
 func (model dashboardModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	switch value := message.(type) {
+	case workflowBatch:
+		model.batchingLogs = true
+		var command tea.Cmd
+		for _, event := range value {
+			updated, cmd := model.Update(event)
+			model = updated.(dashboardModel)
+			command = cmd
+			if event.done {
+				break
+			}
+		}
+		model.batchingLogs = false
+		model.followVisibleLog(model.workflowRoute)
+		return model, command
+	case installBatch:
+		model.batchingLogs = true
+		var command tea.Cmd
+		for _, event := range value {
+			updated, cmd := model.Update(event)
+			model = updated.(dashboardModel)
+			command = cmd
+			if event.done {
+				break
+			}
+		}
+		model.batchingLogs = false
+		model.followVisibleLog(PackagesRoute)
+		return model, command
 	case tea.WindowSizeMsg:
 		model.width, model.height = value.Width, value.Height
-		if model.logFollow && model.routeHasLog() {
-			model.scroll = model.maxContentScroll()
+		if model.logFollow && model.hasLog() {
+			model.logScroll = model.maxLogScroll()
 		}
 	case pulseMessage:
 		model.pulse++
 		if model.busy() {
 			return model, pulseCommand()
 		}
+	case inventoryMessage:
+		model.discovering = false
+		for _, component := range model.probe.Components {
+			if component.Execution == "wsl" || component.Family == "WSL" {
+				value.components = append(value.components, component)
+			}
+		}
+		model.probe.Components = value.components
+		model.probe.Vulkan = false
+		for _, component := range value.components {
+			if component.Family == "Vulkan" && component.Ready {
+				model.probe.Vulkan = true
+			}
+		}
+	case wslInventoryMessage:
+		model.wslDiscovering = false
+		var components []toolchain.Component
+		for _, component := range model.probe.Components {
+			if component.Execution != "wsl" && component.Family != "WSL" {
+				components = append(components, component)
+			}
+		}
+		model.probe.Components = append(components, value.components...)
+	case assessmentMessage:
+		if value.fingerprint != model.projectFingerprint {
+			return model, nil
+		}
+		model.assessing = false
+		model.probe.Statuses, model.probe.Rules = value.statuses, value.rules
+		if value.cfg.SchemaVersion != 0 {
+			model.config = value.cfg
+		}
+		if value.err != nil {
+			model.lastError = value.err
+			model.setMessage(value.err.Error(), true)
+		}
 	case probeMessage:
 		model.probing = false
+		changed := value.Fingerprint != model.projectFingerprint
+		value.Components, value.Toolchains, value.Vulkan = model.probe.Components, model.probe.Toolchains, model.probe.Vulkan
+		if !changed {
+			value.Statuses, value.Rules = model.probe.Statuses, model.probe.Rules
+			value.Config = model.config
+		}
 		model.probe, model.config, model.baseConfig = value, value.Config, value.BaseConfig
+		model.projectFingerprint = value.Fingerprint
 		if value.Error != nil {
+			model.lastError = value.Error
 			model.setMessage(value.Error.Error(), true)
 		} else if !model.mutating {
 			model.setMessage("Project model is ready", false)
 		}
 		model.clampCursor()
+		if changed && value.Error == nil && model.services.AssessTargets != nil {
+			model.assessing = true
+			return model, model.assessmentCommand()
+		}
 	case packageSearchMessage:
 		model.searching = false
 		if value.err != nil {
+			model.lastError = value.err
 			model.setMessage(value.err.Error(), true)
 		} else {
 			model.packageResults = value.ports
@@ -330,17 +375,18 @@ func (model dashboardModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		model.mutating = false
 		model.operation = ""
 		if value.err != nil {
+			value.err = runlog.Failure(model.path, value.label, value.err)
+			model.lastError = value.err
 			model.setMessage(value.err.Error(), true)
 			return model, nil
 		}
 		model.setMessage(value.label, false)
-		model.probing = true
-		return model, tea.Batch(model.probeCommand(), pulseCommand())
+		return model, model.probeCommand()
 	case installEvent:
 		if !value.done {
-			model.installLog = append(model.installLog, value.line)
+			model.receiveLog(value.line, true)
 			model.followVisibleLog(PackagesRoute)
-			model.setMessage(value.line, false)
+			model.setMessage("Installing dependency · F2 complete output", false)
 			return model, waitInstallEvent(model.installEvents)
 		}
 		if model.installCancel != nil {
@@ -348,22 +394,33 @@ func (model dashboardModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		model.mutating, model.operation, model.installEvents, model.installCancel = false, "", nil, nil
 		if value.err != nil {
-			model.installLog = append(model.installLog, value.err.Error())
+			model.lastError = value.err
+			model.receiveLog(diag.Text(value.err), true)
 			model.followVisibleLog(PackagesRoute)
 			model.setMessage("Install failed · "+value.err.Error(), true)
+			if model.quitAfterTask {
+				model.quitAfterTask = false
+				return model, tea.Quit
+			}
 			return model, nil
 		}
+		if model.quitAfterTask {
+			model.quitAfterTask = false
+			return model, tea.Quit
+		}
 		model.setMessage("Installed and added "+value.name, false)
-		model.probing = true
-		return model, tea.Batch(model.probeCommand(), pulseCommand())
+		return model, model.probeCommand()
 	case workflowEvent:
 		if !value.done {
-			model.workflowLog = append(model.workflowLog, value.line)
+			model.receiveLog(value.line, false)
 			model.followVisibleLog(model.workflowRoute)
 			if diagnosticLine(value.line) {
 				model.workflowErrors = append(model.workflowErrors, value.line)
+				if len(model.workflowErrors) > 512 {
+					model.workflowErrors = model.workflowErrors[len(model.workflowErrors)-512:]
+				}
 			}
-			model.setMessage(value.line, false)
+			model.setMessage(value.label+" running · F2 complete output", false)
 			return model, waitWorkflowEvent(model.workflowEvents)
 		}
 		if model.workflowCancel != nil {
@@ -373,7 +430,8 @@ func (model dashboardModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		quitAfterTask := model.quitAfterTask
 		model.quitAfterTask = false
 		if value.err != nil {
-			model.workflowLog = append(model.workflowLog, value.err.Error())
+			model.lastError = value.err
+			model.receiveLog(diag.Text(value.err), false)
 			model.followVisibleLog(model.workflowRoute)
 			switch {
 			case errors.Is(value.err, context.Canceled):
@@ -395,8 +453,7 @@ func (model dashboardModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		if quitAfterTask {
 			return model, tea.Quit
 		}
-		model.probing = true
-		return model, tea.Batch(model.probeCommand(), pulseCommand())
+		return model, model.probeCommand()
 	case tea.MouseWheelMsg:
 		mouse := value.Mouse()
 		delta := 0
@@ -407,13 +464,23 @@ func (model dashboardModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			delta = 3
 		}
 		if delta != 0 {
-			model.focus = focusContent
-			model.scrollContent(delta)
+			if model.help || model.details || model.history {
+				model.overlayScroll = max(0, model.overlayScroll+delta)
+			} else if model.hasLog() && (model.fullLog || mouse.Y >= model.height-model.logHeight()-2 || model.focus == focusLog) {
+				model.focus = focusLog
+				model.scrollLog(delta)
+			} else {
+				model.focus = focusContent
+				model.scrollContent(delta)
+			}
 		}
 		return model, nil
 	case tea.MouseClickMsg:
 		if value.Mouse().Button == tea.MouseLeft {
 			model.focus = focusContent
+			if model.hasLog() && (model.fullLog || value.Mouse().Y >= model.height-model.logHeight()-2) {
+				model.focus = focusLog
+			}
 		}
 		return model, nil
 	case tea.KeyPressMsg:
@@ -424,6 +491,14 @@ func (model dashboardModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 
 func (model dashboardModel) handleKey(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	key := message.Key()
+	if !model.inputMode && model.pendingTask == "" {
+		if updated, cmd, handled := model.handlePanels(key.String()); handled {
+			return updated, cmd
+		}
+		if updated, cmd, handled := model.handleSettingsKey(key.String()); handled {
+			return updated, cmd
+		}
+	}
 	if model.pendingTask != "" {
 		switch key.String() {
 		case "y", "enter":
@@ -454,33 +529,43 @@ func (model dashboardModel) handleKey(message tea.KeyPressMsg) (tea.Model, tea.C
 		}
 		return model, nil
 	}
-	if (key.String() == "esc" || key.String() == "ctrl+c") && model.mutating && model.workflowRoute == TasksRoute && model.workflowCancel != nil {
+	if (key.String() == "esc" || key.String() == "ctrl+c") && model.mutating && model.workflowCancel != nil {
 		model.workflowCancel()
-		model.setMessage("Cancelling task…", false)
+		model.setMessage("Cancelling operation…", false)
 		return model, nil
 	}
 	switch key.String() {
 	case "q", "ctrl+c":
-		if model.mutating && model.workflowRoute == TasksRoute && model.workflowCancel != nil {
+		if model.mutating && model.workflowCancel != nil {
 			model.quitAfterTask = true
 			model.workflowCancel()
-			model.setMessage("Stopping task before exit…", false)
+			model.setMessage("Stopping operation before exit…", false)
 			return model, nil
 		}
 		if model.installCancel != nil {
 			model.installCancel()
+			model.quitAfterTask = true
+			model.setMessage("Stopping installation before exit…", false)
+			return model, nil
 		}
 		if model.workflowCancel != nil {
 			model.workflowCancel()
 		}
 		return model, tea.Quit
 	case "?":
+		model.saveOverlayPosition()
+		model.details, model.history = false, false
 		model.help = true
+		model.overlayScroll = model.helpScroll
 	case "tab":
-		if model.focus == focusNavigation {
-			model.focus = focusContent
-		} else {
-			model.focus = focusNavigation
+		model.focus = (model.focus + 1) % 3
+		if model.focus == focusContent {
+			model.keepCursorVisible()
+		}
+	case "shift+tab":
+		model.focus = (model.focus + 2) % 3
+		if model.focus == focusContent {
+			model.keepCursorVisible()
 		}
 	case "left", "h":
 		model.focus = focusNavigation
@@ -489,6 +574,7 @@ func (model dashboardModel) handleKey(message tea.KeyPressMsg) (tea.Model, tea.C
 	case "enter":
 		if model.focus == focusNavigation {
 			model.focus = focusContent
+			model.keepCursorVisible()
 		} else if model.route == PackagesRoute {
 			index := model.cursor - len(model.config.Packages)
 			if index >= 0 && index < len(model.packageResults) {
@@ -547,19 +633,21 @@ func (model dashboardModel) handleKey(message tea.KeyPressMsg) (tea.Model, tea.C
 			}
 		} else if model.route == ReleaseRoute {
 			return model.selectReleaseOptimization()
+		} else if model.route == DoctorRoute && model.services.Doctor != nil {
+			return model.startWorkflow("Doctor", model.services.Doctor)
 		}
 	case "up", "k":
 		model.move(-1)
 	case "down", "j":
 		model.move(1)
 	case "pgup":
-		if model.focus == focusContent && (model.routeHasLog() || model.route == SettingsRoute && model.rulesView) {
+		if model.focus == focusContent && (model.route == SettingsRoute && model.rulesView) {
 			model.scrollContent(-max(1, model.viewportHeight()/2))
 		} else {
 			model.move(-max(1, model.viewportHeight()/2))
 		}
 	case "pgdown":
-		if model.focus == focusContent && (model.routeHasLog() || model.route == SettingsRoute && model.rulesView) {
+		if model.focus == focusContent && (model.route == SettingsRoute && model.rulesView) {
 			model.scrollContent(max(1, model.viewportHeight()/2))
 		} else {
 			model.move(max(1, model.viewportHeight()/2))
@@ -568,7 +656,7 @@ func (model dashboardModel) handleKey(message tea.KeyPressMsg) (tea.Model, tea.C
 		model.cursor, model.scroll = 0, 0
 		model.logFollow = false
 	case "end", "G":
-		if model.focus == focusContent && (model.routeHasLog() || model.route == SettingsRoute && model.rulesView) {
+		if model.focus == focusContent && (model.route == SettingsRoute && model.rulesView) {
 			model.scroll = model.maxContentScroll()
 			model.logFollow = true
 		} else {
@@ -585,12 +673,21 @@ func (model dashboardModel) handleKey(message tea.KeyPressMsg) (tea.Model, tea.C
 			return model.startRelease()
 		}
 		model.probing = true
-		model.setMessage("Refreshing project model…", false)
-		return model, tea.Batch(model.probeCommand(), pulseCommand())
+		model.setMessage("Refreshing project files…", false)
+		if model.route == ToolchainsRoute && !model.discovering && !model.wslDiscovering {
+			model.discovering = true
+			model.wslDiscovering = true
+			return model, tea.Batch(model.probeCommand(), model.inventoryCommand(), model.wslInventoryCommand(), pulseCommand())
+		}
+		return model, model.probeCommand()
 	case "ctrl+r":
 		model.probing = true
-		model.setMessage("Refreshing project model…", false)
-		return model, tea.Batch(model.probeCommand(), pulseCommand())
+		if !model.discovering && !model.wslDiscovering {
+			model.discovering = true
+			model.wslDiscovering = true
+			return model, tea.Batch(model.probeCommand(), model.inventoryCommand(), model.wslInventoryCommand(), pulseCommand())
+		}
+		return model, model.probeCommand()
 	case "p":
 		profile := "release"
 		if model.config.Build.Profile == "release" {
@@ -791,6 +888,17 @@ func (model dashboardModel) handleInput(key tea.Key) (tea.Model, tea.Cmd) {
 	case "enter":
 		text, kind, packageName := strings.TrimSpace(model.inputText), model.inputKind, model.inputPackage
 		model.closeInput()
+		if kind == "settings-search" {
+			model.settingsQuery = text
+			model.settingsCategory = ""
+			model.cursor, model.scroll = 0, 0
+			return model, nil
+		}
+		if kind == "log-search" {
+			model.logQuery = text
+			model.findLog(false)
+			return model, nil
+		}
 		if text == "" && kind != "environment" && kind != "setting" {
 			model.setMessage("Nothing changed", false)
 			return model, nil
@@ -916,6 +1024,11 @@ func (model dashboardModel) handleInput(key tea.Key) (tea.Model, tea.Cmd) {
 			model.inputText += key.Text
 		}
 	}
+	if model.inputMode && model.inputKind == "settings-search" {
+		model.settingsQuery = model.inputText
+		model.settingsCategory = ""
+		model.cursor, model.scroll = 0, 0
+	}
 	return model, nil
 }
 
@@ -964,6 +1077,7 @@ type settingRow struct{ key, label, value string }
 func settingsRows(cfg config.Config) []settingRow {
 	rows := []settingRow{
 		{"project.name", "Project name", cfg.Project.Name}, {"build.build_dir", "Build directory", cfg.Build.BuildDir}, {"build.c_standard", "C standard", cfg.Build.CStandard}, {"build.cxx_standard", "C++ standard", cfg.Build.CXXStandard}, {"build.compile_flags", "Common compile flags", strings.Join(cfg.Build.CompileFlags, " ")}, {"build.c_flags", "C flags", strings.Join(cfg.Build.CFlags, " ")}, {"build.cxx_flags", "C++ flags", strings.Join(cfg.Build.CXXFlags, " ")}, {"build.link_flags", "Link flags", strings.Join(cfg.Build.LinkFlags, " ")}, {"build.default_targets", "Default targets", strings.Join(cfg.Build.DefaultTargets, ",")}, {"build.compile_commands", "Compile commands", cfg.Build.CompileCommands}, {"toolchain.c", "C compiler", cfg.Toolchain.C}, {"toolchain.cxx", "C++ compiler", cfg.Toolchain.CXX}, {"toolchain.archiver", "Archiver", cfg.Toolchain.Archiver}, {"toolchain.linker", "Linker", cfg.Toolchain.Linker}, {"toolchain.setup", "Environment script", cfg.Toolchain.Setup}, {"toolchain.cuda", "CUDA root", cfg.Toolchain.CUDA}, {"toolchain.cuda_mode", "CUDA mode", cfg.Toolchain.CUDAMode}, {"toolchain.cuda_architectures", "CUDA architectures", strings.Join(cfg.Toolchain.CUDAArchitectures, ",")}, {"vcpkg.root", "vcpkg root", cfg.Vcpkg.Root}, {"vcpkg.triplet", "vcpkg triplet", cfg.Vcpkg.Triplet}, {"vcpkg.crt_linkage", "CRT linkage", cfg.Vcpkg.CRTLinkage}, {"vcpkg.library_linkage", "Library linkage", cfg.Vcpkg.LibraryLinkage}, {"package.output", "Release ZIP", cfg.Package.Output}}
+	rows = append(rows, settingRow{"toolchain.mode", "Execution mode", cfg.Toolchain.Mode}, settingRow{"toolchain.wsl_distribution", "WSL distribution", cfg.Toolchain.WSLDistribution}, settingRow{"toolchain.vulkan", "Vulkan SDK", cfg.Toolchain.Vulkan}, settingRow{"toolchain.vulkan_execution", "Vulkan execution", cfg.Toolchain.VulkanExecution}, settingRow{"toolchain.vulkan_wsl_distribution", "Vulkan distribution", cfg.Toolchain.VulkanWSLDistribution}, settingRow{"toolchain.cuda_execution", "CUDA execution", cfg.Toolchain.CUDAExecution}, settingRow{"toolchain.cuda_wsl_distribution", "CUDA distribution", cfg.Toolchain.CUDAWSLDistribution})
 	for _, name := range sortedTargetNames(cfg.Targets) {
 		target := cfg.Targets[name]
 		prefix := "target:" + name + ":"
@@ -984,7 +1098,15 @@ func settingsRows(cfg config.Config) []settingRow {
 	return rows
 }
 func (model *dashboardModel) openSelectedSetting() {
-	rows := settingsRows(model.editableConfig())
+	if model.settingsCategory == "" && model.settingsQuery == "" {
+		groups := model.settingsGroups()
+		if model.cursor >= 0 && model.cursor < len(groups) {
+			model.settingsCategory = groups[model.cursor].key
+			model.cursor, model.scroll = 0, 0
+		}
+		return
+	}
+	rows := model.filteredSettings()
 	if model.cursor < 0 || model.cursor >= len(rows) {
 		return
 	}
@@ -1098,7 +1220,7 @@ func (model dashboardModel) installPackage(name string) (tea.Model, tea.Cmd) {
 	installCtx, cancel := context.WithCancel(context.Background())
 	model.mutating, model.operation = true, "Installing "+name
 	model.installEvents, model.installLog, model.installCancel = events, nil, cancel
-	model.logFollow, model.scroll = true, 0
+	model.logFollow, model.logScroll, model.diskLog, model.latestInstall, model.focus, model.lastError = true, 0, nil, true, focusLog, nil
 	model.setMessage("Preparing vcpkg install for "+name+"…", false)
 	start := func() tea.Msg {
 		go func() {
@@ -1108,10 +1230,7 @@ func (model dashboardModel) installPackage(name string) (tea.Model, tea.Cmd) {
 				case <-installCtx.Done():
 				}
 			})
-			select {
-			case events <- installEvent{name: name, done: true, err: err}:
-			case <-installCtx.Done():
-			}
+			events <- installEvent{name: name, done: true, err: err}
 			close(events)
 		}()
 		return <-events
@@ -1125,7 +1244,27 @@ func waitInstallEvent(events <-chan installEvent) tea.Cmd {
 		if !ok {
 			return installEvent{done: true, err: fmt.Errorf("installer stopped unexpectedly")}
 		}
-		return event
+		batch := installBatch{event}
+		if event.done {
+			return batch
+		}
+		timer := time.NewTimer(40 * time.Millisecond)
+		defer timer.Stop()
+		for len(batch) < 256 {
+			select {
+			case next, ok := <-events:
+				if !ok {
+					return batch
+				}
+				batch = append(batch, next)
+				if next.done {
+					return batch
+				}
+			case <-timer.C:
+				return batch
+			}
+		}
+		return batch
 	}
 }
 
@@ -1138,7 +1277,7 @@ func (model dashboardModel) startWorkflow(label string, action func(context.Cont
 	model.mutating, model.operation = true, label
 	model.workflowEvents, model.workflowLog, model.workflowErrors, model.workflowCancel = events, nil, nil, cancel
 	model.workflowRoute = model.route
-	model.logFollow, model.scroll = true, 0
+	model.logFollow, model.logScroll, model.diskLog, model.latestInstall, model.focus, model.lastError = true, 0, nil, false, focusLog, nil
 	model.setMessage(label+"…", false)
 	start := func() tea.Msg {
 		go func() {
@@ -1162,7 +1301,27 @@ func waitWorkflowEvent(events <-chan workflowEvent) tea.Cmd {
 		if !ok {
 			return workflowEvent{label: "Operation", done: true, err: fmt.Errorf("operation stopped unexpectedly")}
 		}
-		return event
+		batch := workflowBatch{event}
+		if event.done {
+			return batch
+		}
+		timer := time.NewTimer(40 * time.Millisecond)
+		defer timer.Stop()
+		for len(batch) < 256 {
+			select {
+			case next, ok := <-events:
+				if !ok {
+					return batch
+				}
+				batch = append(batch, next)
+				if next.done {
+					return batch
+				}
+			case <-timer.C:
+				return batch
+			}
+		}
+		return batch
 	}
 }
 
@@ -1339,10 +1498,15 @@ func (model *dashboardModel) selectRoute(index int) {
 	if index < 0 || index >= len(routes) {
 		return
 	}
-	model.route, model.cursor, model.scroll = routes[index], 0, 0
-	if model.logFollow && model.routeHasLog() {
-		model.scroll = model.maxContentScroll()
+	if model.pagePositions == nil {
+		model.pagePositions = map[Route][2]int{}
 	}
+	model.pagePositions[model.route] = [2]int{model.cursor, model.scroll}
+	model.route = routes[index]
+	position := model.pagePositions[model.route]
+	model.cursor, model.scroll = position[0], position[1]
+	model.clampCursor()
+
 }
 
 func (model *dashboardModel) move(delta int) {
@@ -1352,6 +1516,10 @@ func (model *dashboardModel) move(delta int) {
 			index += len(routes)
 		}
 		model.selectRoute(index % len(routes))
+		return
+	}
+	if model.itemCount() == 0 {
+		model.scrollContent(delta)
 		return
 	}
 	model.cursor += delta
@@ -1366,16 +1534,28 @@ func (model *dashboardModel) clampCursor() {
 		return
 	}
 	model.cursor = min(max(model.cursor, 0), count-1)
-	model.scroll = min(max(model.scroll, 0), max(0, count-1))
+	model.scroll = min(max(model.scroll, 0), model.maxContentScroll())
 }
 
 func (model *dashboardModel) keepCursorVisible() {
-	height := max(1, model.viewportHeight()-5)
-	if model.cursor < model.scroll {
-		model.scroll = model.cursor
+	row := 0
+	found := false
+	for _, line := range model.contentLines(newPalette(), max(1, model.contentWidth()-2)) {
+		if strings.HasPrefix(strings.TrimSpace(ansi.Strip(line)), "› ") {
+			found = true
+			break
+		}
+		row += len(wrapText(line, max(1, model.contentWidth()-2)))
 	}
-	if model.cursor >= model.scroll+height {
-		model.scroll = model.cursor - height + 1
+	if !found {
+		return
+	}
+	height := model.viewportHeight()
+	if row < model.scroll {
+		model.scroll = row
+	}
+	if row >= model.scroll+height {
+		model.scroll = row - height + 1
 	}
 }
 
@@ -1410,29 +1590,33 @@ func (model dashboardModel) itemCount() int {
 		if model.rulesView {
 			return 0
 		}
-		return len(settingsRows(model.editableConfig()))
+		if model.settingsCategory == "" && model.settingsQuery == "" {
+			return len(model.settingsGroups())
+		}
+		return len(model.filteredSettings())
 	}
 	return 0
 }
 
-func (model dashboardModel) viewportHeight() int { return max(5, model.height-10) }
+func (model dashboardModel) viewportHeight() int {
+	height := model.mainHeight()
+	if model.height >= 20 && !model.fullLog {
+		height -= model.logHeight()
+	}
+	return max(1, height-3)
+}
 
 func (model *dashboardModel) scrollContent(delta int) {
 	maximum := model.maxContentScroll()
 	model.scroll = min(max(model.scroll+delta, 0), maximum)
-	if model.routeHasLog() {
-		model.logFollow = model.scroll == maximum
-	}
 }
 
 func (model dashboardModel) maxContentScroll() int {
-	width := model.contentWidth()
-	lines := model.contentLines(newPalette(), max(18, width-4))
-	viewport := max(1, model.viewportHeight()-2)
-	if model.width < 86 {
-		viewport = max(1, viewport-1)
+	var wrapped []string
+	for _, line := range model.contentLines(newPalette(), max(1, model.contentWidth()-2)) {
+		wrapped = append(wrapped, wrapText(line, max(1, model.contentWidth()-2))...)
 	}
-	return max(0, len(lines)-viewport)
+	return max(0, len(wrapped)-model.viewportHeight())
 }
 
 func (model dashboardModel) routeHasLog() bool {
@@ -1446,8 +1630,11 @@ func (model dashboardModel) routeHasLog() bool {
 }
 
 func (model *dashboardModel) followVisibleLog(route Route) {
-	if model.logFollow && model.route == route && model.routeHasLog() {
-		model.scroll = model.maxContentScroll()
+	if model.batchingLogs {
+		return
+	}
+	if model.logFollow && model.hasLog() {
+		model.logScroll = model.maxLogScroll()
 	}
 }
 
@@ -1490,20 +1677,7 @@ func routeIndex(route Route) int {
 }
 
 func (model dashboardModel) View() tea.View {
-	p := newPalette()
-	width, height := max(42, model.width), max(14, model.height)
-	header := model.header(p, width)
-	mainHeight := max(7, height-6)
-	var main string
-	if model.help {
-		main = model.helpView(p, width, mainHeight)
-	} else if width < 96 {
-		main = lipgloss.JoinVertical(lipgloss.Left, model.compactNavigation(p, width), model.contentPanel(p, width, max(5, mainHeight-1)))
-	} else {
-		navWidth := sidebarWidth(width)
-		main = lipgloss.JoinHorizontal(lipgloss.Top, model.sidebar(p, navWidth, mainHeight), " ", model.contentPanel(p, max(30, width-navWidth-1), mainHeight))
-	}
-	content := lipgloss.JoinVertical(lipgloss.Left, header, main, model.statusLine(p, width), model.shortcutLine(p, width))
+	content := model.renderDashboard(newPalette())
 	view := tea.NewView(content)
 	view.AltScreen = true
 	view.WindowTitle = "Trestle · Project Console"
@@ -1697,6 +1871,9 @@ func (model dashboardModel) overviewLines(p palette, width int) []string {
 		}
 	}
 	lines = append(lines,
+		"", p.title.Render("Getting started"),
+		p.text.Render("Toolchains → Doctor → Packages → Build"),
+		p.muted.Render("Select a compiler, check readiness, install dependencies, then build."),
 		"", p.title.Render("Environment"),
 		statusRow(p, model.probe.Ninja, "Ninja backend", "not found on PATH"),
 		statusRow(p, model.probe.Vulkan, "Vulkan SDK", "optional; not detected"),
@@ -1805,12 +1982,6 @@ func (model dashboardModel) taskLines(p palette, width int) []string {
 	} else {
 		lines = append(lines, "", p.faint.Render("enter preview · esc / ctrl+c cancel a running task"))
 	}
-	if len(model.workflowLog) > 0 && model.workflowRoute == TasksRoute {
-		lines = append(lines, "", p.faint.Render(" TASK OUTPUT"))
-		for _, line := range model.workflowLog {
-			lines = appendWrappedLog(lines, p.muted, line, width)
-		}
-	}
 	return lines
 }
 
@@ -1908,12 +2079,6 @@ func (model dashboardModel) importLines(p palette, width int) []string {
 		p.muted.Render("Executable, static/shared/module library targets; sources, includes, defines and target edges."),
 		p.faint.Render("Generated-only, utility, interface and object targets are reported and skipped."),
 	}
-	if len(model.workflowLog) > 0 && model.route == ImportRoute {
-		lines = append(lines, "", p.faint.Render(" IMPORT LOG"))
-		for _, line := range model.workflowLog {
-			lines = appendWrappedLog(lines, p.muted, line, width)
-		}
-	}
 	return append(lines, "", p.accent.Render("Press enter or i to auto-import this project"))
 }
 
@@ -1941,12 +2106,6 @@ func (model dashboardModel) testLines(p palette, width int) []string {
 			if index == model.cursor && model.focus == focusContent && len(job.Files) > 0 {
 				lines = append(lines, p.faint.Render("     "+ansi.Truncate(strings.Join(job.Files, ", "), max(12, width-6), "…")))
 			}
-		}
-	}
-	if len(model.workflowLog) > 0 && model.route == TestsRoute {
-		lines = append(lines, "", p.faint.Render(" TEST OUTPUT"))
-		for _, line := range model.workflowLog {
-			lines = appendWrappedLog(lines, p.muted, line, width)
 		}
 	}
 	return append(lines, "", p.faint.Render("enter run selected   g run group   a run all   f job/file view   m assign group"))
@@ -2007,12 +2166,6 @@ func (model dashboardModel) packageLines(p palette, width int) []string {
 			}
 		}
 	}
-	if len(model.installLog) > 0 {
-		lines = append(lines, "", p.faint.Render(" INSTALL PROGRESS"))
-		for _, line := range model.installLog {
-			lines = appendWrappedLog(lines, p.muted, line, width)
-		}
-	}
 	return append(lines, "", p.faint.Render("/ search website   enter/i install   f features   a install by name"))
 }
 
@@ -2037,18 +2190,6 @@ func (model dashboardModel) buildLines(p palette, width int) []string {
 		}
 	}
 	lines = append(lines, "", p.faint.Render(" LAST RUN"), p.text.Render(model.lastRun))
-	if len(model.workflowLog) > 0 {
-		lines = append(lines, "", p.faint.Render(" BUILD OUTPUT"))
-		for _, line := range model.workflowLog {
-			lines = appendWrappedLog(lines, p.muted, line, width)
-		}
-		if model.messageError && len(model.workflowErrors) > 0 {
-			lines = append(lines, "", p.faint.Render(" BUILD ERRORS"))
-			for _, line := range model.workflowErrors {
-				lines = appendWrappedLog(lines, p.danger, line, width)
-			}
-		}
-	}
 	return append(lines, "", p.muted.Render("enter selected · f force selected · b defaults · a all · r refresh"))
 }
 
@@ -2065,12 +2206,6 @@ func (model dashboardModel) releaseLines(p palette, width int) []string {
 			marker = "★"
 		}
 		lines = append(lines, model.selectableRow(p, index, ansi.Truncate(fmt.Sprintf("%s %-24s %s", marker, name, description), width-3, "…")))
-	}
-	if len(model.workflowLog) > 0 && model.route == ReleaseRoute {
-		lines = append(lines, "", p.faint.Render(" RELEASE OUTPUT"))
-		for _, line := range model.workflowLog {
-			lines = appendWrappedLog(lines, p.muted, line, width)
-		}
 	}
 	return append(lines, "", p.accent.Render("r / b build release ZIP"), p.faint.Render("enter choose optimization   t targets   o ZIP output"))
 }
@@ -2089,25 +2224,23 @@ func (model dashboardModel) doctorLines(p palette) []string {
 	if strings.Contains(strings.ToLower(model.config.Toolchain.CXX), "clang-cl") {
 		lines = append(lines, statusRow(p, model.config.Toolchain.Setup != "", "MSVC ABI environment configured", "clang-cl needs a vcvars setup script"))
 	}
-	return append(lines, "", p.title.Render("Resolved toolchain"), keyValue(p, "Compiler", fallback(model.config.Toolchain.CXX, "auto")), keyValue(p, "Linker", fallback(model.config.Toolchain.Linker, "compiler default")), keyValue(p, "Environment", fallback(model.config.Toolchain.Setup, "inherited process environment")))
+	lines = append(lines, "", p.accent.Render("Enter: run complete checks and save diagnostics"), p.title.Render("Resolved toolchain"), keyValue(p, "Compiler", fallback(model.config.Toolchain.CXX, "auto")), keyValue(p, "Linker", fallback(model.config.Toolchain.Linker, "compiler default")), keyValue(p, "Environment", fallback(model.config.Toolchain.Setup, "inherited process environment")))
+	if model.probe.Rules.ToolchainError != "" {
+		lines = append(lines, p.warning.Render(model.probe.Rules.ToolchainError))
+	}
+	for _, name := range sortedTargetNames(model.config.Targets) {
+		if readiness, ok := model.probe.Statuses[name]; ok {
+			lines = append(lines, statusRow(p, readiness.Ready, name+": ready", name+": "+strings.Join(readiness.Reasons, "; ")))
+		}
+	}
+	return lines
 }
 
 func (model dashboardModel) settingsLines(p palette, width int) []string {
 	if model.rulesView {
 		return model.ruleLines(p, width)
 	}
-	matched := 0
-	for _, rule := range model.probe.Rules.Rules {
-		if rule.Matched {
-			matched++
-		}
-	}
-	lines := []string{p.faint.Render(fmt.Sprintf(" BASE CONFIG · %d/%d RULES MATCHED · v EFFECTIVE VIEW", matched, len(model.probe.Rules.Rules)))}
-	for index, row := range settingsRows(model.editableConfig()) {
-		value := fallback(row.value, "not set")
-		lines = append(lines, model.selectableRow(p, index, ansi.Truncate(fmt.Sprintf("%-24s %s", row.label, value), width-3, "…")))
-	}
-	return append(lines, "", p.faint.Render("enter / e edit selected field · v inspect rule effects"))
+	return model.settingsMenuLines(p, width)
 }
 
 func (model dashboardModel) editableConfig() config.Config {
@@ -2225,6 +2358,10 @@ func (model dashboardModel) inputLabel() string {
 	switch model.inputKind {
 	case "search":
 		return "Search packages"
+	case "settings-search":
+		return "Search settings"
+	case "log-search":
+		return "Search complete output"
 	case "package":
 		return "Add package"
 	case "install":
@@ -2269,7 +2406,7 @@ func (model dashboardModel) shortcutLine(p palette, width int) string {
 	contextKeys := "b build   r refresh   p profile"
 	switch model.route {
 	case ToolchainsRoute:
-		contextKeys = "↵ connect compiler/SDK   c CUDA   v Vulkan   x apply preset"
+		contextKeys = "↵ native or WSL compiler/SDK   c CUDA   v Vulkan   x apply preset"
 	case PresetsRoute:
 		contextKeys = "↵ apply   n save current   d delete"
 	case ImportRoute:
@@ -2279,7 +2416,7 @@ func (model dashboardModel) shortcutLine(p palette, width int) string {
 	case TestsRoute:
 		contextKeys = "↵ selected   g group   a all   f files   m group"
 	case SettingsRoute:
-		contextKeys = "↵ / e edit selected field   v rule effects"
+		contextKeys = "↵ category / edit   / search   Esc back   v rules"
 	case BuildRoute:
 		contextKeys = "↵ selected   f force   b default   a all"
 	case TasksRoute:

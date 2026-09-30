@@ -13,6 +13,8 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"trestle/internal/fsx"
+	"trestle/internal/processx"
 )
 
 type Port struct {
@@ -62,7 +64,7 @@ func NewClient(root string) (Client, error) {
 }
 
 func (client Client) Search(ctx context.Context, query string) ([]string, error) {
-	command := exec.CommandContext(ctx, client.Executable, "search", query)
+	command := processx.Command(ctx, client.Executable, "search", query)
 	output, err := command.CombinedOutput()
 	if err != nil {
 		return nil, fmt.Errorf("vcpkg search failed: %s", strings.TrimSpace(string(output)))
@@ -166,12 +168,17 @@ func (client Client) InstallCapture(ctx context.Context, ports []string, triplet
 // InstallWithProgress emits complete stdout/stderr lines while vcpkg downloads
 // and builds. The callback may be called from either output reader.
 func (client Client) InstallWithProgress(ctx context.Context, ports []string, triplet string, progress func(string)) error {
+	lock, err := fsx.TryLock(ctx, filepath.Join(client.Root, "installed"), "vcpkg install")
+	if err != nil {
+		return err
+	}
+	defer lock.Close()
 	args := []string{"install"}
 	args = append(args, ports...)
 	if triplet != "" && triplet != "auto" {
 		args = append(args, "--triplet", triplet)
 	}
-	command := exec.CommandContext(ctx, client.Executable, args...)
+	command := processx.Command(ctx, client.Executable, args...)
 	command.Env = client.environment()
 	stdout, err := command.StdoutPipe()
 	if err != nil {
@@ -192,8 +199,8 @@ func (client Client) InstallWithProgress(ctx context.Context, ports []string, tr
 		defer wait.Done()
 		for {
 			text, readErr := reader.ReadString('\n')
-			line := strings.TrimRight(text, "\r\n")
-			if line == "" {
+			line := strings.TrimRight(processx.DecodeOutput([]byte(text)), "\r\n")
+			if text == "" {
 				if readErr == io.EOF {
 					return
 				}
@@ -207,6 +214,9 @@ func (client Client) InstallWithProgress(ctx context.Context, ports []string, tr
 			}
 			callbackLock.Lock()
 			outputLines = append(outputLines, line)
+			if len(outputLines) > 128 {
+				outputLines = outputLines[len(outputLines)-128:]
+			}
 			if progress != nil {
 				progress(line)
 			}
@@ -220,11 +230,19 @@ func (client Client) InstallWithProgress(ctx context.Context, ports []string, tr
 		}
 	}
 	wait.Add(2)
-	go read(bufio.NewReader(stdout))
-	go read(bufio.NewReader(stderr))
+	var outReader, errReader io.Reader = stdout, stderr
+	if raw := processx.Output(ctx); raw != nil {
+		outReader, errReader = io.TeeReader(stdout, raw), io.TeeReader(stderr, raw)
+		progress = processx.Notify(ctx, progress)
+	}
+	go read(bufio.NewReader(outReader))
+	go read(bufio.NewReader(errReader))
 	wait.Wait()
 	close(readErrors)
 	commandErr := command.Wait()
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
 	for readErr := range readErrors {
 		return fmt.Errorf("E_VCPKG_INSTALL: read output: %w", readErr)
 	}
@@ -241,12 +259,17 @@ func (client Client) InstallWithProgress(ctx context.Context, ports []string, tr
 }
 
 func (client Client) install(ctx context.Context, ports []string, triplet string, stream bool) (string, error) {
+	lock, err := fsx.TryLock(ctx, filepath.Join(client.Root, "installed"), "vcpkg install")
+	if err != nil {
+		return "", err
+	}
+	defer lock.Close()
 	args := []string{"install"}
 	args = append(args, ports...)
 	if triplet != "" && triplet != "auto" {
 		args = append(args, "--triplet", triplet)
 	}
-	command := exec.CommandContext(ctx, client.Executable, args...)
+	command := processx.Command(ctx, client.Executable, args...)
 	command.Env = client.environment()
 	var output bytes.Buffer
 	if stream {

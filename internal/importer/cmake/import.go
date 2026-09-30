@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"trestle/internal/processx"
 
 	"trestle/internal/config"
 )
@@ -106,6 +107,10 @@ func Import(ctx context.Context, sourceRoot, configPath string, progress func(st
 }
 
 func ImportWithOptions(ctx context.Context, sourceRoot, configPath string, progress func(string), options Options) (Result, error) {
+	expected, snapshotErr := config.Snapshot(configPath)
+	if snapshotErr != nil {
+		return Result{}, snapshotErr
+	}
 	root, err := filepath.Abs(sourceRoot)
 	if err != nil {
 		return Result{}, err
@@ -140,13 +145,13 @@ func ImportWithOptions(ctx context.Context, sourceRoot, configPath string, progr
 	if options.CXXCompiler != "" {
 		configureArgs = append(configureArgs, "-DCMAKE_CXX_COMPILER:FILEPATH="+options.CXXCompiler)
 	}
-	command := exec.CommandContext(ctx, cmakePath, configureArgs...)
+	command := processx.Command(ctx, cmakePath, configureArgs...)
 	command.Dir = root
 	command.Env = mergedEnvironment(options.Environment)
-	output, err := command.CombinedOutput()
+	output, err := processx.Capture(ctx, command)
 	if text := strings.TrimSpace(string(output)); text != "" && progress != nil {
 		for _, line := range strings.Split(text, "\n") {
-			progress(strings.TrimSpace(line))
+			processx.Notify(ctx, progress)(strings.TrimSuffix(line, "\r"))
 		}
 	}
 	if err != nil {
@@ -164,10 +169,10 @@ func ImportWithOptions(ctx context.Context, sourceRoot, configPath string, progr
 		if progress != nil {
 			progress("Materializing CMake generated sources for " + target)
 		}
-		generate := exec.CommandContext(ctx, cmakePath, "--build", buildDir, "--target", target)
+		generate := processx.Command(ctx, cmakePath, "--build", buildDir, "--target", target)
 		generate.Dir = root
 		generate.Env = mergedEnvironment(options.Environment)
-		output, generateErr := generate.CombinedOutput()
+		output, generateErr := processx.Capture(ctx, generate)
 		if generateErr != nil {
 			return Result{}, fmt.Errorf("CMake could not generate sources for %s: %w\n%s", target, generateErr, strings.TrimSpace(string(output)))
 		}
@@ -216,7 +221,7 @@ func ImportWithOptions(ctx context.Context, sourceRoot, configPath string, progr
 		validPackageTargets = append([]string{}, validDefaults...)
 	}
 	cfg.Package.Targets = validPackageTargets
-	if err := config.Save(configPath, cfg); err != nil {
+	if err := config.SaveExpected(configPath, cfg, expected); err != nil {
 		return Result{}, err
 	}
 	if progress != nil {
@@ -413,7 +418,7 @@ func applyCTest(ctx context.Context, cmakePath, buildDir string, cfg *config.Con
 			_ = os.Remove(placeholder)
 		}
 	}()
-	output, err := exec.CommandContext(ctx, ctestPath, "--test-dir", buildDir, "--show-only=json-v1").Output()
+	output, err := processx.Command(ctx, ctestPath, "--test-dir", buildDir, "--show-only=json-v1").Output()
 	if err != nil {
 		result.Warnings = append(result.Warnings, "CTest metadata could not be read")
 		return

@@ -145,6 +145,9 @@ func (p *Probe) hasPackage(name string) bool {
 		p.packageErrors[name] = "package is not declared in [packages]"
 		return false
 	}
+	if pkg.Triplet == "" || pkg.Triplet == "auto" {
+		pkg.Triplet = p.cfg.Vcpkg.Triplet
+	}
 	root := p.cfg.Vcpkg.Root
 	if root != "" && !filepath.IsAbs(root) {
 		root = filepath.Join(p.root, root)

@@ -1,6 +1,7 @@
 package diag
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -49,8 +50,8 @@ func Render(writer io.Writer, err error) {
 	if err == nil {
 		return
 	}
-	structured, ok := err.(*Error)
-	if !ok {
+	var structured *Error
+	if !errors.As(err, &structured) {
 		fmt.Fprintf(writer, "error: %v\n", err)
 		return
 	}
@@ -70,7 +71,7 @@ func Render(writer io.Writer, err error) {
 	if structured.LogPath != "" {
 		fmt.Fprintf(writer, "log: %s\n", structured.LogPath)
 	}
-	if structured.Cause != nil && structured.Summary == "" {
+	if structured.Cause != nil {
 		fmt.Fprintf(writer, "cause: %v\n", structured.Cause)
 	}
 }

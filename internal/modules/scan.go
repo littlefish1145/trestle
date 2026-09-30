@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"trestle/internal/processx"
 
 	"trestle/internal/modules/p1689"
 )
@@ -72,7 +73,7 @@ func (scanner CommandScanner) Scan(ctx context.Context, source string) (ScanResu
 	args := []string{"-format=p1689", "--", scanner.Compiler, "-std=" + scanner.Standard, "-c", commandSource}
 	args = append(args, scanner.Options...)
 	executable, args := scanner.invocation(scanner.Scanner, args)
-	command := exec.CommandContext(ctx, executable, args...)
+	command := processx.Command(ctx, executable, args...)
 	command.Dir = scanner.Directory
 	var stderr bytes.Buffer
 	command.Stderr = &stderr
@@ -126,7 +127,7 @@ func (scanner CommandScanner) executableFingerprint(ctx context.Context, executa
 		probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		defer cancel()
 		runner, args := scanner.invocation(executable, []string{"--version"})
-		version, err := exec.CommandContext(probeCtx, runner, args...).CombinedOutput()
+		version, err := processx.Command(probeCtx, runner, args...).CombinedOutput()
 		if err != nil {
 			return scanner.Runner + "|" + strings.Join(scanner.RunnerArgs, "\x00") + "|" + executable + "|probe-failed"
 		}
@@ -143,7 +144,7 @@ func (scanner CommandScanner) executableFingerprint(ctx context.Context, executa
 	}
 	probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	version, _ := exec.CommandContext(probeCtx, resolved, "--version").CombinedOutput()
+	version, _ := processx.Command(probeCtx, resolved, "--version").CombinedOutput()
 	sum := sha256.Sum256(version)
 	return fmt.Sprintf("%s|%d|%d|%s", resolved, info.Size(), info.ModTime().UnixNano(), hex.EncodeToString(sum[:]))
 }

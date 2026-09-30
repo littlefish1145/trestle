@@ -72,6 +72,8 @@ go vet ./...
 
 ## 快速开始
 
+首次使用建议阅读 [从零构建带 fmt 依赖的 C++ 项目](docs/tutorial.zh-CN.md)，涵盖 Windows、Linux、macOS、WSL、完整日志及故障恢复；可运行示例见 [examples/hello-fmt](examples/hello-fmt/)。
+
 ```powershell
 trestle init -C hello -name hello
 cd hello

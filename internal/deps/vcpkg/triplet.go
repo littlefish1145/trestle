@@ -12,6 +12,7 @@ type TripletRequest struct {
 	OS             string
 	Arch           string
 	Compiler       string
+	ABI            string
 	CRTLinkage     string
 	LibraryLinkage string
 	Available      []string
@@ -33,12 +34,18 @@ func RankTriplets(request TripletRequest) ([]TripletCandidate, error) {
 	if arch == "amd64" {
 		arch = "x64"
 	}
+	if arch == "386" {
+		arch = "x86"
+	}
 	osName := request.OS
 	if osName == "" {
 		osName = runtime.GOOS
 	}
 	if osName == "windows" {
 		osName = "windows"
+		if request.ABI == "mingw" || strings.EqualFold(request.Compiler, "gcc") {
+			osName = "mingw"
+		}
 	} else if osName == "darwin" {
 		osName = "osx"
 	} else {
@@ -47,7 +54,7 @@ func RankTriplets(request TripletRequest) ([]TripletCandidate, error) {
 	var result []TripletCandidate
 	for _, name := range available {
 		lower := strings.ToLower(name)
-		if !strings.Contains(lower, osName) || !strings.Contains(lower, arch) {
+		if !strings.HasPrefix(lower, arch+"-"+osName) {
 			continue
 		}
 		score := 0

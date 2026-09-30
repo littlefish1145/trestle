@@ -5,10 +5,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -28,6 +30,7 @@ import (
 	"trestle/internal/ninja"
 	"trestle/internal/plan"
 	"trestle/internal/policy"
+	"trestle/internal/processx"
 	"trestle/internal/runner"
 	"trestle/internal/sdk/vulkan"
 	"trestle/internal/state"
@@ -46,7 +49,11 @@ type BuildResult struct {
 
 func Init(root, name string) error {
 	if strings.TrimSpace(name) == "" {
-		name = filepath.Base(root)
+		absolute, err := filepath.Abs(root)
+		if err != nil {
+			return err
+		}
+		name = filepath.Base(absolute)
 	}
 	path := filepath.Join(root, config.DefaultFileName)
 	if _, err := os.Stat(path); err == nil {
@@ -57,7 +64,7 @@ func Init(root, name string) error {
 	if err := os.MkdirAll(filepath.Join(root, "src"), 0o755); err != nil {
 		return err
 	}
-	if err := config.Save(path, config.Default(name)); err != nil {
+	if err := config.SaveExpected(path, config.Default(name), "missing"); err != nil {
 		return err
 	}
 	main := filepath.Join(root, "src", "main.cpp")
@@ -123,7 +130,8 @@ func Configure(path, compiler, c, profile, vcpkgRoot, triplet, cudaRoot, cudaMod
 		if err != nil {
 			return err
 		}
-		selected, err := vcpkg.SelectAutoTriplet(vcpkg.TripletRequest{Compiler: string(tc.Kind), Available: available})
+		osName, arch := toolchain.TargetPlatform(tc)
+		selected, err := vcpkg.SelectAutoTriplet(vcpkg.TripletRequest{OS: osName, Arch: arch, Compiler: string(tc.Kind), ABI: toolchain.TargetABI(tc), Available: available})
 		if err != nil {
 			return err
 		}
@@ -396,7 +404,7 @@ func SetTestGroup(path, job, group string) error {
 	return config.Save(path, cfg)
 }
 
-func ImportCMake(ctx context.Context, path string, progress func(string)) (cmakeimport.Result, error) {
+func importCMake(ctx context.Context, path string, progress func(string)) (cmakeimport.Result, error) {
 	options := cmakeimport.Options{}
 	if cfg, err := config.Load(path); err == nil {
 		if selected, detectErr := (toolchain.DetectorImpl{}).DetectWithSetup(ctx, cfg.Toolchain.CXX, cfg.Toolchain.Setup); detectErr == nil {
@@ -412,7 +420,14 @@ func ImportCMake(ctx context.Context, path string, progress func(string)) (cmake
 }
 
 func ImportXmake(ctx context.Context, path string, progress func(string)) error {
-	return xmakeimport.Import(ctx, filepath.Dir(path), path, progress)
+	return runOperation(ctx, path, "import xmake", progress, func(ctx context.Context, emit func(string)) error {
+		ctx, release, err := acquireResource(ctx, filepath.Join(filepath.Dir(path), ".trestle", "import"), "import xmake", false)
+		if err != nil {
+			return err
+		}
+		defer release()
+		return xmakeimport.Import(ctx, filepath.Dir(path), path, emit)
+	})
 }
 
 func SetFlags(path, compile, link string) error {
@@ -591,6 +606,10 @@ func SetProjectSetting(path, key, value string) error {
 		cfg.Build.DefaultTargets = csv()
 	case "build.compile_commands":
 		cfg.Build.CompileCommands = value
+	case "toolchain.mode":
+		cfg.Toolchain.Mode = value
+	case "toolchain.wsl_distribution":
+		cfg.Toolchain.WSLDistribution = value
 	case "toolchain.c":
 		cfg.Toolchain.C = value
 	case "toolchain.cxx":
@@ -792,11 +811,12 @@ func applyReleaseOptimization(cfg *config.Config) error {
 		return nil
 	}
 	msvc := strings.Contains(strings.ToLower(cfg.Toolchain.CXX), "cl.exe") || strings.Contains(strings.ToLower(cfg.Toolchain.CXX), "clang-cl")
+	msvcLink := msvc || runtime.GOOS == "windows" && cfg.Toolchain.Mode != "wsl" && cfg.Toolchain.Setup != "" && strings.Contains(strings.ToLower(cfg.Toolchain.CXX), "clang")
 	filter := func(flags []string) []string {
 		var out []string
 		for _, flag := range flags {
 			lower := strings.ToLower(flag)
-			if strings.HasPrefix(lower, "/o") || strings.HasPrefix(lower, "-o") || lower == "/gl" || lower == "-flto" || lower == "/ltcg" {
+			if strings.HasPrefix(lower, "/o") || strings.HasPrefix(lower, "-o") || lower == "/gl" || lower == "-flto" || lower == "/ltcg" || lower == "-ffunction-sections" || lower == "-fdata-sections" || lower == "-dndebug" || lower == "/dndebug" || lower == "-wl,--gc-sections" || lower == "-wl,-dead_strip" || strings.HasPrefix(lower, "-wl,/opt:") || lower == "/ob3" {
 				continue
 			}
 			out = append(out, flag)
@@ -827,7 +847,13 @@ func applyReleaseOptimization(cfg *config.Config) error {
 			cfg.Build.LinkFlags = append(cfg.Build.LinkFlags, "/LTCG", "/OPT:REF", "/OPT:ICF")
 		} else {
 			cfg.Build.CompileFlags = append(cfg.Build.CompileFlags, "-Os", "-ffunction-sections", "-fdata-sections", "-DNDEBUG")
-			cfg.Build.LinkFlags = append(cfg.Build.LinkFlags, "-Wl,--gc-sections")
+			if msvcLink {
+				cfg.Build.LinkFlags = append(cfg.Build.LinkFlags, "-Wl,/OPT:REF", "-Wl,/OPT:ICF")
+			} else if runtime.GOOS == "darwin" && cfg.Toolchain.Mode != "wsl" {
+				cfg.Build.LinkFlags = append(cfg.Build.LinkFlags, "-Wl,-dead_strip")
+			} else {
+				cfg.Build.LinkFlags = append(cfg.Build.LinkFlags, "-Wl,--gc-sections")
+			}
 		}
 	default:
 		return fmt.Errorf("unknown release optimization %q", name)
@@ -835,7 +861,7 @@ func applyReleaseOptimization(cfg *config.Config) error {
 	return nil
 }
 
-func ReleaseWithProgress(ctx context.Context, path string, progress func(string)) error {
+func releaseWithProgress(ctx context.Context, path string, progress func(string)) error {
 	cfg, err := config.Load(path)
 	if err != nil {
 		return err
@@ -843,7 +869,23 @@ func ReleaseWithProgress(ctx context.Context, path string, progress func(string)
 	if err := applyReleaseOptimization(&cfg); err != nil {
 		return err
 	}
-	if err := config.Save(path, cfg); err != nil {
+	base := cfg
+	cfg, err = policy.ApplyAt(ctx, cfg, filepath.Dir(path))
+	if err != nil {
+		return err
+	}
+	ctx = context.WithValue(ctx, configurationKey{}, cfg)
+	ctx, release, err := buildResources(ctx, cfg, "release")
+	if err != nil {
+		return err
+	}
+	defer release()
+	ctx, releaseOutput, err := acquireResource(ctx, cfg.Package.Output, "release archive", false)
+	if err != nil {
+		return err
+	}
+	defer releaseOutput()
+	if err := config.Save(path, base); err != nil {
 		return err
 	}
 	targets := cfg.Package.Targets
@@ -857,7 +899,7 @@ func ReleaseWithProgress(ctx context.Context, path string, progress func(string)
 	if err := BuildTargetsWithProgress(ctx, path, targets, false, progress); err != nil {
 		return err
 	}
-	return packageSelected(path, targets, progress)
+	return packageSelectedWithContext(ctx, path, targets, progress)
 }
 
 func AddPackage(path, name, targetName string) error {
@@ -865,6 +907,13 @@ func AddPackage(path, name, targetName string) error {
 	if err != nil {
 		return err
 	}
+	if err := addPackageToConfig(&cfg, name, targetName); err != nil {
+		return err
+	}
+	return config.Save(path, cfg)
+}
+
+func addPackageToConfig(cfg *config.Config, name, targetName string) error {
 	name = strings.TrimSpace(name)
 	version := ""
 	if at := strings.LastIndex(name, "@"); at > 0 {
@@ -884,7 +933,7 @@ func AddPackage(path, name, targetName string) error {
 		return fmt.Errorf("package name is required")
 	}
 	if targetName == "" {
-		targetName = packageTarget(cfg, name)
+		targetName = packageTarget(*cfg, name)
 	}
 	target, ok := cfg.Targets[targetName]
 	if !ok {
@@ -911,7 +960,7 @@ func AddPackage(path, name, targetName string) error {
 	}
 	target.Dependencies = append(target.Dependencies, config.Dependency{Package: name, Scope: "private"})
 	cfg.Targets[targetName] = target
-	return config.Save(path, cfg)
+	return nil
 }
 
 func packageTarget(cfg config.Config, packageName string) string {
@@ -971,7 +1020,7 @@ func SearchPackages(ctx context.Context, path, query string) ([]vcpkg.Port, erro
 
 // InstallPackage downloads and builds a package using the configured vcpkg
 // instance, then records it as a dependency of the project's default target.
-func InstallPackage(ctx context.Context, path, name string, progress func(string)) error {
+func installPackage(ctx context.Context, path, name string, progress func(string)) error {
 	cfg, err := config.Load(path)
 	if err != nil {
 		return err
@@ -987,18 +1036,31 @@ func InstallPackage(ctx context.Context, path, name string, progress func(string
 	client.Environment = toolchain.EnvironmentForVcpkg(ctx, cfg.Toolchain.Setup, cfg.Toolchain.Archiver, cfg.Toolchain.CXX, cfg.Toolchain.C)
 	triplet := cfg.Vcpkg.Triplet
 	if triplet == "" || triplet == "auto" {
-		triplet = vcpkg.DefaultTriplet()
+		tc, err := detectConfigured(ctx, cfg)
+		if err != nil {
+			return err
+		}
+		available, err := vcpkg.AvailableTriplets(client.Root)
+		if err != nil {
+			return err
+		}
+		osName, arch := toolchain.TargetPlatform(tc)
+		triplet, err = vcpkg.SelectAutoTriplet(vcpkg.TripletRequest{OS: osName, Arch: arch, Compiler: string(tc.Kind), ABI: toolchain.TargetABI(tc), Available: available})
+		if err != nil {
+			return err
+		}
+	}
+	if cfg.Toolchain.Mode == "wsl" {
+		return fmt.Errorf("E_VCPKG_TARGET_MISMATCH: install Linux dependencies using Linux Trestle inside the WSL distribution; Windows vcpkg cannot install the configured WSL target")
 	}
 	if err := client.InstallWithProgress(ctx, []string{name}, triplet, progress); err != nil {
 		return err
 	}
-	if cfg.Vcpkg.Root != client.Root || cfg.Vcpkg.Triplet != triplet {
-		cfg.Vcpkg.Root, cfg.Vcpkg.Triplet = client.Root, triplet
-		if err := config.Save(path, cfg); err != nil {
-			return err
-		}
+	cfg.Vcpkg.Root, cfg.Vcpkg.Triplet = client.Root, triplet
+	if err := addPackageToConfig(&cfg, name, ""); err != nil {
+		return err
 	}
-	return AddPackage(path, name, "")
+	return config.Save(path, cfg)
 }
 
 func defaultTarget(cfg config.Config) string {
@@ -1055,21 +1117,35 @@ func SetPackageVersion(path, name, version string) error {
 }
 
 func Vcpkg(ctx context.Context, root, query string, ports []string, triplet string, install bool) error {
-	if install {
-		client, err := vcpkg.NewClient(root)
+	return runOperation(ctx, config.DefaultFileName, "vcpkg", func(line string) { fmt.Println(line) }, func(ctx context.Context, emit func(string)) error {
+		if install {
+			client, err := vcpkg.NewClient(root)
+			if err != nil {
+				return err
+			}
+			if cfg, err := config.Load(config.DefaultFileName); err == nil {
+				if cfg.Toolchain.Mode == "wsl" {
+					return fmt.Errorf("E_VCPKG_TARGET_MISMATCH: install Linux dependencies with Linux Trestle inside the distribution")
+				}
+				client.Environment = toolchain.EnvironmentForVcpkg(ctx, cfg.Toolchain.Setup, cfg.Toolchain.Archiver, cfg.Toolchain.CXX, cfg.Toolchain.C)
+				if triplet == "" || triplet == "auto" {
+					triplet = cfg.Vcpkg.Triplet
+				}
+			}
+			if triplet == "" || triplet == "auto" {
+				return fmt.Errorf("E_VCPKG_TRIPLET: specify --triplet for the actual target OS, architecture and compiler ABI")
+			}
+			return client.InstallWithProgress(ctx, ports, triplet, emit)
+		}
+		results, err := (vcpkg.WebRegistry{}).Search(ctx, query, 50)
 		if err != nil {
 			return err
 		}
-		return client.Install(ctx, ports, triplet)
-	}
-	results, err := (vcpkg.WebRegistry{}).Search(ctx, query, 50)
-	if err != nil {
-		return err
-	}
-	for _, result := range results {
-		fmt.Printf("%-24s %-14s %s\n", result.Name, result.Version, result.Description)
-	}
-	return nil
+		for _, result := range results {
+			emit(fmt.Sprintf("%-24s %-14s %s", result.Name, result.Version, result.Description))
+		}
+		return nil
+	})
 }
 
 func Toolchains(ctx context.Context) error {
@@ -1097,6 +1173,9 @@ func Generate(path string) (BuildResult, error) {
 }
 
 func GenerateWithContext(ctx context.Context, path string) (BuildResult, error) {
+	if cfg, ok := ctx.Value(configurationKey{}).(config.Config); ok {
+		return generateWithConfig(ctx, path, cfg)
+	}
 	cfg, err := ensureProjectConfig(path)
 	if err != nil {
 		return BuildResult{}, err
@@ -1109,7 +1188,15 @@ func GenerateWithContext(ctx context.Context, path string) (BuildResult, error) 
 }
 
 func generateWithConfig(ctx context.Context, path string, cfg config.Config) (BuildResult, error) {
-	project, err := graph.Resolve(cfg)
+	ctx, release, err := buildResources(ctx, cfg, "generate")
+	if err != nil {
+		return BuildResult{}, err
+	}
+	defer release()
+	if err := checkPackagePlatform(cfg); err != nil {
+		return BuildResult{}, err
+	}
+	project, err := graph.ResolveAt(ctx, cfg, filepath.Dir(path))
 	if err != nil {
 		return BuildResult{}, err
 	}
@@ -1138,15 +1225,26 @@ func generateWithConfig(ctx context.Context, path string, cfg config.Config) (Bu
 		if err != nil {
 			return BuildResult{}, err
 		}
+		if err := checkPackageTarget(cfg, tc); err != nil {
+			return BuildResult{}, err
+		}
 	}
-	if cfg.Toolchain.C != "" && cfg.Toolchain.C != "auto" {
-		tc.CC = cfg.Toolchain.C
-	}
-	if cfg.Toolchain.Archiver != "" && cfg.Toolchain.Archiver != "auto" && cfg.Toolchain.Archiver != "lib" {
-		tc.Archiver = cfg.Toolchain.Archiver
-	}
-	if cfg.Toolchain.Linker != "" && cfg.Toolchain.Linker != "auto" {
-		tc.Linker = cfg.Toolchain.Linker
+	for _, item := range []struct {
+		value, role string
+		output      *string
+	}{
+		{cfg.Toolchain.C, "C compiler", &tc.CC},
+		{cfg.Toolchain.Archiver, "archiver", &tc.Archiver},
+		{cfg.Toolchain.Linker, "linker", &tc.Linker},
+	} {
+		if item.value == "" || item.value == "auto" {
+			continue
+		}
+		resolved, err := configuredExecutable(ctx, cfg, tc, root, item.value, item.role)
+		if err != nil {
+			return BuildResult{}, err
+		}
+		*item.output = resolved
 	}
 	if cfg.Toolchain.Mode == "wsl" && hasNonShader {
 		linuxDir, pathErr := toolchain.WSLPath(ctx, cfg.Toolchain.WSLDistribution, manifestDir)
@@ -1374,21 +1472,36 @@ func generateWithConfig(ctx context.Context, path string, cfg config.Config) (Bu
 	if err != nil {
 		return BuildResult{}, err
 	}
-	if err := writeResponseFiles(manifestDir, buildPlan); err != nil {
-		return BuildResult{}, err
+	if cfg.Toolchain.Mode == "wsl" {
+		if err := translateWSLArguments(ctx, cfg.Toolchain.WSLDistribution, &buildPlan); err != nil {
+			return BuildResult{}, err
+		}
 	}
 	manifest, err := ninja.Emit(buildPlan)
 	if err != nil {
 		return BuildResult{}, err
 	}
 	manifestPath := filepath.Join(manifestDir, "build.ninja")
+	if _, err := plan.Outputs(cfg, project, options); err != nil {
+		return BuildResult{}, err
+	}
+	marker := filepath.Join(manifestDir, ".trestle", "incomplete")
+	if err := fsx.AtomicWrite(marker, []byte("Generation interrupted: run trestle build to regenerate.\n")); err != nil {
+		return BuildResult{}, err
+	}
+	if err := writeResponseFiles(ctx, cfg, manifestDir, buildPlan); err != nil {
+		return BuildResult{}, err
+	}
 	if err := fsx.AtomicWrite(manifestPath, manifest); err != nil {
 		return BuildResult{}, err
 	}
-	if err := writeCommandMetadata(root, manifestDir, cfg, buildPlan); err != nil {
+	if err := writeCommandMetadata(ctx, root, manifestDir, cfg, buildPlan); err != nil {
 		return BuildResult{}, err
 	}
 	if err := writeGenerationState(manifestDir, cfg, project, tc); err != nil {
+		return BuildResult{}, err
+	}
+	if err := os.Remove(marker); err != nil {
 		return BuildResult{}, err
 	}
 	outputs, err := plan.Outputs(cfg, project, options)
@@ -1413,7 +1526,12 @@ type commandMetadata struct {
 	Tests   map[string][]string `json:"tests"`
 }
 
-func writeCommandMetadata(root, manifestDir string, cfg config.Config, buildPlan plan.BuildPlan) error {
+func writeCommandMetadata(ctx context.Context, root, manifestDir string, cfg config.Config, buildPlan plan.BuildPlan) error {
+	lock, err := fsx.WaitLock(ctx, filepath.Join(root, ".trestle", "metadata"), "publish command metadata")
+	if err != nil {
+		return err
+	}
+	defer lock.Close()
 	entries := make([]compileCommandEntry, 0)
 	for _, action := range buildPlan.Actions {
 		if !strings.HasPrefix(string(action.ID), "compile_") || len(action.Inputs) == 0 || len(action.Outputs) == 0 {
@@ -1438,10 +1556,18 @@ func writeCommandMetadata(root, manifestDir string, cfg config.Config, buildPlan
 		return err
 	}
 	data = append(data, '\n')
+	if err := fsx.AtomicWrite(filepath.Join(manifestDir, "compile_commands.json"), data); err != nil {
+		return err
+	}
 	compileCommands := cfg.Build.CompileCommands
 	if compileCommands == "" {
 		compileCommands = filepath.Join(root, "compile_commands.json")
 	}
+	compileLock, err := fsx.WaitLock(ctx, compileCommands, "publish compile commands")
+	if err != nil {
+		return err
+	}
+	defer compileLock.Close()
 	if err := fsx.AtomicWrite(compileCommands, data); err != nil {
 		return err
 	}
@@ -1456,10 +1582,13 @@ func writeCommandMetadata(root, manifestDir string, cfg config.Config, buildPlan
 	if err != nil {
 		return err
 	}
+	if err := fsx.AtomicWrite(filepath.Join(manifestDir, ".trestle", "commands.json"), append(commands, '\n')); err != nil {
+		return err
+	}
 	return fsx.AtomicWrite(filepath.Join(root, ".trestle", "commands.json"), append(commands, '\n'))
 }
 
-func writeResponseFiles(manifestDir string, buildPlan plan.BuildPlan) error {
+func writeResponseFiles(ctx context.Context, cfg config.Config, manifestDir string, buildPlan plan.BuildPlan) error {
 	for _, action := range buildPlan.Actions {
 		if !action.ResponseFile || len(action.Outputs) != 1 {
 			continue
@@ -1474,7 +1603,13 @@ func writeResponseFiles(manifestDir string, buildPlan plan.BuildPlan) error {
 			if err != nil {
 				return err
 			}
-			paths = append(paths, filepath.ToSlash(filepath.Clean(absolute)))
+			if cfg.Toolchain.Mode == "wsl" {
+				absolute, err = toolchain.WSLPath(ctx, cfg.Toolchain.WSLDistribution, absolute)
+				if err != nil {
+					return err
+				}
+			}
+			paths = append(paths, "\""+filepath.ToSlash(filepath.Clean(absolute))+"\"")
 		}
 		responsePath := action.Outputs[0] + ".objs"
 		if !filepath.IsAbs(responsePath) {
@@ -1505,16 +1640,17 @@ func BuildTargetsWithProgress(ctx context.Context, path string, targets []string
 	return BuildTargetsWithOptions(ctx, path, targets, all, false, progress)
 }
 
-func BuildTargetsWithOptions(ctx context.Context, path string, targets []string, all, force bool, progress func(string)) error {
-	cfg, err := config.Load(path)
-	if err != nil {
-		return err
-	}
-	cfg, err = policy.ApplyAt(ctx, cfg, filepath.Dir(path))
+func buildTargetsWithOptions(ctx context.Context, path string, targets []string, all, force bool, progress func(string)) error {
+	cfg, err := operationConfig(ctx, path)
 	if err != nil {
 		return err
 	}
 	selected, err := selectBuildTargets(cfg, targets, all)
+	ctx, release, lockErr := buildResources(ctx, cfg, "build")
+	if lockErr != nil {
+		return lockErr
+	}
+	defer release()
 	if err != nil {
 		return err
 	}
@@ -1545,12 +1681,12 @@ func BuildTargetsWithOptions(ctx context.Context, path string, targets []string,
 		}
 	}
 	requested := targetClosure(cfg, selected)
-	writer := &progressWriter{callback: progress, outputs: result.Outputs, failedTargets: map[string]bool{}, diagnostics: map[string][]string{}}
+	writer := &progressWriter{callback: processx.Notify(ctx, progress), statusCallback: progress, outputs: result.Outputs, failedTargets: map[string]bool{}, diagnostics: map[string][]string{}}
 	defer writer.Flush()
 	args := []string{"-f", "build.ninja"}
 	args = append(args, goals...)
 	runErr := (runner.Runner{}).RunWithEvents(ctx, "ninja", args, runner.Options{
-		Dir: filepath.Dir(result.Manifest), Env: environmentList(result.Environment), Stdout: writer, Stderr: writer,
+		Dir: filepath.Dir(result.Manifest), Env: environmentList(result.Environment), Stdout: writer, Stderr: writer, RawOutput: processx.Output(ctx),
 	}, writer)
 	writer.Flush()
 	emitBuildSummary(progress, cfg, requested, writer, runErr)
@@ -1682,6 +1818,10 @@ func ListTests(path string) ([]TestJob, error) {
 	if err != nil {
 		return nil, err
 	}
+	return listTestsConfig(cfg), nil
+}
+
+func listTestsConfig(cfg config.Config) []TestJob {
 	names := sortedTargetNames(cfg.Targets)
 	jobs := make([]TestJob, 0)
 	for _, name := range names {
@@ -1695,14 +1835,21 @@ func ListTests(path string) ([]TestJob, error) {
 		}
 		jobs = append(jobs, TestJob{Name: name, Group: group, Files: append([]string{}, target.Sources...), Args: append([]string{}, target.TestArgs...), WorkingDir: target.TestWorkingDir})
 	}
-	return jobs, nil
+	return jobs
 }
 
-func RunTests(ctx context.Context, path string, selection TestSelection, progress func(string)) error {
-	jobs, err := ListTests(path)
+func runTests(ctx context.Context, path string, selection TestSelection, progress func(string)) error {
+	cfg, err := operationConfig(ctx, path)
 	if err != nil {
 		return err
 	}
+	ctx, release, err := buildResources(ctx, cfg, "test")
+	if err != nil {
+		return err
+	}
+	defer release()
+	ctx = context.WithValue(ctx, configurationKey{}, cfg)
+	jobs := listTestsConfig(cfg)
 	selected := make([]TestJob, 0, len(jobs))
 	for _, job := range jobs {
 		matches := selection.All || (selection.Job != "" && job.Name == selection.Job) || (selection.Group != "" && job.Group == selection.Group)
@@ -1722,13 +1869,14 @@ func RunTests(ctx context.Context, path string, selection TestSelection, progres
 	if len(selected) == 0 {
 		return fmt.Errorf("no test jobs match the selection")
 	}
-	result, err := Generate(path)
+	result, err := GenerateWithContext(ctx, path)
 	if err != nil {
 		return err
 	}
 	manifestDir := filepath.Dir(result.Manifest)
 	environment := environmentList(result.Environment)
-	writer := &progressWriter{callback: progress}
+	writer := &progressWriter{callback: processx.Notify(ctx, progress), statusCallback: progress}
+	defer writer.Flush()
 	for index, job := range selected {
 		if progress != nil {
 			progress(fmt.Sprintf("[%d/%d] Building test job %s", index+1, len(selected), job.Name))
@@ -1737,7 +1885,7 @@ func RunTests(ctx context.Context, path string, selection TestSelection, progres
 		if !ok {
 			return fmt.Errorf("test job %q has no build output", job.Name)
 		}
-		if err := (runner.Runner{}).RunWithEvents(ctx, "ninja", []string{"-f", "build.ninja", filepath.ToSlash(output)}, runner.Options{Dir: manifestDir, Env: environment, Stdout: writer, Stderr: writer}, writer); err != nil {
+		if err := (runner.Runner{}).RunWithEvents(ctx, "ninja", []string{"-f", "build.ninja", filepath.ToSlash(output)}, runner.Options{Dir: manifestDir, Env: environment, Stdout: writer, Stderr: writer, RawOutput: processx.Output(ctx)}, writer); err != nil {
 			return err
 		}
 		executable := output
@@ -1751,10 +1899,14 @@ func RunTests(ctx context.Context, path string, selection TestSelection, progres
 		if progress != nil {
 			progress(fmt.Sprintf("[%d/%d] Running %s · group %s", index+1, len(selected), job.Name, job.Group))
 		}
-		command := exec.CommandContext(ctx, executable, job.Args...)
+		command := processx.Command(ctx, executable, job.Args...)
 		command.Dir = workingDir
 		command.Env = append(os.Environ(), environment...)
-		command.Stdout, command.Stderr = writer, writer
+		var processOutput io.Writer = writer
+		if raw := processx.Output(ctx); raw != nil {
+			processOutput = io.MultiWriter(raw, writer)
+		}
+		command.Stdout, command.Stderr = processOutput, processOutput
 		if err := command.Run(); err != nil {
 			return fmt.Errorf("test job %s failed: %w", job.Name, err)
 		}
@@ -1773,15 +1925,16 @@ func Test(path string) error {
 }
 
 type progressWriter struct {
-	mu            sync.Mutex
-	buffer        bytes.Buffer
-	callback      func(string)
-	outputs       map[model.TargetID]string
-	failedTargets map[string]bool
-	diagnostics   map[string][]string
-	currentTarget string
-	currentStage  string
-	currentSource string
+	mu             sync.Mutex
+	buffer         bytes.Buffer
+	callback       func(string)
+	statusCallback func(string)
+	outputs        map[model.TargetID]string
+	failedTargets  map[string]bool
+	diagnostics    map[string][]string
+	currentTarget  string
+	currentStage   string
+	currentSource  string
 }
 
 var sourceDiagnosticPattern = regexp.MustCompile(`(?i)^([^:]+\.(?:c|cc|cpp|cxx|h|hpp))(?::|\()[0-9]+`)
@@ -1812,7 +1965,7 @@ func (writer *progressWriter) Flush() {
 func (writer *progressWriter) emit(data []byte) {
 	line := strings.TrimRight(decodeConsoleOutput(data), "\r\n")
 	writer.observe(line)
-	if writer.callback != nil && line != "" {
+	if writer.callback != nil {
 		writer.callback(line)
 	}
 }
@@ -1883,8 +2036,12 @@ func (writer *progressWriter) classifyFailure(path string) (target, stage, sourc
 }
 
 func (writer *progressWriter) Progress(value runner.Progress) {
-	if writer.callback != nil {
-		writer.callback(fmt.Sprintf("Build %d/%d · %d%%", value.Finished, value.Total, value.Percent))
+	callback := writer.statusCallback
+	if callback == nil {
+		callback = writer.callback
+	}
+	if callback != nil {
+		callback(fmt.Sprintf("Build %d/%d · %d%%", value.Finished, value.Total, value.Percent))
 	}
 }
 

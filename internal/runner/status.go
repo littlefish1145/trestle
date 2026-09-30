@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"trestle/internal/processx"
 )
 
 type Progress struct {
@@ -45,7 +46,7 @@ func (runner Runner) RunWithEvents(ctx context.Context, executable string, args 
 	if err != nil {
 		return fmt.Errorf("E_NINJA_NOT_FOUND: %q is required but was not found: %w", executable, err)
 	}
-	command := exec.CommandContext(ctx, path, args...)
+	command := processx.Command(ctx, path, args...)
 	command.Dir = options.Dir
 	environment := append(os.Environ(), "NINJA_STATUS=@@TRESTLE:%f:%t:%p:%r@@")
 	command.Env = append(environment, options.Env...)
@@ -54,10 +55,21 @@ func (runner Runner) RunWithEvents(ctx context.Context, executable string, args 
 		return err
 	}
 	command.Stderr = options.Stderr
+	if options.RawOutput != nil {
+		if command.Stderr == nil {
+			command.Stderr = options.RawOutput
+		} else {
+			command.Stderr = io.MultiWriter(options.RawOutput, command.Stderr)
+		}
+	}
 	if err := command.Start(); err != nil {
 		return err
 	}
-	reader := bufio.NewReader(stdout)
+	var source io.Reader = stdout
+	if options.RawOutput != nil {
+		source = io.TeeReader(stdout, options.RawOutput)
+	}
+	reader := bufio.NewReader(source)
 	for {
 		line, readErr := reader.ReadString('\n')
 		if readErr != nil && readErr != io.EOF {
@@ -87,6 +99,9 @@ func (runner Runner) RunWithEvents(ctx context.Context, executable string, args 
 		}
 	}
 	waitErr := command.Wait()
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
 	if waitErr != nil {
 		return fmt.Errorf("E_NINJA_FAILED: %w", waitErr)
 	}

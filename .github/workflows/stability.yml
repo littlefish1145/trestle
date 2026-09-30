@@ -1,0 +1,110 @@
+name: Stability and tutorials
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    name: Runtime checks (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: Install Linux build tools
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y ninja-build g++ cmake
+      - name: Install macOS build tools
+        if: runner.os == 'macOS'
+        run: brew install ninja
+      - name: Select Windows compiler
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          choco install ninja --no-progress -y
+          $install = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          $tools = Get-ChildItem -LiteralPath "$install\VC\Tools\MSVC" -Directory | Sort-Object Name -Descending | Select-Object -First 1
+          "TRESTLE_TEST_COMPILER=$($tools.FullName)\bin\HostX64\x64\cl.exe" >> $env:GITHUB_ENV
+      - name: Tests
+        run: go test -count=1 ./...
+      - name: Vet
+        run: go vet ./...
+      - name: Race checks
+        if: runner.os != 'Windows'
+        run: go test -race -count=1 ./...
+      - name: Compile and run a native C++ project
+        env:
+          TRESTLE_TEST_NATIVE: '1'
+        run: go test -v -count=1 ./internal/app -run '^TestRealNativeCPPBuild$'
+
+  fmt:
+    name: fmt tutorial (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: Prepare Linux tools and vcpkg
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y ninja-build g++ cmake curl zip unzip tar pkg-config
+          root="$RUNNER_TEMP/tutorial-vcpkg"
+          git clone --depth 1 https://github.com/microsoft/vcpkg.git "$root"
+          "$root/bootstrap-vcpkg.sh" -disableMetrics
+          "$root/vcpkg" install fmt --triplet x64-linux
+          echo "VCPKG_ROOT=$root" >> "$GITHUB_ENV"
+          echo 'TRESTLE_TEST_TRIPLET=x64-linux' >> "$GITHUB_ENV"
+      - name: Prepare macOS tools and vcpkg
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          brew install ninja pkg-config
+          root="$RUNNER_TEMP/tutorial-vcpkg"
+          triplet=x64-osx
+          if [ "$(uname -m)" = arm64 ]; then triplet=arm64-osx; fi
+          git clone --depth 1 https://github.com/microsoft/vcpkg.git "$root"
+          "$root/bootstrap-vcpkg.sh" -disableMetrics
+          "$root/vcpkg" install fmt --triplet "$triplet"
+          echo "VCPKG_ROOT=$root" >> "$GITHUB_ENV"
+          echo "TRESTLE_TEST_TRIPLET=$triplet" >> "$GITHUB_ENV"
+      - name: Prepare Windows tools and vcpkg
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          choco install ninja --no-progress -y
+          $install = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          $tools = Get-ChildItem -LiteralPath "$install\VC\Tools\MSVC" -Directory | Sort-Object Name -Descending | Select-Object -First 1
+          "TRESTLE_TEST_COMPILER=$($tools.FullName)\bin\HostX64\x64\cl.exe" >> $env:GITHUB_ENV
+          $root = Join-Path $env:RUNNER_TEMP tutorial-vcpkg
+          git clone --depth 1 https://github.com/microsoft/vcpkg.git $root
+          & "$root\bootstrap-vcpkg.bat" -disableMetrics
+          & "$root\vcpkg.exe" install fmt --triplet x64-windows
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "VCPKG_ROOT=$root" >> $env:GITHUB_ENV
+          'TRESTLE_TEST_TRIPLET=x64-windows' >> $env:GITHUB_ENV
+      - name: Build, run and package the tutorial
+        env:
+          TRESTLE_TEST_FMT: '1'
+        run: go test -v -count=1 ./internal/app -run '^TestFmtTutorial$'

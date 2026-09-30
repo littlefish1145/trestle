@@ -2,14 +2,19 @@ package config
 
 import (
 	"bytes"
+	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 
 	"github.com/BurntSushi/toml"
+	"trestle/internal/diag"
+	"trestle/internal/fsx"
 )
 
 var ErrNotFound = errors.New("trestle.toml not found")
@@ -57,6 +62,11 @@ func Load(path string) (Config, error) {
 		}
 		return Config{}, err
 	}
+	return Decode(path, data)
+}
+
+// Decode validates one immutable snapshot, including migration in memory.
+func Decode(path string, data []byte) (Config, error) {
 	migrated, err := Migrate(data)
 	if err != nil {
 		return Config{}, err
@@ -80,10 +90,31 @@ func Load(path string) (Config, error) {
 	if err := Validate(cfg); err != nil {
 		return Config{}, err
 	}
+	cfg.sourcePath, _ = filepath.Abs(path)
+	cfg.sourceFingerprint = Fingerprint(data)
 	return cfg, nil
 }
 
+func Fingerprint(data []byte) string { return fmt.Sprintf("%x", sha256.Sum256(data)) }
+
+// Snapshot also represents absence so import/init can detect concurrent creation.
+func Snapshot(path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return "missing", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return Fingerprint(data), nil
+}
+
 func (c *Config) normalize(root string) error {
+	absoluteRoot, err := filepath.Abs(root)
+	if err != nil {
+		return err
+	}
+	root = absoluteRoot
 	if c.Build.Profile == "" {
 		c.Build.Profile = "debug"
 	}
@@ -229,14 +260,109 @@ func cleanPaths(paths []string) []string {
 }
 
 func Save(path string, cfg Config) error {
+	expected := ""
+	absolute, _ := filepath.Abs(path)
+	if absolute == cfg.sourcePath {
+		expected = cfg.sourceFingerprint
+	} else if cfg.sourcePath != "" {
+		destination, destErr := fsx.Canonical(path)
+		source, sourceErr := fsx.Canonical(cfg.sourcePath)
+		if destErr == nil && sourceErr == nil && (destination == source || runtime.GOOS == "windows" && strings.EqualFold(destination, source)) {
+			expected = cfg.sourceFingerprint
+		}
+	}
+	return SaveExpected(path, cfg, expected)
+}
+
+func SaveExpected(path string, cfg Config, expected string) error {
 	root := filepath.Dir(path)
+	canonical, err := fsx.Canonical(path)
+	if err != nil {
+		return err
+	}
+	path = canonical
+	lock, err := fsx.TryLock(context.Background(), path, "save configuration")
+	if err != nil {
+		return err
+	}
+	defer lock.Close()
+	current, err := Snapshot(path)
+	if err != nil {
+		return err
+	}
+	if expected != "" && current != expected {
+		e := diag.New("E_CONFIG_CONFLICT", diag.StageConfig, "configuration changed before saving", nil)
+		e.Detail = path
+		e.Hints = []string{"Refresh the project, review the latest settings, and apply your change again. The current file was preserved."}
+		return e
+	}
 	copyCfg := cfg
-	copyCfg.normalize(root)
+	if err := copyCfg.normalize(root); err != nil {
+		return err
+	}
+	if err := Validate(copyCfg); err != nil {
+		return err
+	}
+	// Store project-local paths relative to the file, so init -C relative-dir
+	// and moving a checkout do not introduce duplicated directory prefixes.
+	absoluteRoot, err := filepath.Abs(root)
+	if err != nil {
+		return err
+	}
+	local := func(value string) string {
+		if value == "" {
+			return value
+		}
+		rel, err := filepath.Rel(absoluteRoot, value)
+		if err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return filepath.ToSlash(rel)
+		}
+		return value
+	}
+	copyCfg.Build.BuildDir = local(copyCfg.Build.BuildDir)
+	copyCfg.Build.CompileCommands = local(copyCfg.Build.CompileCommands)
+	copyCfg.Vcpkg.Root = local(copyCfg.Vcpkg.Root)
+	copyCfg.Package.Output = local(copyCfg.Package.Output)
 	var buffer bytes.Buffer
 	encoder := toml.NewEncoder(&buffer)
 	encoder.Indent = "  "
 	if err := encoder.Encode(copyCfg); err != nil {
 		return err
 	}
-	return os.WriteFile(path, buffer.Bytes(), 0o644)
+	if current != "missing" {
+		original, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		var version struct {
+			Version int `toml:"schema_version"`
+		}
+		if _, err := toml.Decode(string(original), &version); err != nil {
+			return err
+		}
+		if version.Version < CurrentSchemaVersion {
+			backup := fmt.Sprintf("%s.schema-v%d.%s.bak", path, version.Version, Fingerprint(original)[:12])
+			if _, err := os.Stat(backup); os.IsNotExist(err) {
+				if err := fsx.AtomicWrite(backup, original); err != nil {
+					return err
+				}
+			} else if err != nil {
+				return err
+			} else {
+				data, err := os.ReadFile(backup)
+				if err != nil || !bytes.Equal(data, original) {
+					return fmt.Errorf("E_CONFIG_BACKUP: cannot preserve original configuration at %s: %v", backup, err)
+				}
+			}
+		}
+		// Editors do not take our lock: detect edits made during encoding/backup.
+		latest, err := Snapshot(path)
+		if err != nil {
+			return err
+		}
+		if latest != current {
+			return fmt.Errorf("E_CONFIG_CONFLICT: %s changed while saving; refresh and retry", path)
+		}
+	}
+	return fsx.AtomicWrite(path, buffer.Bytes())
 }

@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,6 +17,7 @@ import (
 
 	"trestle/internal/config"
 	"trestle/internal/policy"
+	"trestle/internal/processx"
 )
 
 func AssessTargets(ctx context.Context, path string) (config.Config, map[string]policy.Status, error) {
@@ -70,7 +72,7 @@ func PreviewTask(path, name string) (config.TaskPreview, error) {
 	if err != nil {
 		return config.TaskPreview{}, err
 	}
-	cfg, err := config.Load(path)
+	cfg, err := config.Decode(path, data)
 	if err != nil {
 		return config.TaskPreview{}, err
 	}
@@ -152,7 +154,7 @@ func taskSettingValue(cfg config.Config, key string) string {
 	return ""
 }
 
-func ExecuteTaskPreview(ctx context.Context, path, name string, preview config.TaskPreview, progress func(string)) error {
+func executeTaskPreview(ctx context.Context, path, name string, preview config.TaskPreview, progress func(string)) error {
 	before, err := os.ReadFile(path)
 	if err != nil {
 		return err
@@ -160,7 +162,7 @@ func ExecuteTaskPreview(ctx context.Context, path, name string, preview config.T
 	if fmt.Sprintf("%x", sha256.Sum256(before)) != preview.Fingerprint {
 		return fmt.Errorf("task %q or project settings changed after preview; refresh and review it again", name)
 	}
-	cfg, err := config.Load(path)
+	cfg, err := config.Decode(path, before)
 	if err != nil {
 		return err
 	}
@@ -201,8 +203,12 @@ func ExecuteTaskPreview(ctx context.Context, path, name string, preview config.T
 		command.Dir = directory
 		command.WaitDelay = 2 * time.Second
 		prepareTaskProcess(command)
-		writer := &taskWriter{progress: progress}
-		command.Stdout, command.Stderr = writer, writer
+		writer := &taskWriter{progress: processx.Notify(ctx, progress)}
+		var output io.Writer = writer
+		if raw := processx.Output(ctx); raw != nil {
+			output = io.MultiWriter(raw, writer)
+		}
+		command.Stdout, command.Stderr = output, output
 		if progress != nil {
 			progress("Running in " + directory + ": " + fmt.Sprintf("%q", task.Command))
 		}
@@ -243,7 +249,7 @@ func ExecuteTaskPreview(ctx context.Context, path, name string, preview config.T
 		return err
 	}
 	if !bytes.Equal(before, current) {
-		return fmt.Errorf("task %q did not save settings: trestle.toml changed while the command ran", name)
+		return fmt.Errorf("E_CONFIG_CONFLICT: task %q did not save settings: trestle.toml changed while the command ran; refresh and preview the task again", name)
 	}
 	if len(task.Set) > 0 {
 		if err := config.Save(path, cfg); err != nil {

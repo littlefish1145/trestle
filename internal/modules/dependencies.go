@@ -3,10 +3,10 @@ package modules
 import (
 	"context"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
+	"trestle/internal/processx"
 )
 
 // compilerHeaderDeps asks Clang's preprocessor for the files it actually
@@ -15,7 +15,7 @@ func (scanner CommandScanner) compilerHeaderDeps(ctx context.Context, commandSou
 	args := []string{"-std=" + scanner.Standard, "-x", "c++", "-MM", "-MG", "-MT", "trestle", commandSource}
 	args = append(args, scanner.Options...)
 	executable, args := scanner.invocation(scanner.Compiler, args)
-	command := exec.CommandContext(ctx, executable, args...)
+	command := processx.Command(ctx, executable, args...)
 	command.Dir = scanner.Directory
 	output, err := command.Output()
 	if err != nil {

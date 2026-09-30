@@ -4,17 +4,19 @@ const CurrentSchemaVersion = 6
 const DefaultFileName = "trestle.toml"
 
 type Config struct {
-	SchemaVersion   int                       `toml:"schema_version"`
-	Project         Project                   `toml:"project"`
-	Build           Build                     `toml:"build"`
-	Toolchain       Toolchain                 `toml:"toolchain"`
-	Vcpkg           Vcpkg                     `toml:"vcpkg"`
-	CompilerPresets map[string]CompilerPreset `toml:"compiler_presets"`
-	Targets         map[string]Target         `toml:"targets"`
-	Packages        map[string]Package        `toml:"packages"`
-	Package         PackageOutput             `toml:"package"`
-	Rules           []Rule                    `toml:"rules"`
-	Tasks           map[string]Task           `toml:"tasks"`
+	sourcePath        string
+	sourceFingerprint string
+	SchemaVersion     int                       `toml:"schema_version"`
+	Project           Project                   `toml:"project"`
+	Build             Build                     `toml:"build"`
+	Toolchain         Toolchain                 `toml:"toolchain"`
+	Vcpkg             Vcpkg                     `toml:"vcpkg"`
+	CompilerPresets   map[string]CompilerPreset `toml:"compiler_presets"`
+	Targets           map[string]Target         `toml:"targets"`
+	Packages          map[string]Package        `toml:"packages"`
+	Package           PackageOutput             `toml:"package"`
+	Rules             []Rule                    `toml:"rules"`
+	Tasks             map[string]Task           `toml:"tasks"`
 }
 
 type Project struct {

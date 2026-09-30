@@ -14,6 +14,10 @@ import (
 )
 
 func Resolve(cfg config.Config) (model.ResolvedProject, error) {
+	return ResolveAt(context.Background(), cfg, ".")
+}
+
+func ResolveAt(ctx context.Context, cfg config.Config, root string) (model.ResolvedProject, error) {
 	names := make([]string, 0, len(cfg.Targets))
 	for name := range cfg.Targets {
 		names = append(names, name)
@@ -25,8 +29,18 @@ func Resolve(cfg config.Config) (model.ResolvedProject, error) {
 		LinkClosure: make(map[model.TargetID][]model.TargetID, len(names)),
 	}
 	for _, name := range names {
+		if err := ctx.Err(); err != nil {
+			return model.ResolvedProject{}, err
+		}
 		target := cfg.Targets[name]
-		source, err := fsx.ResolveSources(target.Sources)
+		patterns := make([]string, len(target.Sources))
+		for i, pattern := range target.Sources {
+			patterns[i] = pattern
+			if !filepath.IsAbs(pattern) {
+				patterns[i] = filepath.Join(root, pattern)
+			}
+		}
+		source, err := fsx.ResolveSources(patterns)
 		if err != nil {
 			return model.ResolvedProject{}, fmt.Errorf("target %q source glob: %w", name, err)
 		}
@@ -73,7 +87,7 @@ func Resolve(cfg config.Config) (model.ResolvedProject, error) {
 				ref.Target = model.TargetID(dep.Target)
 			}
 			if dep.Package != "" {
-				usage, err := resolvePackage(cfg, cfg.Packages[dep.Package])
+				usage, err := resolvePackage(ctx, cfg, cfg.Packages[dep.Package])
 				if err != nil {
 					return model.ResolvedProject{}, err
 				}
@@ -187,8 +201,11 @@ func resolveTarget(project *model.ResolvedProject, id model.TargetID) error {
 	return nil
 }
 
-func resolvePackage(cfg config.Config, pkg config.Package) (model.Usage, error) {
-	resolved, err := (vcpkg.Resolver{Root: cfg.Vcpkg.Root, Profile: cfg.Build.Profile, CRTLinkage: cfg.Vcpkg.CRTLinkage, LibraryLinkage: cfg.Vcpkg.LibraryLinkage}).Resolve(context.Background(), pkg)
+func resolvePackage(ctx context.Context, cfg config.Config, pkg config.Package) (model.Usage, error) {
+	if pkg.Triplet == "" || pkg.Triplet == "auto" {
+		pkg.Triplet = cfg.Vcpkg.Triplet
+	}
+	resolved, err := (vcpkg.Resolver{Root: cfg.Vcpkg.Root, Profile: cfg.Build.Profile, CRTLinkage: cfg.Vcpkg.CRTLinkage, LibraryLinkage: cfg.Vcpkg.LibraryLinkage}).Resolve(ctx, pkg)
 	if err != nil {
 		return model.Usage{}, fmt.Errorf("package %s: %w", pkg.Port, err)
 	}

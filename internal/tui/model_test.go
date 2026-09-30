@@ -208,7 +208,7 @@ func TestDashboardRowsAreStable(t *testing.T) {
 func TestDashboardKeepsCompleteInstallLogAndSupportsMouseScroll(t *testing.T) {
 	model := newDashboard("trestle.toml", Services{})
 	model.width, model.height, model.probing = 120, 20, false
-	model.route, model.focus = PackagesRoute, focusNavigation
+	model.route, model.focus = PackagesRoute, focusLog
 	for index := 0; index < 40; index++ {
 		updated, _ := model.Update(installEvent{line: fmt.Sprintf("install line %02d", index)})
 		model = updated.(dashboardModel)
@@ -218,8 +218,8 @@ func TestDashboardKeepsCompleteInstallLogAndSupportsMouseScroll(t *testing.T) {
 	}
 	updated, _ := model.Update(tea.MouseWheelMsg{Button: tea.MouseWheelDown})
 	model = updated.(dashboardModel)
-	if model.focus != focusContent || model.scroll == 0 {
-		t.Fatalf("mouse wheel did not scroll content: focus=%d scroll=%d", model.focus, model.scroll)
+	if model.focus != focusLog || model.logScroll == 0 {
+		t.Fatalf("mouse wheel did not scroll log: focus=%d scroll=%d", model.focus, model.logScroll)
 	}
 	updated, _ = model.Update(tea.MouseClickMsg(tea.Mouse{X: 80, Y: 8, Button: tea.MouseLeft}))
 	model = updated.(dashboardModel)
@@ -231,29 +231,29 @@ func TestDashboardKeepsCompleteInstallLogAndSupportsMouseScroll(t *testing.T) {
 func TestDashboardBuildLogFollowsAndKeepsScrolledHistory(t *testing.T) {
 	model := newDashboard("trestle.toml", Services{})
 	model.width, model.height, model.probing = 100, 20, false
-	model.route, model.workflowRoute, model.focus, model.logFollow = BuildRoute, BuildRoute, focusContent, true
+	model.route, model.workflowRoute, model.focus, model.logFollow = BuildRoute, BuildRoute, focusLog, true
 	for i := 0; i < 100; i++ {
 		updated, _ := model.Update(workflowEvent{label: "Build", line: fmt.Sprintf("line %03d", i)})
 		model = updated.(dashboardModel)
 	}
-	if len(model.workflowLog) != 100 || model.scroll != model.maxContentScroll() {
-		t.Fatalf("log did not follow output: lines=%d scroll=%d max=%d", len(model.workflowLog), model.scroll, model.maxContentScroll())
+	if len(model.workflowLog) != 100 || model.logScroll != model.maxLogScroll() {
+		t.Fatalf("log did not follow output: lines=%d scroll=%d max=%d", len(model.workflowLog), model.logScroll, model.maxLogScroll())
 	}
 	if !strings.Contains(ansi.Strip(model.View().Content), "line 099") {
 		t.Fatal("latest output is not visible")
 	}
-	model.scrollContent(-10000)
-	if model.logFollow || model.scroll != 0 {
+	model.scrollLog(-10000)
+	if model.logFollow || model.logScroll != 0 {
 		t.Fatal("manual scroll did not pause log following")
 	}
 	updated, _ := model.Update(workflowEvent{label: "Build", line: "line 100"})
 	model = updated.(dashboardModel)
-	if model.scroll != 0 || len(model.workflowLog) != 101 {
+	if model.logScroll != 0 || len(model.workflowLog) != 101 {
 		t.Fatal("new output displaced the reader from earlier log lines")
 	}
 	updated, _ = model.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyEnd}))
 	model = updated.(dashboardModel)
-	if !model.logFollow || model.scroll != model.maxContentScroll() {
+	if !model.logFollow || model.logScroll != model.maxLogScroll() {
 		t.Fatal("End did not resume following the log")
 	}
 }
@@ -342,7 +342,7 @@ func TestDashboardSettingsAndReleasePages(t *testing.T) {
 	model.config.CompilerPresets["fast"] = config.CompilerPreset{CXX: "clang++", CXXFlags: []string{"-march=native"}}
 	model.route = SettingsRoute
 	view := ansi.Strip(model.View().Content)
-	for _, expected := range []string{"Project name", "C++ compiler", "vcpkg triplet", "[app] Sources", "edit selected field"} {
+	for _, expected := range []string{"Project", "Toolchain & SDKs", "Dependencies", "Target · app", "/ search"} {
 		if !strings.Contains(view, expected) {
 			t.Fatalf("settings missing %q:\n%s", expected, view)
 		}
