@@ -44,12 +44,12 @@ func PackageWithProgress(ctx context.Context, path, output string, progress func
 			return err
 		}
 		defer releaseOutput()
-		if err := BuildWithProgress(ctx, path, emit); err != nil {
-			return err
-		}
 		targets := cfg.Package.Targets
 		if len(targets) == 0 {
 			targets = cfg.Build.DefaultTargets
+		}
+		if err := BuildTargetsWithProgress(ctx, path, targets, false, emit); err != nil {
+			return err
 		}
 		return packageSelectedWithContext(ctx, path, targets, emit)
 	})
@@ -150,15 +150,25 @@ func packageSelectedWithContext(ctx context.Context, path string, targets []stri
 }
 
 func addFile(archive *zip.Writer, source, name string) error {
-	if _, err := os.Stat(source); err != nil {
-		return err
-	}
 	file, err := os.Open(source)
 	if err != nil {
 		return err
 	}
 	defer file.Close()
-	writer, err := archive.Create(filepath.ToSlash(name))
+	info, err := file.Stat()
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("E_PACKAGE_FILE: %s is not a regular file", source)
+	}
+	header, err := zip.FileInfoHeader(info)
+	if err != nil {
+		return err
+	}
+	header.Name = filepath.ToSlash(name)
+	header.Method = zip.Deflate
+	writer, err := archive.CreateHeader(header)
 	if err != nil {
 		return err
 	}

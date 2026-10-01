@@ -1,12 +1,68 @@
 package app
 
 import (
+	"archive/zip"
+	"bytes"
+	"io"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"trestle/internal/config"
 )
+
+func TestPackagePreservesFileMetadata(t *testing.T) {
+	root := t.TempDir()
+	var buffer bytes.Buffer
+	archive := zip.NewWriter(&buffer)
+	modified := time.Date(2024, time.March, 12, 10, 20, 30, 0, time.UTC)
+	contents := []byte(strings.Repeat("release artifact\n", 128))
+	for _, artifact := range []struct {
+		name string
+		mode os.FileMode
+	}{{"app", 0755}, {"data.txt", 0644}} {
+		source := filepath.Join(root, artifact.name)
+		if err := os.WriteFile(source, contents, artifact.mode); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(source, modified, modified); err != nil {
+			t.Fatal(err)
+		}
+		if err := addFile(archive, source, filepath.Join("bin", artifact.name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := archive.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reader, err := zip.NewReader(bytes.NewReader(buffer.Bytes()), int64(buffer.Len()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reader.File) != 2 {
+		t.Fatalf("unexpected archive entries: %d", len(reader.File))
+	}
+	for _, entry := range reader.File {
+		info, err := os.Stat(filepath.Join(root, filepath.Base(entry.Name)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if entry.Name != "bin/"+info.Name() || entry.Mode() != info.Mode() || !entry.Modified.Equal(info.ModTime()) || entry.Method != zip.Deflate {
+			t.Fatalf("metadata lost for %s: mode=%v modified=%v method=%d; source mode=%v modified=%v", entry.Name, entry.Mode(), entry.Modified, entry.Method, info.Mode(), info.ModTime())
+		}
+		file, err := entry.Open()
+		if err != nil {
+			t.Fatal(err)
+		}
+		data, readErr := io.ReadAll(file)
+		closeErr := file.Close()
+		if readErr != nil || closeErr != nil || !bytes.Equal(data, contents) {
+			t.Fatalf("invalid content for %s: read=%v close=%v", entry.Name, readErr, closeErr)
+		}
+	}
+}
 
 func TestBuiltInReleaseOptimizations(t *testing.T) {
 	cfg := config.Default("demo")

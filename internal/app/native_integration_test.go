@@ -1,7 +1,9 @@
 package app
 
 import (
+	"archive/zip"
 	"context"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -66,6 +68,66 @@ func TestRealNativeCPPBuild(t *testing.T) {
 	records, err := runlog.List(path)
 	if err != nil || len(records) != 1 || records[0].Status != "succeeded" {
 		t.Fatalf("history: %+v %v", records, err)
+	}
+	// Packaging must rebuild its own selection, even when an older artifact
+	// already exists and the default build selects a different target.
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Targets["tool"] = config.Target{Type: "executable", Sources: []string{"src/tool.cpp"}, OutputName: "package-tool"}
+	cfg.Package.Targets = []string{"tool"}
+	if err := config.Save(path, cfg); err != nil {
+		t.Fatal(err)
+	}
+	source := filepath.Join(root, "src", "tool.cpp")
+	if err := os.WriteFile(source, []byte("#include <iostream>\nint main(){ std::cout << \"stale package\\n\"; }\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := BuildTargetsWithProgress(context.Background(), path, []string{"tool"}, false, nil); err != nil {
+		integrationError(t, err)
+	}
+	if err := os.WriteFile(source, []byte("#include <iostream>\nint main(){ std::cout << \"package OK\\n\"; }\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := PackageWithProgress(context.Background(), path, "", nil); err != nil {
+		integrationError(t, err)
+	}
+	archive, err := zip.OpenReader(filepath.Join(root, "dist", "hello-native.zip"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer archive.Close()
+	if len(archive.File) != 1 {
+		t.Fatalf("unexpected package entries: %d", len(archive.File))
+	}
+	entry := archive.File[0]
+	wantName := "bin/package-tool"
+	if runtime.GOOS == "windows" {
+		wantName += ".exe"
+	}
+	if entry.Name != wantName {
+		t.Fatalf("packaged the wrong target: %s; want %s", entry.Name, wantName)
+	}
+	if runtime.GOOS != "windows" && entry.Mode().Perm()&0111 == 0 {
+		t.Fatalf("packaged binary has no executable permission: %v", entry.Mode())
+	}
+	file, err := entry.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, readErr := io.ReadAll(file)
+	closeErr := file.Close()
+	if readErr != nil || closeErr != nil {
+		t.Fatalf("read packaged binary: %v %v", readErr, closeErr)
+	}
+	extracted := filepath.Join(t.TempDir(), filepath.Base(entry.Name))
+	if err := os.WriteFile(extracted, data, entry.Mode().Perm()); err != nil {
+		t.Fatal(err)
+	}
+	output, err = exec.Command(extracted).CombinedOutput()
+	if err != nil || strings.TrimSpace(string(output)) != "package OK" {
+		t.Fatalf("run packaged binary: %s %v", output, err)
 	}
 }
 
