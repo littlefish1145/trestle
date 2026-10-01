@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -136,17 +137,25 @@ func (scanner CommandScanner) executableFingerprint(ctx context.Context, executa
 	}
 	resolved, err := exec.LookPath(executable)
 	if err != nil {
-		return executable
+		return executable + "|probe-failed"
 	}
-	info, err := os.Stat(resolved)
+	file, err := os.Open(resolved)
 	if err != nil {
-		return resolved
+		return resolved + "|probe-failed"
 	}
-	probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-	version, _ := processx.Command(probeCtx, resolved, "--version").CombinedOutput()
-	sum := sha256.Sum256(version)
-	return fmt.Sprintf("%s|%d|%d|%s", resolved, info.Size(), info.ModTime().UnixNano(), hex.EncodeToString(sum[:]))
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil || !info.Mode().IsRegular() {
+		return resolved + "|probe-failed"
+	}
+	// Native identity comes from the executable itself. Version subprocesses
+	// may time out on busy runners and yield a different fingerprint even
+	// though the tool has not changed.
+	hash := sha256.New()
+	if _, err := io.Copy(hash, file); err != nil {
+		return resolved + "|probe-failed"
+	}
+	return fmt.Sprintf("%s|%d|%d|%s", resolved, info.Size(), info.ModTime().UnixNano(), hex.EncodeToString(hash.Sum(nil)))
 }
 
 func (scanner CommandScanner) invocation(executable string, args []string) (string, []string) {

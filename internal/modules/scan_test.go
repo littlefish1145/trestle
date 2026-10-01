@@ -149,6 +149,13 @@ func TestCommandScannerWithClang(t *testing.T) {
 		t.Fatal(err)
 	}
 	scanner := CommandScanner{Compiler: compiler, Scanner: scannerPath, Standard: "c++20", Cache: NewCache(root), Directory: root}
+	// A timed-out version probe must not change a native executable's identity.
+	fingerprint := scanner.executableFingerprint(context.Background(), compiler)
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if got := scanner.executableFingerprint(canceled, compiler); got != fingerprint {
+		t.Fatalf("version probe failure changed the compiler fingerprint: %q != %q", got, fingerprint)
+	}
 	first, err := scanner.Scan(context.Background(), source)
 	if err != nil {
 		t.Fatal(err)
@@ -161,7 +168,7 @@ func TestCommandScannerWithClang(t *testing.T) {
 	}
 	second, err := scanner.Scan(context.Background(), source)
 	if err != nil || !second.Reused {
-		t.Fatalf("cache was not reused: %#v %v", second, err)
+		t.Fatalf("cache was not reused: first key=%#v; second=%#v %v", first.Key, second, err)
 	}
 	if err := os.WriteFile(header, []byte("inline int value = 2;\n"), 0o644); err != nil {
 		t.Fatal(err)
@@ -169,6 +176,31 @@ func TestCommandScannerWithClang(t *testing.T) {
 	third, err := scanner.Scan(context.Background(), source)
 	if err != nil || third.Reused {
 		t.Fatalf("changed header was not rescanned: %#v %v", third, err)
+	}
+}
+
+func TestExecutableFingerprintTracksFileContent(t *testing.T) {
+	executable := filepath.Join(t.TempDir(), "compiler.exe")
+	if err := os.WriteFile(executable, []byte("compiler-v1"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(executable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scanner := CommandScanner{}
+	first := scanner.executableFingerprint(context.Background(), executable)
+	if second := scanner.executableFingerprint(context.Background(), executable); second != first {
+		t.Fatalf("unchanged executable fingerprint changed: %q != %q", second, first)
+	}
+	if err := os.WriteFile(executable, []byte("compiler-v2"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(executable, info.ModTime(), info.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	if changed := scanner.executableFingerprint(context.Background(), executable); changed == first {
+		t.Fatal("executable content changed without invalidating the fingerprint")
 	}
 }
 
