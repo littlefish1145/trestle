@@ -77,10 +77,12 @@ int main() {
 Windows x64（PowerShell）：
 
 ```powershell
-trestle configure -toolchain clang-cl -profile debug -vcpkg-root $env:VCPKG_ROOT -triplet x64-windows
+trestle configure -toolchain clang-cl -msvc "14.30~14.50" -profile debug -vcpkg-root $env:VCPKG_ROOT -triplet x64-windows
 ```
 
-也可以使用 `-toolchain cl`。LLVM 必须与 Visual Studio STL 版本兼容；如遇 STL1000 提示 Clang 版本过旧，升级 LLVM 或选择 MSVC。Trestle 自动寻找 Visual Studio 环境；失败时添加 `-setup 'C:\实际VS路径\VC\Auxiliary\Build\vcvars64.bat'`。确保该脚本属于实际安装，且架构匹配。
+`-msvc` 接受版本区间而不是路径，因此 `trestle.toml` 里记录的是 `msvc = "14.30~14.50"`，而不是某台机器上的 `VC/Tools/MSVC/14.44.35207` 目录，文件换台机器仍然可用。`trestle toolchain` 会列出所有可固定的版本；安装新工具链后执行 `trestle toolchain --refresh` 重新扫描。边界只比较它写出的位数，所以 `14.30~14.50` 能匹配 `14.44.35207`。`-cuda` 同理，例如 `-cuda "12.0~12.9"`。
+
+也可以使用 `-toolchain cl`。LLVM 必须与 Visual Studio STL 版本兼容；如遇 STL1000 提示 Clang 版本过旧，升级 LLVM 或选择 MSVC。Trestle 会依据 `msvc` 区间自动寻找 Visual Studio 环境；失败时添加 `-setup 'C:\实际VS路径\VC\Auxiliary\Build\vcvars64.bat'`。确保该脚本属于实际安装，且架构匹配。
 
 Linux x64：
 

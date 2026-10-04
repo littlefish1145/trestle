@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 	"trestle/internal/condition"
+	"trestle/internal/toolchain"
 )
 
 func Validate(cfg Config) error {
@@ -27,6 +28,16 @@ func Validate(cfg Config) error {
 	for name, execution := range map[string]string{"cuda_execution": cfg.Toolchain.CUDAExecution, "vulkan_execution": cfg.Toolchain.VulkanExecution} {
 		if execution != "" && execution != "native" && execution != "wsl" {
 			return fmt.Errorf("toolchain.%s %q is unsupported; use native or wsl", name, execution)
+		}
+	}
+	for _, spec := range []struct{ field, value string }{
+		{"msvc", cfg.Toolchain.MSVC},
+		{"c", cfg.Toolchain.C},
+		{"cxx", cfg.Toolchain.CXX},
+		{"cuda", cfg.Toolchain.CUDA},
+	} {
+		if err := validateVersionSpec(spec.field, spec.value); err != nil {
+			return err
 		}
 	}
 	for _, name := range cfg.Build.DefaultTargets {
@@ -153,10 +164,23 @@ func Validate(cfg Config) error {
 
 func taskSettingAllowed(key string) bool {
 	switch key {
-	case "build.profile", "toolchain.c", "toolchain.cxx", "toolchain.mode", "toolchain.wsl_distribution", "vcpkg.root", "vcpkg.triplet":
+	case "build.profile", "toolchain.c", "toolchain.cxx", "toolchain.msvc", "toolchain.mode", "toolchain.wsl_distribution", "vcpkg.root", "vcpkg.triplet":
 		return true
 	}
 	return false
+}
+
+// validateVersionSpec accepts "auto", a bare executable name, a machine-local
+// path used as an escape hatch, or a version range such as 12.0~12.9.
+func validateVersionSpec(field, value string) error {
+	value = strings.TrimSpace(value)
+	if value == "" || strings.EqualFold(value, "auto") || toolchain.IsLocalPath(value) || !toolchain.LooksLikeVersion(value) {
+		return nil
+	}
+	if _, err := toolchain.ParseRange(value); err != nil {
+		return fmt.Errorf("E_CONFIG_INVALID_VERSION: [toolchain].%s: %w", field, err)
+	}
+	return nil
 }
 
 func graphHasCycle(targets map[string]Target) error {

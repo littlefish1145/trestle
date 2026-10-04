@@ -1,17 +1,17 @@
-schema_version = 6
+schema_version = 7
 
 [project]
   name = "."
 
 [build]
-  profile = "debug"
+  profile = "release"
   build_dir = "build"
   c_standard = "c17"
   cxx_standard = "c++20"
-  compile_flags = []
+  compile_flags = ["-Os", "-ffunction-sections", "-fdata-sections", "-DNDEBUG"]
   c_flags = []
   cxx_flags = []
-  link_flags = []
+  link_flags = ["-Wl,--gc-sections"]
   default_targets = ["app"]
   compile_commands = "compile_commands.json"
   auto_compile_shaders = true
@@ -19,12 +19,15 @@ schema_version = 6
   module_scanner = ""
 
 [toolchain]
-  c = "auto"
-  cxx = "auto"
-  archiver = ""
-  linker = ""
+  msvc = "14.30~14.50"
+  c = "clang-cl"
+  cxx = "clang-cl"
+  archiver = "auto"
+  linker = "auto"
   setup = ""
   cuda = ""
+  cuda_root = ""
+  cache_dir = ".trestle/toolchain"
   cuda_mode = "whole"
   cuda_architectures = ["sm_75"]
   cuda_execution = "native"
@@ -47,6 +50,8 @@ schema_version = 6
 
 [targets]
   [targets.app]
+    when = ""
+    requires_wsl = ""
     type = "executable"
     sources = ["src/main.cpp"]
     output_name = "."
@@ -68,6 +73,6 @@ schema_version = 6
 
 [package]
   format = "zip"
-  output = "dist\\..zip"
-  optimization = "balanced"
+  output = "dist/..zip"
+  optimization = "size"
   targets = ["app"]

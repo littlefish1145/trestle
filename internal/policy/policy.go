@@ -306,7 +306,7 @@ func (p *Probe) probeCUDA(host toolchain.Toolchain) error {
 	if distribution == "" {
 		distribution = p.cfg.Toolchain.WSLDistribution
 	}
-	root := p.cfg.Toolchain.CUDA
+	root := p.cfg.Toolchain.CUDARoot
 	if mode == "wsl" {
 		if p.cfg.Toolchain.Mode != "wsl" || host.Runner == "" {
 			return fmt.Errorf("WSL CUDA requires a WSL host compiler")
@@ -320,10 +320,15 @@ func (p *Probe) probeCUDA(host toolchain.Toolchain) error {
 	if host.Runner != "" {
 		return fmt.Errorf("E_CUDA_NATIVE_HOST: native CUDA cannot use a WSL host compiler; connect CUDA from the same WSL distribution")
 	}
-	if root != "" && !filepath.IsAbs(root) {
-		root = filepath.Join(p.root, root)
+	resolved, err := toolchain.ResolveCUDARoot(ctx, toolchain.Request{
+		CacheDir: toolchain.CacheDir(p.cfg.Toolchain.CacheDir, p.cfg.Root()),
+		CUDA:     p.cfg.Toolchain.CUDA,
+		CUDARoot: root,
+	})
+	if err != nil {
+		return err
 	}
-	_, err := cuda.DetectWithHost(ctx, root, host)
+	_, err = cuda.DetectWithHost(ctx, resolved, host)
 	return err
 }
 
@@ -398,40 +403,18 @@ func (p *Probe) resolveToolchain() (toolchain.Toolchain, error) {
 	p.toolchainChecked = true
 	ctx, cancel := context.WithTimeout(p.ctx, 8*time.Second)
 	defer cancel()
-	var tc toolchain.Toolchain
-	if p.cfg.Toolchain.Mode == "wsl" {
-		tc, p.toolchainError = toolchain.DetectWSL(ctx, p.cfg.Toolchain.WSLDistribution, p.cfg.Toolchain.CXX)
-	} else {
-		detector := toolchain.NewDetector()
-		setup := p.cfg.Toolchain.Setup
-		if toolchain.NeedsMSVCEnvironment(ctx, p.cfg.Toolchain.CXX) {
-			setup = toolchain.ResolveMSVCSetup(ctx, setup, p.cfg.Toolchain.Archiver, p.cfg.Toolchain.Linker, p.cfg.Toolchain.C, p.cfg.Toolchain.CXX)
-		}
-		if setup != "" {
-			if setupDetector, ok := detector.(interface {
-				DetectWithSetup(context.Context, string, string) (toolchain.Toolchain, error)
-			}); ok {
-				tc, p.toolchainError = setupDetector.DetectWithSetup(ctx, p.cfg.Toolchain.CXX, setup)
-			} else {
-				tc, p.toolchainError = detector.Detect(ctx, p.cfg.Toolchain.CXX)
-			}
-		} else {
-			tc, p.toolchainError = detector.Detect(ctx, p.cfg.Toolchain.CXX)
-		}
-	}
-	if p.toolchainError == nil {
-		if p.cfg.Toolchain.C != "" && p.cfg.Toolchain.C != "auto" {
-			tc.CC = p.cfg.Toolchain.C
-		}
-		if p.cfg.Toolchain.Archiver != "" && p.cfg.Toolchain.Archiver != "auto" && p.cfg.Toolchain.Archiver != "lib" {
-			tc.Archiver = p.cfg.Toolchain.Archiver
-		}
-		if p.cfg.Toolchain.Linker != "" && p.cfg.Toolchain.Linker != "auto" {
-			tc.Linker = p.cfg.Toolchain.Linker
-		}
-	}
-	p.toolchainResult = tc
-	return tc, p.toolchainError
+	p.toolchainResult, p.toolchainError = toolchain.DetectConfigured(ctx, toolchain.Request{
+		Mode:            p.cfg.Toolchain.Mode,
+		WSLDistribution: p.cfg.Toolchain.WSLDistribution,
+		C:               p.cfg.Toolchain.C,
+		CXX:             p.cfg.Toolchain.CXX,
+		Archiver:        p.cfg.Toolchain.Archiver,
+		Linker:          p.cfg.Toolchain.Linker,
+		Setup:           p.cfg.Toolchain.Setup,
+		MSVC:            p.cfg.Toolchain.MSVC,
+		CacheDir:        toolchain.CacheDir(p.cfg.Toolchain.CacheDir, p.cfg.Root()),
+	})
+	return p.toolchainResult, p.toolchainError
 }
 
 // Apply resolves conditional declarations in order, without changing the TOML.
@@ -658,7 +641,7 @@ func AssessWithToolchainAt(ctx context.Context, cfg config.Config, root string) 
 		}
 		var tc toolchain.Toolchain
 		var tcErr error
-		needsResolvedToolchain := target.Type != "shader" || cfg.Toolchain.CUDA != "" || cfg.Build.Modules
+		needsResolvedToolchain := target.Type != "shader" || cfg.Toolchain.CUDA != "" || cfg.Toolchain.CUDARoot != "" || cfg.Build.Modules
 		if needsResolvedToolchain {
 			tc, tcErr = p.resolveToolchain()
 			if tcErr != nil {
@@ -682,10 +665,11 @@ func AssessWithToolchainAt(ctx context.Context, cfg config.Config, root string) 
 		if (target.Type == "shared" || target.Type == "executable" || target.Type == "test") && tcErr == nil && !p.tool(mode, distribution, linker) {
 			reasons = append(reasons, "target linker unavailable: "+fallback(linker, "no linker resolved from the selected toolchain"))
 		}
-		if needsCUDA && cfg.Toolchain.CUDA == "" {
-			reasons = append(reasons, "CUDA source requires [toolchain].cuda to configure an nvcc toolkit")
+		cudaConfigured := cfg.Toolchain.CUDA != "" || cfg.Toolchain.CUDARoot != ""
+		if needsCUDA && !cudaConfigured {
+			reasons = append(reasons, "CUDA source requires [toolchain].cuda to pin a CUDA version range such as 12.0~12.9")
 		}
-		if cfg.Toolchain.CUDA != "" && tcErr == nil {
+		if cudaConfigured && tcErr == nil {
 			if err := p.checkCUDA(tc); err != nil {
 				reasons = append(reasons, "CUDA toolchain unavailable: "+err.Error())
 			}

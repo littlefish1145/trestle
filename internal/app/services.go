@@ -82,23 +82,30 @@ func Init(root, name string) error {
 	return nil
 }
 
-func Configure(path, compiler, c, profile, vcpkgRoot, triplet, cudaRoot, cudaMode, setup, moduleScanner string, modulesEnabled bool) error {
+func Configure(path, compiler, c, profile, vcpkgRoot, triplet, msvc, cudaVersion, cudaMode, setup, moduleScanner string, modulesEnabled bool) error {
 	cfg, err := ensureProjectConfig(path)
 	if err != nil {
 		return err
 	}
 	if compiler != "" {
-		cfg.Toolchain.CXX = compiler
+		cfg.Toolchain.CXX = toolchain.PortableSelector(compiler)
 	}
 	if c != "" {
-		cfg.Toolchain.C = c
+		cfg.Toolchain.C = toolchain.PortableSelector(c)
 	}
 	if profile != "" {
 		cfg.Build.Profile = profile
 	}
-	toolchainChanged := compiler != "" || setup != ""
+	if msvc != "" {
+		cfg.Toolchain.MSVC = strings.TrimSpace(msvc)
+	}
 	if setup != "" {
-		cfg.Toolchain.Setup = setup
+		// A vcvars path still names one machine. Record the toolset version it
+		// belongs to instead so the committed configuration stays portable.
+		if version, ok := toolchain.MSVCToolsetVersion(setup); ok && cfg.Toolchain.MSVC == "" {
+			cfg.Toolchain.MSVC = version + "~" + version
+		}
+		cfg.Toolchain.Setup = ""
 	}
 	tc, err := detectConfigured(context.Background(), cfg)
 	if err != nil {
@@ -113,8 +120,12 @@ func Configure(path, compiler, c, profile, vcpkgRoot, triplet, cudaRoot, cudaMod
 	if triplet != "" {
 		cfg.Vcpkg.Triplet = triplet
 	}
-	if cudaRoot != "" {
-		cfg.Toolchain.CUDA = cudaRoot
+	if cudaVersion != "" {
+		version, root, resolveErr := configureCUDA(context.Background(), cfg, cudaVersion)
+		if resolveErr != nil {
+			return resolveErr
+		}
+		cfg.Toolchain.CUDA, cfg.Toolchain.CUDARoot = version, root
 	}
 	if cudaMode != "" {
 		cfg.Toolchain.CUDAMode = cudaMode
@@ -137,54 +148,77 @@ func Configure(path, compiler, c, profile, vcpkgRoot, triplet, cudaRoot, cudaMod
 		}
 		cfg.Vcpkg.Triplet = selected
 	}
-	if toolchainChanged {
-		cfg.Toolchain.C = tc.CC
-		cfg.Toolchain.Archiver = tc.Archiver
-		cfg.Toolchain.Linker = tc.Linker
-		if tc.Setup != "" {
-			cfg.Toolchain.Setup = tc.Setup
-		}
-	}
-	if cfg.Toolchain.C == "auto" || cfg.Toolchain.C == "" {
-		cfg.Toolchain.C = tc.CC
-	}
-	if cfg.Toolchain.Archiver == "" || cfg.Toolchain.Archiver == "auto" || cfg.Toolchain.Archiver == "lib" {
-		cfg.Toolchain.Archiver = tc.Archiver
-	}
-	if cfg.Toolchain.Linker == "" {
-		cfg.Toolchain.Linker = tc.Linker
-	}
 	if err := config.Save(path, cfg); err != nil {
 		return err
 	}
 	fmt.Printf("toolchain: %s (%s)\n", tc.Kind, tc.Version)
-	fmt.Printf("c: %s\ncxx: %s\narchiver: %s\n", cfg.Toolchain.C, cfg.Toolchain.CXX, cfg.Toolchain.Archiver)
+	if install, ok := configuredMSVC(context.Background(), cfg); ok {
+		fmt.Printf("msvc: %s\n", install.Version)
+	}
+	fmt.Printf("c: %s\ncxx: %s\n", cfg.Toolchain.C, cfg.Toolchain.CXX)
 	return nil
 }
 
-func withoutRunnerPath(candidate toolchain.Toolchain) toolchain.Toolchain {
-	return candidate
+// configureCUDA turns a user-supplied version range or toolkit path into the
+// portable pair stored in trestle.toml.
+func configureCUDA(ctx context.Context, cfg config.Config, requested string) (string, string, error) {
+	requested = strings.TrimSpace(requested)
+	resolve := func(spec string) error {
+		probe := cfg
+		probe.Toolchain.CUDA, probe.Toolchain.CUDARoot = spec, ""
+		_, err := toolchain.ResolveCUDARoot(ctx, toolchainRequest(probe))
+		return err
+	}
+	if toolchain.IsLocalPath(requested) {
+		// An explicit path still resolves to a version range when the layout
+		// names one, so only the range is committed when possible.
+		if version, ok := toolchain.ToolkitVersionFromPath(requested); ok {
+			if err := resolve(version + "~" + version); err != nil {
+				return "", "", err
+			}
+			return version + "~" + version, "", nil
+		}
+		return "auto", requested, nil
+	}
+	if err := resolve(requested); err != nil {
+		return "", "", err
+	}
+	return requested, "", nil
+}
+
+// configuredMSVC reports which installed toolset a constrained msvc range
+// selected, so configure can confirm the pin was honoured.
+func configuredMSVC(ctx context.Context, cfg config.Config) (toolchain.MSVCInstall, bool) {
+	install, err := toolchain.ResolveMSVC(toolchain.DiscoverInventory(ctx, toolchain.CacheDir(cfg.Toolchain.CacheDir, cfg.Root())), cfg.Toolchain.MSVC)
+	return install, err == nil
 }
 
 func detectConfigured(ctx context.Context, cfg config.Config) (toolchain.Toolchain, error) {
-	if cfg.Toolchain.Mode == "wsl" {
-		return toolchain.DetectWSL(ctx, cfg.Toolchain.WSLDistribution, cfg.Toolchain.CXX)
+	return toolchain.DetectConfigured(ctx, toolchainRequest(cfg))
+}
+
+// toolchainRequest converts the configuration into the portable specification
+// that toolchain.DetectConfigured resolves. Machine-local paths are only passed
+// through when the project set them explicitly as an escape hatch.
+func toolchainRequest(cfg config.Config) toolchain.Request {
+	return toolchain.Request{
+		Mode:            cfg.Toolchain.Mode,
+		WSLDistribution: cfg.Toolchain.WSLDistribution,
+		C:               cfg.Toolchain.C,
+		CXX:             cfg.Toolchain.CXX,
+		Archiver:        cfg.Toolchain.Archiver,
+		Linker:          cfg.Toolchain.Linker,
+		Setup:           cfg.Toolchain.Setup,
+		MSVC:            cfg.Toolchain.MSVC,
+		CUDA:            cfg.Toolchain.CUDA,
+		CUDARoot:        cfg.Toolchain.CUDARoot,
+		CacheDir:        toolchain.CacheDir(cfg.Toolchain.CacheDir, cfg.Root()),
 	}
-	detector := toolchain.NewDetector()
-	setup := cfg.Toolchain.Setup
-	if toolchain.NeedsMSVCEnvironment(ctx, cfg.Toolchain.CXX) {
-		setup = toolchain.ResolveMSVCSetup(ctx, setup, cfg.Toolchain.Archiver, cfg.Toolchain.Linker, cfg.Toolchain.C, cfg.Toolchain.CXX)
-	}
-	if setup != "" {
-		if setupDetector, ok := detector.(interface {
-			DetectWithSetup(context.Context, string, string) (toolchain.Toolchain, error)
-		}); ok {
-			candidate, err := setupDetector.DetectWithSetup(ctx, cfg.Toolchain.CXX, setup)
-			return withoutRunnerPath(candidate), err
-		}
-	}
-	candidate, err := detector.Detect(ctx, cfg.Toolchain.CXX)
-	return withoutRunnerPath(candidate), err
+}
+
+// cudaRoot resolves [toolchain].cuda into the toolkit directory that holds nvcc.
+func cudaRoot(ctx context.Context, cfg config.Config) (string, error) {
+	return toolchain.ResolveCUDARoot(ctx, toolchainRequest(cfg))
 }
 
 func SetProfile(path, profile string) error {
@@ -217,23 +251,20 @@ func SetCompiler(path, compiler string) error {
 	if compiler == "" {
 		return fmt.Errorf("compiler path is required")
 	}
-	cfg.Toolchain.CXX = compiler
+	cfg.Toolchain.CXX = toolchain.PortableSelector(compiler)
 	cfg.Toolchain.Mode = "native"
 	cfg.Toolchain.WSLDistribution = ""
-	if toolchain.NeedsMSVCEnvironment(context.Background(), compiler) {
-		cfg.Toolchain.Setup = toolchain.ResolveMSVCSetup(context.Background(), cfg.Toolchain.Setup, cfg.Toolchain.Archiver, cfg.Toolchain.Linker, cfg.Toolchain.C, compiler)
-	} else {
-		cfg.Toolchain.Setup = ""
+	// The resolved executables are rediscovered on every run, so only the
+	// constraint that describes them is stored.
+	cfg.Toolchain.Archiver = "auto"
+	cfg.Toolchain.Linker = "auto"
+	if version, ok := toolchain.MSVCToolsetVersion(compiler); ok {
+		cfg.Toolchain.MSVC = version + "~" + version
 	}
-	tc, err := detectConfigured(context.Background(), cfg)
-	if err != nil {
+	cfg.Toolchain.Setup = ""
+	if _, err := detectConfigured(context.Background(), cfg); err != nil {
 		return err
 	}
-	cfg.Toolchain.CXX = tc.CXX
-	cfg.Toolchain.C = tc.CC
-	cfg.Toolchain.Archiver = tc.Archiver
-	cfg.Toolchain.Linker = tc.Linker
-	cfg.Toolchain.Setup = tc.Setup
 	return config.Save(path, cfg)
 }
 
@@ -246,13 +277,11 @@ func SetWSLCompiler(path, distribution, compiler string) error {
 	cfg.Toolchain.WSLDistribution = strings.TrimSpace(distribution)
 	cfg.Toolchain.CXX = strings.TrimSpace(compiler)
 	cfg.Toolchain.Setup = ""
-	tc, err := detectConfigured(context.Background(), cfg)
-	if err != nil {
+	cfg.Toolchain.Archiver = "auto"
+	cfg.Toolchain.Linker = "auto"
+	if _, err := detectConfigured(context.Background(), cfg); err != nil {
 		return err
 	}
-	cfg.Toolchain.C = tc.CC
-	cfg.Toolchain.Archiver = tc.Archiver
-	cfg.Toolchain.Linker = tc.Linker
 	return config.Save(path, cfg)
 }
 
@@ -292,17 +321,19 @@ func SetCUDAConnection(configPath string, enabled bool, root, execution, distrib
 	}
 	if !enabled {
 		cfg.Toolchain.CUDA = ""
+		cfg.Toolchain.CUDARoot = ""
 		cfg.Toolchain.CUDAExecution = "native"
 		cfg.Toolchain.CUDAWSLDistribution = ""
 		return config.Save(configPath, cfg)
 	}
-	root = strings.TrimSpace(root)
+	request := strings.TrimSpace(root)
 	execution = strings.ToLower(strings.TrimSpace(execution))
 	if execution == "" {
 		execution = "native"
 	}
 	distribution = strings.TrimSpace(distribution)
-	if execution == "wsl" {
+	switch execution {
+	case "wsl":
 		if cfg.Toolchain.Mode != "wsl" {
 			return fmt.Errorf("E_CUDA_WSL_HOST: select a WSL C/C++ compiler before connecting WSL CUDA")
 		}
@@ -316,34 +347,43 @@ func SetCUDAConnection(configPath string, enabled bool, root, execution, distrib
 		if detectErr != nil {
 			return detectErr
 		}
-		detected, detectErr := cuda.DetectWSL(context.Background(), distribution, root, host)
+		detected, detectErr := cuda.DetectWSL(context.Background(), distribution, request, host)
 		if detectErr != nil {
 			return detectErr
 		}
-		root = detected.Toolkit.Root
-	} else if execution == "native" {
-		if root == "" {
-			root = os.Getenv("CUDA_PATH")
+		// A WSL toolkit root is a Linux path on this machine; keep the version
+		// range when the layout names one so nothing machine-specific is stored.
+		if version, ok := toolkitVersionOfRoot(detected.Toolkit.Root, detected.Toolkit.Version); ok {
+			request, root = version+"~"+version, ""
+		} else {
+			request, root = "auto", detected.Toolkit.Root
 		}
-		if root == "" {
-			root = os.Getenv("CUDA_HOME")
+	case "native":
+		version, toolkit, resolveErr := configureCUDA(context.Background(), cfg, request)
+		if resolveErr != nil {
+			return resolveErr
 		}
-		if root == "" {
-			return fmt.Errorf("CUDA toolkit root is required")
-		}
-		nvcc := filepath.Join(root, "bin", "nvcc")
-		if _, statErr := os.Stat(nvcc); statErr != nil {
-			if _, windowsErr := os.Stat(nvcc + ".exe"); windowsErr != nil {
-				return fmt.Errorf("CUDA compiler was not found under %s", root)
-			}
-		}
-	} else {
+		request, root = version, toolkit
+	default:
 		return fmt.Errorf("CUDA execution mode %q is unsupported", execution)
 	}
-	cfg.Toolchain.CUDA = root
+	cfg.Toolchain.CUDA = request
+	cfg.Toolchain.CUDARoot = root
 	cfg.Toolchain.CUDAExecution = execution
 	cfg.Toolchain.CUDAWSLDistribution = distribution
 	return config.Save(configPath, cfg)
+}
+
+// toolkitVersionOfRoot recovers a CUDA version from a WSL toolkit root, whose
+// layout only carries a version once nvcc has been executed.
+func toolkitVersionOfRoot(root, reported string) (string, bool) {
+	if version, ok := toolchain.ToolkitVersionFromPath(root); ok {
+		return version, true
+	}
+	if version, ok := toolchain.ExtractVersion(reported); ok {
+		return version, true
+	}
+	return "", false
 }
 
 func SetVulkanConnection(configPath string, enabled bool, root, execution, distribution string) error {
@@ -611,17 +651,23 @@ func SetProjectSetting(path, key, value string) error {
 	case "toolchain.wsl_distribution":
 		cfg.Toolchain.WSLDistribution = value
 	case "toolchain.c":
-		cfg.Toolchain.C = value
+		cfg.Toolchain.C = toolchain.PortableSelector(value)
 	case "toolchain.cxx":
-		cfg.Toolchain.CXX = value
+		cfg.Toolchain.CXX = toolchain.PortableSelector(value)
+	case "toolchain.msvc":
+		cfg.Toolchain.MSVC = value
 	case "toolchain.archiver":
 		cfg.Toolchain.Archiver = value
 	case "toolchain.linker":
 		cfg.Toolchain.Linker = value
 	case "toolchain.setup":
 		cfg.Toolchain.Setup = value
+	case "toolchain.cache_dir":
+		cfg.Toolchain.CacheDir = value
 	case "toolchain.cuda":
 		cfg.Toolchain.CUDA = value
+	case "toolchain.cuda_root":
+		cfg.Toolchain.CUDARoot = value
 	case "toolchain.cuda_mode":
 		cfg.Toolchain.CUDAMode = value
 	case "toolchain.cuda_architectures":
@@ -1148,7 +1194,23 @@ func Vcpkg(ctx context.Context, root, query string, ports []string, triplet stri
 	})
 }
 
-func Toolchains(ctx context.Context) error {
+// Toolchains reports the discovered toolchains and the MSVC/CUDA version ranges
+// a project can pin. The native scan is cached in the project's toolchain cache
+// directory, so pass refresh to pick up a newly installed toolset immediately.
+func Toolchains(ctx context.Context, configPath, cacheOverride string, refresh bool) error {
+	cacheDir := strings.TrimSpace(cacheOverride)
+	if cacheDir == "" && configPath != "" {
+		if cfg, err := config.Load(configPath); err == nil {
+			cacheDir = toolchain.CacheDir(cfg.Toolchain.CacheDir, cfg.Root())
+		}
+	} else if cacheDir != "" {
+		cacheDir = toolchain.CacheDir(cacheDir, "")
+	}
+	if refresh && cacheDir != "" {
+		if err := toolchain.Invalidate(cacheDir); err != nil {
+			return err
+		}
+	}
 	components := toolchain.Discover(ctx)
 	if len(components) == 0 {
 		return fmt.Errorf("E_TOOLCHAIN_NOT_FOUND: no supported development components were found")
@@ -1165,7 +1227,39 @@ func Toolchains(ctx context.Context) error {
 			fmt.Printf("  %s\n", component.Detail)
 		}
 	}
+	if cacheDir != "" {
+		fmt.Printf("inventory cache: %s\n", cacheDir)
+	}
+	if len(components) == 0 {
+		return nil
+	}
+	inventory := toolchain.DiscoverInventoryWithTTL(ctx, cacheDir, 0)
+	printSelectable("msvc", msvcVersions(inventory))
+	printSelectable("cuda", cudaVersions(inventory))
 	return nil
+}
+
+func printSelectable(field string, versions []string) {
+	if len(versions) == 0 {
+		return
+	}
+	fmt.Printf("  [toolchain].%s accepts %s\n", field, strings.Join(versions, ", "))
+}
+
+func msvcVersions(inventory toolchain.Inventory) []string {
+	result := make([]string, 0, len(inventory.MSVC))
+	for _, install := range inventory.MSVC {
+		result = append(result, install.Version)
+	}
+	return result
+}
+
+func cudaVersions(inventory toolchain.Inventory) []string {
+	result := make([]string, 0, len(inventory.CUDA))
+	for _, install := range inventory.CUDA {
+		result = append(result, install.Version)
+	}
+	return result
 }
 
 func Generate(path string) (BuildResult, error) {
@@ -1270,7 +1364,7 @@ func generateWithConfig(ctx context.Context, path string, cfg config.Config) (Bu
 		}
 	}
 	var cudaToolchain *cuda.Toolchain
-	if cfg.Toolchain.CUDA != "" {
+	if cfg.Toolchain.CUDA != "" || cfg.Toolchain.CUDARoot != "" {
 		var detected cuda.Toolchain
 		var detectErr error
 		if cfg.Toolchain.CUDAExecution == "wsl" {
@@ -1284,12 +1378,16 @@ func generateWithConfig(ctx context.Context, path string, cfg config.Config) (Bu
 			if cfg.Toolchain.WSLDistribution != "" && distribution != "" && !strings.EqualFold(cfg.Toolchain.WSLDistribution, distribution) {
 				return BuildResult{}, fmt.Errorf("E_CUDA_WSL_DISTRIBUTION: CUDA is in %s but the compiler is in %s", distribution, cfg.Toolchain.WSLDistribution)
 			}
-			detected, detectErr = cuda.DetectWSL(context.Background(), distribution, cfg.Toolchain.CUDA, tc)
+			detected, detectErr = cuda.DetectWSL(context.Background(), distribution, cfg.Toolchain.CUDARoot, tc)
 		} else {
 			if tc.Runner != "" {
 				return BuildResult{}, fmt.Errorf("E_CUDA_NATIVE_HOST: native CUDA cannot use a WSL host compiler; connect CUDA from the same WSL distribution")
 			}
-			detected, detectErr = cuda.DetectWithHost(context.Background(), cfg.Toolchain.CUDA, tc)
+			root, resolveErr := cudaRoot(ctx, cfg)
+			if resolveErr != nil {
+				return BuildResult{}, resolveErr
+			}
+			detected, detectErr = cuda.DetectWithHost(context.Background(), root, tc)
 		}
 		if detectErr != nil {
 			return BuildResult{}, detectErr

@@ -15,9 +15,14 @@ import (
 	"github.com/BurntSushi/toml"
 	"trestle/internal/diag"
 	"trestle/internal/fsx"
+	"trestle/internal/toolchain"
 )
 
 var ErrNotFound = errors.New("trestle.toml not found")
+
+// DefaultToolchainCacheDir stores the discovered toolchain inventory inside the
+// project's ignored .trestle directory.
+const DefaultToolchainCacheDir = ".trestle/toolchain"
 
 func Default(projectName string) Config {
 	if projectName == "" {
@@ -39,7 +44,7 @@ func Default(projectName string) Config {
 			CompileCommands:    "compile_commands.json",
 			AutoCompileShaders: true,
 		},
-		Toolchain:       Toolchain{C: "auto", CXX: "auto", Mode: "native", CUDAExecution: "native", VulkanExecution: "native"},
+		Toolchain:       Toolchain{MSVC: "auto", C: "auto", CXX: "auto", Mode: "native", CacheDir: DefaultToolchainCacheDir, CUDAExecution: "native", VulkanExecution: "native"},
 		CompilerPresets: map[string]CompilerPreset{},
 		Targets: map[string]Target{
 			"app": {
@@ -97,6 +102,15 @@ func Decode(path string, data []byte) (Config, error) {
 
 func Fingerprint(data []byte) string { return fmt.Sprintf("%x", sha256.Sum256(data)) }
 
+// Root is the project directory holding trestle.toml, used to resolve
+// project-relative settings such as the toolchain cache directory.
+func (c Config) Root() string {
+	if c.sourcePath == "" {
+		return "."
+	}
+	return filepath.Dir(c.sourcePath)
+}
+
 // Snapshot also represents absence so import/init can detect concurrent creation.
 func Snapshot(path string) (string, error) {
 	data, err := os.ReadFile(path)
@@ -142,6 +156,9 @@ func (c *Config) normalize(root string) error {
 		c.Toolchain.Mode = "native"
 		c.Toolchain.WSLDistribution = ""
 	}
+	if c.Toolchain.MSVC == "" {
+		c.Toolchain.MSVC = "auto"
+	}
 	if c.Toolchain.C == "" {
 		c.Toolchain.C = "auto"
 	}
@@ -150,6 +167,9 @@ func (c *Config) normalize(root string) error {
 	}
 	if c.Toolchain.CUDAMode == "" {
 		c.Toolchain.CUDAMode = "whole"
+	}
+	if c.Toolchain.CacheDir == "" {
+		c.Toolchain.CacheDir = DefaultToolchainCacheDir
 	}
 	if c.Toolchain.CUDAExecution == "" {
 		c.Toolchain.CUDAExecution = "native"
@@ -178,6 +198,10 @@ func (c *Config) normalize(root string) error {
 	c.Build.BuildDir = normalize(c.Build.BuildDir)
 	if c.Build.CompileCommands != "" {
 		c.Build.CompileCommands = normalize(c.Build.CompileCommands)
+	}
+	c.Toolchain.CacheDir = normalize(c.Toolchain.CacheDir)
+	if c.Toolchain.CUDARoot != "" {
+		c.Toolchain.CUDARoot = normalize(c.Toolchain.CUDARoot)
 	}
 	if c.Vcpkg.Root != "" {
 		c.Vcpkg.Root = normalize(c.Vcpkg.Root)
@@ -323,6 +347,10 @@ func SaveExpected(path string, cfg Config, expected string) error {
 	copyCfg.Build.CompileCommands = local(copyCfg.Build.CompileCommands)
 	copyCfg.Vcpkg.Root = local(copyCfg.Vcpkg.Root)
 	copyCfg.Package.Output = local(copyCfg.Package.Output)
+	copyCfg.Toolchain.CacheDir = local(copyCfg.Toolchain.CacheDir)
+	if copyCfg.Toolchain.CUDARoot != "" && !toolchain.IsLocalPath(copyCfg.Toolchain.CUDARoot) {
+		copyCfg.Toolchain.CUDARoot = local(copyCfg.Toolchain.CUDARoot)
+	}
 	var buffer bytes.Buffer
 	encoder := toml.NewEncoder(&buffer)
 	encoder.Indent = "  "

@@ -68,12 +68,13 @@ func run(command string, args []string) (result error) {
 	set := flag.NewFlagSet(command, flag.ContinueOnError)
 	set.SetOutput(os.Stderr)
 	directory := set.String("C", ".", "run from this directory")
-	var name, compiler, c, profile, output, vcpkgRoot, triplet, cudaRoot, cudaMode, cudaExecution, cudaDistribution, vulkanRoot, vulkanExecution, vulkanDistribution, setup, moduleScanner, compileFlags, cFlags, cxxFlags, linkFlags, buildProfile, mode, distribution, preset, savePreset *string
+	var name, compiler, c, profile, output, vcpkgRoot, triplet, msvc, cudaRoot, cudaMode, cudaExecution, cudaDistribution, vulkanRoot, vulkanExecution, vulkanDistribution, setup, moduleScanner, compileFlags, cFlags, cxxFlags, linkFlags, buildProfile, mode, distribution, preset, savePreset, toolchainCache *string
 	var query string
 	var ports []string
 	var portsText string
 	var vcpkgTriplet string
 	var install bool
+	var refresh bool
 	var testJob, testGroup, testFile string
 	var releaseTargets string
 	var testAll bool
@@ -97,7 +98,8 @@ func run(command string, args []string) (result error) {
 			savePreset = set.String("save-preset", "", "save the resulting compiler configuration")
 			vcpkgRoot = set.String("vcpkg-root", "", "vcpkg installation root")
 			triplet = set.String("triplet", "", "vcpkg triplet")
-			cudaRoot = set.String("cuda", "", "CUDA toolkit root")
+			msvc = set.String("msvc", "", "MSVC toolset version or range, such as 14.3~14.5")
+			cudaRoot = set.String("cuda", "", "CUDA version range such as 12.0~12.9, or a toolkit root")
 			cudaMode = set.String("cuda-mode", "", "whole or rdc")
 			cudaExecution = set.String("cuda-execution", "", "CUDA execution mode: native or wsl")
 			cudaDistribution = set.String("cuda-wsl-distribution", "", "WSL distribution containing CUDA")
@@ -108,6 +110,9 @@ func run(command string, args []string) (result error) {
 			setup = set.String("setup", "", "vcvars64.bat or environment setup script")
 			moduleScanner = set.String("module-scanner", "", "clang-scan-deps executable")
 			modulesEnabled = set.Bool("modules", false, "enable C++ module scanning")
+		case "toolchain":
+			toolchainCache = set.String("cache-dir", "", "directory for the cached toolchain inventory")
+			set.Bool("refresh", false, "rescan installed toolchains and refresh the cache")
 		case "build":
 			dashboard = set.Bool("ui", false, "open the project console")
 			buildProfile = set.String("profile", "", "debug or release")
@@ -175,7 +180,7 @@ func run(command string, args []string) (result error) {
 		if *cudaExecution == "" && *cudaDistribution == "" {
 			configuredCUDA = *cudaRoot
 		}
-		if err := app.Configure(path, *compiler, *c, *profile, *vcpkgRoot, *triplet, configuredCUDA, *cudaMode, *setup, *moduleScanner, *modulesEnabled); err != nil {
+		if err := app.Configure(path, *compiler, *c, *profile, *vcpkgRoot, *triplet, *msvc, configuredCUDA, *cudaMode, *setup, *moduleScanner, *modulesEnabled); err != nil {
 			return err
 		}
 		if *cudaExecution != "" || *cudaDistribution != "" {
@@ -250,7 +255,7 @@ func run(command string, args []string) (result error) {
 		}
 		return app.Vcpkg(ctx, *vcpkgRoot, query, ports, vcpkgTriplet, install)
 	case "toolchain":
-		return app.Toolchains(ctx)
+		return app.Toolchains(ctx, path, *toolchainCache, refresh)
 	case "doctor":
 		return app.DoctorWithContext(ctx, path, func(line string) { fmt.Println(line) })
 	case "logs":
@@ -367,7 +372,7 @@ func usage() {
 	fmt.Println("  trestle                         open Project Console TUI")
 	fmt.Println("  trestle tui [-C dir]            open Project Console TUI")
 	fmt.Println("  trestle init [-C dir] [-name project]")
-	fmt.Println("  trestle configure [-C dir] [-toolchain clang++] [-mode native|wsl] [-wsl-distribution Ubuntu] [-cuda path] [-cuda-execution native|wsl] [-vulkan path] [-vulkan-execution native|wsl]")
+	fmt.Println("  trestle configure [-C dir] [-toolchain clang++] [-msvc 14.3~14.5] [-mode native|wsl] [-wsl-distribution Ubuntu] [-cuda 12.0~12.9] [-cuda-execution native|wsl] [-vulkan path] [-vulkan-execution native|wsl]")
 	fmt.Println("  trestle analyze [-C dir]")
 	fmt.Println("  trestle build [-C dir] [--all] [--force] [--preset name] [target ...]")
 	fmt.Println("  trestle test [-C dir] [-job name | -group name | -file source | -all]")
@@ -377,7 +382,7 @@ func usage() {
 	fmt.Println("  trestle release [-C dir] [-optimization balanced|speed|size|custom:name] [-targets app,tool] [-output dist/app.zip]")
 	fmt.Println("  trestle doctor [-C dir]")
 	fmt.Println("  trestle logs [-C dir] [operation-id]")
-	fmt.Println("  trestle toolchain [-C dir]")
+	fmt.Println("  trestle toolchain [-C dir] [--refresh]")
 	fmt.Println("  trestle vcpkg [-C dir] [-root path] [-search query] | [-install -ports zlib,fmt]")
 	fmt.Println("  trestle version")
 }

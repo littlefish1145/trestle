@@ -48,7 +48,7 @@ func TestRealNativeCPPBuild(t *testing.T) {
 		t.Fatal(err)
 	}
 	path := filepath.Join(root, config.DefaultFileName)
-	if err := Configure(path, integrationCompiler(), "", "debug", "", "", "", "", "", "", false); err != nil {
+	if err := Configure(path, integrationCompiler(), "", "debug", "", "", "", "", "", "", "", false); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(root, "src", "main.cpp"), []byte("#include <iostream>\nint main(){ std::cout << \"native OK\\n\"; }\n"), 0600); err != nil {
@@ -158,7 +158,7 @@ func TestFmtTutorial(t *testing.T) {
 	if triplet == "" {
 		t.Fatal("TRESTLE_TEST_TRIPLET is required")
 	}
-	if err := Configure(path, integrationCompiler(), "", "debug", os.Getenv("VCPKG_ROOT"), triplet, "", "", "", "", false); err != nil {
+	if err := Configure(path, integrationCompiler(), "", "debug", os.Getenv("VCPKG_ROOT"), triplet, "", "", "", "", "", false); err != nil {
 		t.Fatal(err)
 	}
 	if err := BuildWithProgress(context.Background(), path, nil); err != nil {

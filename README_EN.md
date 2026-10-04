@@ -19,6 +19,8 @@ Trestle brings compiler discovery, dependency resolution, project import, Ninja 
 - C17 and C++20 projects with static libraries, shared libraries, executables, tests, and Vulkan shader targets.
 - Automatic discovery of MSVC, Clang, clang-cl, GCC, MinGW, CUDA, Vulkan SDKs, and WSL compilers.
 - Automatic Visual Studio ABI setup for clang-cl through an explicit `vcvars64.bat`, configured tool paths, common VS locations, or `vswhere`.
+- Portable toolchain selection: `msvc = "14.30~14.50"` and `cuda = "12.0~12.9"` pin installed versions by range, so a committed `trestle.toml` never records one machine's absolute paths. Schema 6 files are rewritten automatically on first load, with the original kept as a `.schema-v6.*.bak` file.
+- Toolchain discovery results are cached in one designated directory (`[toolchain].cache_dir`, `TRESTLE_TOOLCHAIN_CACHE`, or `.trestle/toolchain`); `trestle toolchain --refresh` rescans after installing a new toolset.
 - Isolated target builds: `trestle build app` does not let unrelated GUI, tool, or test targets block the requested target.
 - C/C++ include dependency tracking for correct incremental rebuilds, including wrapper files that include implementation sources.
 - vcpkg search, installation, transitive metadata, triplets, CRT/linkage handling, pkg-config parsing, and runtime DLL deployment.
@@ -139,7 +141,7 @@ trestle build -preset dev app
 ## Example `trestle.toml`
 
 ```toml
-schema_version = 6
+schema_version = 7
 
 [project]
 name = "hello"
@@ -153,8 +155,12 @@ default_targets = ["app"]
 compile_commands = "compile_commands.json"
 
 [toolchain]
+# Select tools by version range, never by absolute path, so the file stays shareable.
+msvc = "14.30~14.50"
 c = "auto"
 cxx = "auto"
+cuda = ""
+cache_dir = ".trestle/toolchain"
 mode = "native"
 cuda_execution = "native"
 vulkan_execution = "native"

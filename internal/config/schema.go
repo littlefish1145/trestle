@@ -1,6 +1,6 @@
 package config
 
-const CurrentSchemaVersion = 6
+const CurrentSchemaVersion = 7
 const DefaultFileName = "trestle.toml"
 
 type Config struct {
@@ -39,13 +39,21 @@ type Build struct {
 	ModuleScanner      string   `toml:"module_scanner"`
 }
 
+// Toolchain selects tools by portable version constraint rather than by the
+// absolute path of one machine's installation. "auto" means "newest installed",
+// a dotted number pins one version, and "low~high" accepts an inclusive
+// interval such as 14.3~14.5. Path-valued fields remain as escape hatches for
+// unusual setups but are never written by trestle itself.
 type Toolchain struct {
+	MSVC                  string   `toml:"msvc"`
 	C                     string   `toml:"c"`
 	CXX                   string   `toml:"cxx"`
 	Archiver              string   `toml:"archiver"`
 	Linker                string   `toml:"linker"`
 	Setup                 string   `toml:"setup"`
 	CUDA                  string   `toml:"cuda"`
+	CUDARoot              string   `toml:"cuda_root"`
+	CacheDir              string   `toml:"cache_dir"`
 	CUDAMode              string   `toml:"cuda_mode"`
 	CUDAArchitectures     []string `toml:"cuda_architectures"`
 	CUDAExecution         string   `toml:"cuda_execution"`

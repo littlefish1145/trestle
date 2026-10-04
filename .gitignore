@@ -5,3 +5,7 @@ dist/
 compile_commands.json
 *.exe
 *.zip
+*.trestle-lock
+*.trestle-lock.json
+*.trestle-readers/
+trestle-promo/

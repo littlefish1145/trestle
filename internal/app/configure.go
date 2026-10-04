@@ -34,18 +34,30 @@ func ConfigureInteractive(path string, input *os.File, output *os.File) error {
 	_, ninjaErr := exec.LookPath("ninja")
 	fmt.Fprintf(output, "%s Ninja detected\n\n", status(ninjaErr == nil))
 	if selected != nil {
+		// Persist the portable selector, not the resolved executable, so the
+		// generated trestle.toml stays usable on other machines.
 		if cfg.Toolchain.CXX == "auto" || cfg.Toolchain.CXX == "" {
-			cfg.Toolchain.CXX = selected.CXX
+			cfg.Toolchain.CXX = toolchain.PortableSelector(selected.CXX)
 		}
 		if cfg.Toolchain.C == "auto" || cfg.Toolchain.C == "" {
-			cfg.Toolchain.C = selected.CC
+			cfg.Toolchain.C = toolchain.PortableSelector(selected.CC)
 		}
 		if cfg.Toolchain.Archiver == "" || cfg.Toolchain.Archiver == "auto" {
-			cfg.Toolchain.Archiver = selected.Archiver
+			cfg.Toolchain.Archiver = "auto"
 		}
 		if cfg.Toolchain.Linker == "" || cfg.Toolchain.Linker == "auto" {
-			cfg.Toolchain.Linker = selected.Linker
+			cfg.Toolchain.Linker = "auto"
 		}
+		if cfg.Toolchain.MSVC == "" || cfg.Toolchain.MSVC == "auto" {
+			if version, ok := toolchain.MSVCToolsetVersion(selected.Setup); ok {
+				cfg.Toolchain.MSVC = version + "~" + version
+			} else if selected.Kind == toolchain.MSVC {
+				if version, ok := toolchain.MSVCToolsetVersion(selected.Linker); ok {
+					cfg.Toolchain.MSVC = version + "~" + version
+				}
+			}
+		}
+		cfg.Toolchain.Setup = ""
 	}
 	reader := bufio.NewReader(input)
 	createExecutable := true

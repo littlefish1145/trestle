@@ -19,6 +19,8 @@ Trestle 把编译器发现、依赖解析、项目导入、Ninja 构建、测试
 - 支持 C17、C++20，以及静态库、动态库、可执行文件、测试和 Vulkan Shader 目标。
 - 自动发现 MSVC、Clang、clang-cl、GCC、MinGW、CUDA、Vulkan SDK 和 WSL 编译器。
 - 使用 clang-cl 时自动查找并加载匹配的 Visual Studio ABI 环境；支持显式 `vcvars64.bat`、工具路径反推和 `vswhere`。
+- 工具链按版本区间选择：`msvc = "14.30~14.50"`、`cuda = "12.0~12.9"` 只声明所需版本，因此提交到仓库的 `trestle.toml` 不会记录本机绝对路径。schema 6 的旧文件首次加载时自动改写，原文件保留为 `.schema-v6.*.bak`。
+- 探测结果缓存到指定目录（`[toolchain].cache_dir`、`TRESTLE_TOOLCHAIN_CACHE`，或默认 `.trestle/toolchain`）；安装新工具链后执行 `trestle toolchain --refresh` 重新扫描。
 - 按目标构建：`trestle build app` 不会让无关 GUI、工具或测试目标阻塞主目标。
 - 跟踪 C/C++ include 依赖，源文件或 wrapper include 变化会触发正确的增量重编译。
 - 集成 vcpkg 在线搜索、安装、传递依赖、triplet、CRT/linkage、pkg-config 和运行时 DLL 部署。
@@ -139,7 +141,7 @@ trestle build -preset dev app
 ## `trestle.toml` 示例
 
 ```toml
-schema_version = 6
+schema_version = 7
 
 [project]
 name = "hello"
@@ -153,8 +155,12 @@ default_targets = ["app"]
 compile_commands = "compile_commands.json"
 
 [toolchain]
+# Select tools by version range, never by absolute path, so the file stays shareable.
+msvc = "14.30~14.50"
 c = "auto"
 cxx = "auto"
+cuda = ""
+cache_dir = ".trestle/toolchain"
 mode = "native"
 cuda_execution = "native"
 vulkan_execution = "native"

@@ -77,10 +77,12 @@ int main() {
 Windows x64, PowerShell:
 
 ```powershell
-trestle configure -toolchain clang-cl -profile debug -vcpkg-root $env:VCPKG_ROOT -triplet x64-windows
+trestle configure -toolchain clang-cl -msvc "14.30~14.50" -profile debug -vcpkg-root $env:VCPKG_ROOT -triplet x64-windows
 ```
 
-You can also use `-toolchain cl`. LLVM must be compatible with the installed Visual Studio STL: if STL1000 reports an old Clang version, update LLVM or select MSVC. Trestle finds the Visual Studio environment automatically; if discovery fails, add `-setup 'C:\actual-VS-install\VC\Auxiliary\Build\vcvars64.bat'`. Use an existing script for the target architecture.
+`-msvc` takes a version range rather than a path, so `trestle.toml` records `msvc = "14.30~14.50"` instead of one machine's `VC/Tools/MSVC/14.44.35207` directory and the file stays usable on other machines. `trestle toolchain` lists every version you could pin; `trestle toolchain --refresh` rescans after installing a new toolset. Bounds compare only the components they spell out, so `14.30~14.50` accepts `14.44.35207`. `-cuda` works the same way, for example `-cuda "12.0~12.9"`.
+
+You can also use `-toolchain cl`. LLVM must be compatible with the installed Visual Studio STL: if STL1000 reports an old Clang version, update LLVM or select MSVC. Trestle finds the Visual Studio environment automatically from the `msvc` range; if discovery fails, add `-setup 'C:\actual-VS-install\VC\Auxiliary\Build\vcvars64.bat'`. Use an existing script for the target architecture.
 
 Linux x64:
 

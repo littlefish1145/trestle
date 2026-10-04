@@ -30,6 +30,25 @@ func Discover(ctx context.Context) []Component {
 func DiscoverWSL(ctx context.Context) []Component { return discoverWSL(ctx) }
 
 func DiscoverNative(ctx context.Context) []Component {
+	components := discoverCompilerComponents(ctx)
+	components = append(components, discoverMSVC(ctx)...)
+	components = append(components, discoverCUDA(ctx)...)
+	components = append(components, discoverVulkan(ctx)...)
+	seenFamilies := map[string]bool{}
+	for _, component := range components {
+		seenFamilies[component.Family] = true
+	}
+	for _, family := range []string{"Clang", "MSVC", "CUDA", "Vulkan", "MinGW"} {
+		if !seenFamilies[family] {
+			components = append(components, Component{Name: "not detected", Family: family, Ready: false, Detail: "not found"})
+		}
+	}
+	return components
+}
+
+// discoverCompilerComponents finds host C/C++ compilers on PATH and in the
+// well-known Clang and MinGW prefixes, without probing WSL distributions.
+func discoverCompilerComponents(ctx context.Context) []Component {
 	var components []Component
 	addExecutables := func(family string, names ...string) {
 		seen := map[string]bool{}
@@ -67,18 +86,6 @@ func DiscoverNative(ctx context.Context) []Component {
 	addExecutables("Clang", "clang-cl", "clang++", "clang")
 	addExecutables("MinGW", "g++", "gcc", "mingw32-g++")
 	addExecutables("MSVC", "cl")
-	components = append(components, discoverMSVC(ctx)...)
-	components = append(components, discoverCUDA(ctx)...)
-	components = append(components, discoverVulkan(ctx)...)
-	seenFamilies := map[string]bool{}
-	for _, component := range components {
-		seenFamilies[component.Family] = true
-	}
-	for _, family := range []string{"Clang", "MSVC", "CUDA", "Vulkan", "MinGW"} {
-		if !seenFamilies[family] {
-			components = append(components, Component{Name: "not detected", Family: family, Ready: false, Detail: "not found"})
-		}
-	}
 	return components
 }
 
@@ -228,46 +235,17 @@ func decodeWindowsCommand(data []byte) string {
 }
 
 func discoverMSVC(ctx context.Context) []Component {
-	roots := []string{os.Getenv("VSINSTALLDIR"), "D:\\vs2022", "C:\\Program Files\\Microsoft Visual Studio\\2022", "C:\\Program Files (x86)\\Microsoft Visual Studio\\2022"}
 	var result []Component
-	seen := map[string]bool{}
-	for _, root := range roots {
-		if root == "" {
-			continue
-		}
-		matches, _ := filepath.Glob(filepath.Join(root, "VC", "Tools", "MSVC", "*", "bin", "Hostx64", "x64", "cl.exe"))
-		for _, path := range matches {
-			if seen[path] {
-				continue
-			}
-			seen[path] = true
-			result = append(result, Component{Name: "MSVC", Family: "MSVC", Path: path, Version: commandVersion(ctx, path), Ready: true, Detail: "x64 compiler"})
-		}
+	for _, install := range DiscoverMSVCInstalls(ctx) {
+		result = append(result, Component{Name: "MSVC " + install.Version, Family: "MSVC", Path: install.Compiler, Version: commandVersion(ctx, install.Compiler), Ready: true, Detail: "x64 compiler"})
 	}
 	return result
 }
 
 func discoverCUDA(ctx context.Context) []Component {
-	roots := []string{os.Getenv("CUDA_PATH"), os.Getenv("CUDA_HOME"), "D:\\CUDA"}
-	if runtime.GOOS == "windows" {
-		matches, _ := filepath.Glob("C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v*")
-		roots = append(roots, matches...)
-	}
 	var result []Component
-	seen := map[string]bool{}
-	for _, root := range roots {
-		if root == "" || seen[filepath.Clean(root)] {
-			continue
-		}
-		seen[filepath.Clean(root)] = true
-		path := filepath.Join(root, "bin", "nvcc")
-		if runtime.GOOS == "windows" {
-			path += ".exe"
-		}
-		if _, err := os.Stat(path); err != nil {
-			continue
-		}
-		result = append(result, Component{Name: "CUDA", Family: "CUDA", Path: path, Version: commandVersion(ctx, path), Ready: true, Detail: root})
+	for _, install := range DiscoverCUDAInstalls(ctx) {
+		result = append(result, Component{Name: "CUDA " + install.Version, Family: "CUDA", Path: install.NVCC, Version: commandVersion(ctx, install.NVCC), Ready: true, Detail: install.Root})
 	}
 	return result
 }
