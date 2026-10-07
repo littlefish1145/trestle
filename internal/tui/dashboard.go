@@ -228,16 +228,16 @@ type palette struct {
 
 func newPalette() palette {
 	return palette{
-		brand:    lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#67e8f9")),
-		title:    lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#f8fafc")),
-		text:     lipgloss.NewStyle().Foreground(lipgloss.Color("#dbeafe")),
-		muted:    lipgloss.NewStyle().Foreground(lipgloss.Color("#94a3b8")),
-		faint:    lipgloss.NewStyle().Foreground(lipgloss.Color("#64748b")),
-		accent:   lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#7dd3fc")),
-		selected: lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#ecfeff")).Background(lipgloss.Color("#17324d")),
-		good:     lipgloss.NewStyle().Foreground(lipgloss.Color("#86efac")),
-		warning:  lipgloss.NewStyle().Foreground(lipgloss.Color("#fcd34d")),
-		danger:   lipgloss.NewStyle().Foreground(lipgloss.Color("#fda4af")),
+		brand:    lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("6")),
+		title:    lipgloss.NewStyle().Bold(true),
+		text:     lipgloss.NewStyle(),
+		muted:    lipgloss.NewStyle().Foreground(lipgloss.Color("8")),
+		faint:    lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Faint(true),
+		accent:   lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("12")),
+		selected: lipgloss.NewStyle().Bold(true).Reverse(true),
+		good:     lipgloss.NewStyle().Foreground(lipgloss.Color("2")),
+		warning:  lipgloss.NewStyle().Foreground(lipgloss.Color("3")),
+		danger:   lipgloss.NewStyle().Foreground(lipgloss.Color("1")),
 		border:   lipgloss.RoundedBorder(),
 	}
 }
@@ -1708,7 +1708,7 @@ func (model dashboardModel) pill(p palette, value, tone string) string {
 	case "danger":
 		style = p.danger
 	}
-	return style.Copy().Background(lipgloss.Color("#111d2e")).Padding(0, 1).Render(value)
+	return style.Copy().Background(lipgloss.Color("0")).Padding(0, 1).Render(value)
 }
 
 func (model dashboardModel) activityLabel() string {
@@ -1756,7 +1756,7 @@ func (model dashboardModel) sidebar(p palette, width, height int) string {
 		lines = append(lines, label)
 	}
 	lines = append(lines, "", p.faint.Render(" tab  switch focus"), p.faint.Render(" ↑↓   navigate"))
-	return lipgloss.NewStyle().Border(p.border).BorderForeground(lipgloss.Color("#334155")).Width(width - 2).Height(max(1, height-2)).Render(strings.Join(lines, "\n"))
+	return lipgloss.NewStyle().Border(p.border).BorderForeground(lipgloss.Color("8")).Width(width - 2).Height(max(1, height-2)).Render(strings.Join(lines, "\n"))
 }
 
 func (model dashboardModel) compactNavigation(p palette, width int) string {
@@ -1782,9 +1782,9 @@ func (model dashboardModel) contentPanel(p palette, width, height int) string {
 	heading := p.title.Render(routeGlyph[model.route]+"  "+title) + "  " + p.faint.Render(subtitle)
 	lines := sliceViewport(model.contentLines(p, innerWidth), model.scroll, max(1, innerHeight-2))
 	body := heading + "\n" + p.faint.Render(strings.Repeat("─", max(1, min(innerWidth, 72)))) + "\n" + strings.Join(lines, "\n")
-	borderColor := lipgloss.Color("#334155")
+	borderColor := lipgloss.Color("8")
 	if model.focus == focusContent {
-		borderColor = lipgloss.Color("#38bdf8")
+		borderColor = lipgloss.Color("12")
 	}
 	return lipgloss.NewStyle().Border(p.border).BorderForeground(borderColor).Padding(0, 1).Width(width - 4).Height(max(1, height-2)).Render(body)
 }
@@ -1890,7 +1890,7 @@ func (model dashboardModel) overviewLines(p palette, width int) []string {
 }
 
 func (model dashboardModel) stat(p palette, value, label string) string {
-	return lipgloss.NewStyle().Border(p.border).BorderForeground(lipgloss.Color("#26364d")).Padding(0, 2).Render(p.accent.Render(value) + " " + p.muted.Render(label))
+	return lipgloss.NewStyle().Border(p.border).BorderForeground(lipgloss.Color("8")).Padding(0, 2).Render(p.accent.Render(value) + " " + p.muted.Render(label))
 }
 
 func statusRow(p palette, ok bool, success, failure string) string {
@@ -2337,7 +2337,7 @@ func (model dashboardModel) helpView(p palette, width, height int) string {
 		keyValue(p, "targets", "enter build · f force build (skip availability check)"), keyValue(p, "tasks", "enter preview · y confirm · n cancel"),
 		keyValue(p, "q", "leave Project Console"), "", p.faint.Render("Inputs: enter saves · esc cancels · ctrl+u clears · ctrl+w deletes a word"),
 	}
-	return lipgloss.NewStyle().Border(p.border).BorderForeground(lipgloss.Color("#38bdf8")).Padding(1, 2).Width(max(20, width-6)).Height(max(3, height-4)).Render(strings.Join(lines, "\n"))
+	return lipgloss.NewStyle().Border(p.border).BorderForeground(lipgloss.Color("12")).Padding(1, 2).Width(max(20, width-6)).Height(max(3, height-4)).Render(strings.Join(lines, "\n"))
 }
 
 func (model dashboardModel) statusLine(p palette, width int) string {
