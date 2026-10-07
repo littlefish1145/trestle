@@ -19,7 +19,12 @@ func PortableSelector(value string) string {
 	if !IsLocalPath(trimmed) {
 		return trimmed
 	}
-	base := strings.ToLower(filepath.Base(strings.ReplaceAll(trimmed, "/", `\`)))
+	// Split off the last segment manually instead of filepath.Base: the value
+	// may use Windows separators, which only filepath on Windows understands.
+	base := strings.ToLower(strings.ReplaceAll(trimmed, `\`, "/"))
+	if index := strings.LastIndex(base, "/"); index >= 0 {
+		base = base[index+1:]
+	}
 	base = strings.TrimSuffix(base, ".exe")
 	for _, name := range []string{"clang-cl", "clang++", "clang", "g++", "gcc", "mingw32-g++", "cl"} {
 		if base == name {
