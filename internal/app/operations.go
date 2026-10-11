@@ -184,6 +184,11 @@ func checkPackagePlatform(cfg config.Config) error {
 		return nil
 	}
 	for name, pkg := range cfg.Packages {
+		if pkg.Provider == "conan" {
+			// Conan references are platform-neutral recipes; the profile
+			// decides the platform, so there is no triplet to mismatch.
+			continue
+		}
 		triplet := pkg.Triplet
 		if triplet == "" || triplet == "auto" {
 			triplet = cfg.Vcpkg.Triplet

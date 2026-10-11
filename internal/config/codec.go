@@ -206,6 +206,15 @@ func (c *Config) normalize(root string) error {
 	if c.Vcpkg.Root != "" {
 		c.Vcpkg.Root = normalize(c.Vcpkg.Root)
 	}
+	if c.Conan.Root != "" {
+		c.Conan.Root = normalize(c.Conan.Root)
+	}
+	if c.Conan.BuildRoot != "" {
+		c.Conan.BuildRoot = normalize(c.Conan.BuildRoot)
+	}
+	if c.Conan.Profile == "" {
+		c.Conan.Profile = "default"
+	}
 	for name, target := range c.Targets {
 		target.Sources = cleanPaths(target.Sources)
 		target.IncludeDirs = cleanPaths(target.IncludeDirs)
@@ -346,6 +355,8 @@ func SaveExpected(path string, cfg Config, expected string) error {
 	copyCfg.Build.BuildDir = local(copyCfg.Build.BuildDir)
 	copyCfg.Build.CompileCommands = local(copyCfg.Build.CompileCommands)
 	copyCfg.Vcpkg.Root = local(copyCfg.Vcpkg.Root)
+	copyCfg.Conan.Root = local(copyCfg.Conan.Root)
+	copyCfg.Conan.BuildRoot = local(copyCfg.Conan.BuildRoot)
 	copyCfg.Package.Output = local(copyCfg.Package.Output)
 	copyCfg.Toolchain.CacheDir = local(copyCfg.Toolchain.CacheDir)
 	if copyCfg.Toolchain.CUDARoot != "" && !toolchain.IsLocalPath(copyCfg.Toolchain.CUDARoot) {

@@ -18,6 +18,8 @@ import (
 	"time"
 
 	"trestle/internal/config"
+	"trestle/internal/deps"
+	"trestle/internal/deps/conan"
 	"trestle/internal/deps/vcpkg"
 	"trestle/internal/fsx"
 	"trestle/internal/graph"
@@ -960,6 +962,14 @@ func AddPackage(path, name, targetName string) error {
 }
 
 func addPackageToConfig(cfg *config.Config, name, targetName string) error {
+	return addProviderPackageToConfig(cfg, name, targetName, "vcpkg")
+}
+
+// addProviderPackageToConfig records an installed package under the project's
+// chosen target. The provider selects how the raw name is parsed: vcpkg ports
+// are "name[@version][features...]"-style strings already stripped upstream,
+// while conan references are "name/version[@user/channel][features]".
+func addProviderPackageToConfig(cfg *config.Config, name, targetName, provider string) error {
 	name = strings.TrimSpace(name)
 	version := ""
 	if at := strings.LastIndex(name, "@"); at > 0 {
@@ -986,7 +996,11 @@ func addPackageToConfig(cfg *config.Config, name, targetName string) error {
 		return fmt.Errorf("target %q not found", targetName)
 	}
 	if _, exists := cfg.Packages[name]; !exists {
-		cfg.Packages[name] = config.Package{Provider: "vcpkg", Port: name, Version: version, Features: features, Triplet: cfg.Vcpkg.Triplet}
+		pkg := config.Package{Provider: provider, Port: name, Version: version, Features: features}
+		if provider != "conan" {
+			pkg.Triplet = cfg.Vcpkg.Triplet
+		}
+		cfg.Packages[name] = pkg
 	} else if version != "" {
 		pkg := cfg.Packages[name]
 		pkg.Version = version
@@ -1031,12 +1045,51 @@ func packageTarget(cfg config.Config, packageName string) string {
 	return defaultTarget(cfg)
 }
 
-func SearchPackages(ctx context.Context, path, query string) ([]vcpkg.Port, error) {
+// SearchPackages looks the query up through whichever providers are usable:
+// the conan client first when a conan installation resolves, then the vcpkg
+// registry/local tree. Both result sets share the neutral PackageEntry view.
+//
+// A "name:version" or "vcpkg:name:version" term resolves to that exact version
+// instead of a general search, so the user lands directly on the wanted release.
+func SearchPackages(ctx context.Context, path, query string) ([]deps.PackageEntry, error) {
 	cfg, err := config.Load(path)
 	if err != nil {
 		return nil, err
 	}
-	registry := vcpkg.WebRegistry{CachePath: filepath.Join(filepath.Dir(path), ".trestle", "cache", "vcpkg-index.json")}
+	parsed := deps.ParseQuery(query)
+	if parsed.Exact() {
+		return resolveExactVersion(ctx, cfg, filepath.Dir(path), parsed)
+	}
+	return searchPackages(ctx, cfg, filepath.Dir(path), parsed)
+}
+
+func searchPackages(ctx context.Context, cfg config.Config, root string, parsed deps.PackageQuery) ([]deps.PackageEntry, error) {
+	query := parsed.SearchTerm()
+	var entries []deps.PackageEntry
+	var failures []string
+	if conanClient, conanErr := conanClientFor(cfg); conanErr == nil {
+		// Search the local cache and every configured remote, so the page can
+		// offer both installed recipes and upstream versions to install.
+		remotes, remotesErr := conanClient.Remotes(ctx)
+		if remotesErr != nil {
+			failures = append(failures, "conan remotes: "+remotesErr.Error())
+		}
+		installed, localErr := conanClient.Search(ctx, query)
+		if localErr == nil {
+			entries = append(entries, deps.ConvertConanEntries(installed)...)
+		} else {
+			failures = append(failures, "conan: "+localErr.Error())
+		}
+		if len(remotes) > 0 {
+			remote, remoteErr := conanClient.SearchRemotes(ctx, query, remotes)
+			if remoteErr == nil {
+				entries = append(entries, deps.ConvertConanEntries(remote)...)
+			} else {
+				failures = append(failures, "conan remote: "+remoteErr.Error())
+			}
+		}
+	}
+	registry := vcpkg.WebRegistry{CachePath: filepath.Join(root, ".trestle", "cache", "vcpkg-index.json")}
 	client, clientErr := vcpkg.NewClient(cfg.Vcpkg.Root)
 	if ports, cached := registry.SearchCached(query, 0); cached {
 		if clientErr == nil {
@@ -1044,9 +1097,8 @@ func SearchPackages(ctx context.Context, path, query string) ([]vcpkg.Port, erro
 				ports[index].Installed = client.IsInstalled(ports[index].Name)
 			}
 		}
-		return ports, nil
-	}
-	if clientErr == nil {
+		entries = append(entries, deps.ConvertEntries(ports)...)
+	} else if clientErr == nil {
 		ports, localErr := client.SearchPorts(ctx, query)
 		if localErr == nil {
 			go func() {
@@ -1054,18 +1106,89 @@ func SearchPackages(ctx context.Context, path, query string) ([]vcpkg.Port, erro
 				defer cancel()
 				_ = registry.Refresh(refreshCtx)
 			}()
-			return ports, nil
+			entries = append(entries, deps.ConvertEntries(ports)...)
+		} else {
+			failures = append(failures, "vcpkg: "+localErr.Error())
+		}
+	} else {
+		ports, webErr := registry.Search(ctx, query, 0)
+		if webErr != nil {
+			failures = append(failures, fmt.Sprintf("vcpkg online search failed (%v); local fallback unavailable (%v)", webErr, clientErr))
+		} else {
+			entries = append(entries, deps.ConvertEntries(ports)...)
 		}
 	}
-	ports, webErr := registry.Search(ctx, query, 0)
-	if webErr != nil {
-		return nil, fmt.Errorf("online search failed (%v); local fallback unavailable (%v)", webErr, clientErr)
+	if len(entries) == 0 && len(failures) > 0 {
+		return nil, fmt.Errorf("%s", strings.Join(failures, "; "))
 	}
-	return ports, nil
+	return entries, nil
 }
 
-// InstallPackage downloads and builds a package using the configured vcpkg
-// instance, then records it as a dependency of the project's default target.
+// resolveExactVersion answers a "name:version" query with that one version
+// marked as the requested one. vcpkg is consulted through its version database,
+// which is the only place historical releases are recorded; conan spells the
+// version into the reference itself, so a remote lookup finds it directly.
+func resolveExactVersion(ctx context.Context, cfg config.Config, root string, parsed deps.PackageQuery) ([]deps.PackageEntry, error) {
+	var entries []deps.PackageEntry
+	var failures []string
+	if parsed.Provider != "conan" {
+		client, err := vcpkg.NewClient(cfg.Vcpkg.Root)
+		if err != nil {
+			failures = append(failures, "vcpkg: "+err.Error())
+		} else {
+			found, historyErr := client.ResolveVersion(ctx, parsed.Name, parsed.Version)
+			if historyErr != nil {
+				failures = append(failures, "vcpkg: "+historyErr.Error())
+			} else {
+				entries = append(entries, deps.ConvertPortVersionEntries(found)...)
+			}
+		}
+	}
+	if parsed.Provider != "vcpkg" {
+		client, err := conanClientFor(cfg)
+		if err == nil {
+			remotes, _ := client.Remotes(ctx)
+			found, searchErr := client.SearchRemotes(ctx, parsed.SearchTerm(), remotes)
+			if searchErr == nil {
+				entries = append(entries, deps.ConvertConanEntries(found)...)
+			} else {
+				failures = append(failures, "conan: "+searchErr.Error())
+			}
+		}
+	}
+	if len(entries) == 0 {
+		if len(failures) > 0 {
+			return nil, fmt.Errorf("%s", strings.Join(failures, "; "))
+		}
+		return nil, fmt.Errorf("E_PACKAGE_VERSION: %s has no version %s", parsed.Name, parsed.Version)
+	}
+	deps.MarkRequestedVersion(entries, parsed.Version)
+	return entries, nil
+}
+
+// conanClientFor builds a conan client from the [conan] config when the
+// installation resolves; a missing conan is not an error for searches.
+func conanClientFor(cfg config.Config) (conan.Client, error) {
+	buildRoot := cfg.Conan.BuildRoot
+	if buildRoot == "" && cfg.Build.BuildDir != "" {
+		buildRoot = filepath.Dir(cfg.Build.BuildDir)
+	}
+	client, err := conan.NewClient(cfg.Conan.Root, buildRoot)
+	if err != nil {
+		return conan.Client{}, err
+	}
+	if cfg.Conan.Profile != "" {
+		client.Profile = cfg.Conan.Profile
+	}
+	client.Settings = cfg.Conan.Settings
+	client.Options = cfg.Conan.Options
+	return client, nil
+}
+
+// InstallPackage downloads and builds a package with the provider implied by
+// the reference (conan when it looks like name/version[@user/channel] or an
+// existing conan record; vcpkg otherwise), then records it as a dependency of
+// the project's default target.
 func installPackage(ctx context.Context, path, name string, progress func(string)) error {
 	cfg, err := config.Load(path)
 	if err != nil {
@@ -1075,6 +1198,50 @@ func installPackage(ctx context.Context, path, name string, progress func(string
 	if name == "" {
 		return fmt.Errorf("package name is required")
 	}
+	if usesConanProvider(cfg, name) {
+		return installConanPackage(ctx, path, cfg, name, progress)
+	}
+	return installVcpkgPackage(ctx, path, cfg, name, progress)
+}
+
+// usesConanProvider reports whether the requested reference targets conan: an
+// explicit conan record, a versioned reference (name/version or @user/channel
+// — vcpkg names never contain "/"), or a conan-only bracket-feature ref.
+func usesConanProvider(cfg config.Config, name string) bool {
+	if strings.HasPrefix(strings.ToLower(name), "conan:") {
+		return true
+	}
+	if slash := strings.Index(name, "/"); slash > 0 {
+		return true
+	}
+	if pkg, ok := cfg.Packages[name]; ok && pkg.Provider == "conan" {
+		return true
+	}
+	return false
+}
+
+func installConanPackage(ctx context.Context, path string, cfg config.Config, reference string, progress func(string)) error {
+	reference = strings.TrimPrefix(strings.TrimPrefix(reference, "conan:"), "conan ")
+	client, err := conanClientFor(cfg)
+	if err != nil {
+		return err
+	}
+	if err := client.InstallWithProgress(ctx, reference, progress); err != nil {
+		return err
+	}
+	if err := addProviderPackageToConfig(&cfg, reference, "", "conan"); err != nil {
+		return err
+	}
+	if cfg.Conan.Root == "" {
+		cfg.Conan.Root = client.Root
+	}
+	if cfg.Conan.Profile == "" && client.Profile != "" {
+		cfg.Conan.Profile = filepath.Base(client.Profile)
+	}
+	return config.Save(path, cfg)
+}
+
+func installVcpkgPackage(ctx context.Context, path string, cfg config.Config, name string, progress func(string)) error {
 	client, err := vcpkg.NewClient(cfg.Vcpkg.Root)
 	if err != nil {
 		return err

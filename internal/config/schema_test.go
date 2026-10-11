@@ -153,4 +153,54 @@ func TestTaskSettingsMayPinMSVCRange(t *testing.T) {
 	if !taskSettingAllowed("toolchain.msvc") {
 		t.Fatal("tasks must be able to pin an msvc version range")
 	}
+	if !taskSettingAllowed("conan.root") || !taskSettingAllowed("conan.profile") {
+		t.Fatal("tasks must be able to pin the conan installation")
+	}
+}
+
+func TestValidateAcceptsKnownPackageProviders(t *testing.T) {
+	for provider, pkg := range map[string]Package{
+		"vcpkg":  {Provider: "vcpkg", Port: "fmt", Version: "10.2.1", Features: []string{"format"}},
+		"conan":  {Provider: "conan", Port: "fmt", Version: "10.2.1", Features: []string{"with_tls"}},
+		"manual": {Provider: "manual", IncludeDirs: []string{"vendor/include"}},
+		"absent": {Port: "zlib"},
+	} {
+		cfg := Default("demo")
+		cfg.Packages[provider] = pkg
+		if err := Validate(cfg); err != nil {
+			t.Fatalf("provider %q must be accepted: %v", provider, err)
+		}
+	}
+}
+
+func TestValidateRejectsUnsupportedProviderAndConanFeaturesInVersion(t *testing.T) {
+	cfg := Default("demo")
+	cfg.Packages["fmt"] = Package{Provider: "brew", Port: "fmt"}
+	if err := Validate(cfg); err == nil || !strings.Contains(err.Error(), "unsupported provider") {
+		t.Fatalf("an unknown provider must be rejected, got %v", err)
+	}
+	// conan carries features on the reference name, never inside the version.
+	cfg.Packages["fmt"] = Package{Provider: "conan", Port: "fmt", Version: "10.2.1[with_tls]"}
+	if err := Validate(cfg); err == nil || !strings.Contains(err.Error(), "reference name") {
+		t.Fatalf("conan features in a version must be rejected, got %v", err)
+	}
+}
+
+func TestConanBuildRootNormalizesRelativeToProject(t *testing.T) {
+	root := t.TempDir()
+	cfg := Default("demo")
+	cfg.Conan.Root = "conan-home"
+	cfg.Conan.BuildRoot = filepath.Join("deps", "conan")
+	if err := cfg.normalize(root); err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(root, "conan-home"); cfg.Conan.Root != want {
+		t.Fatalf("conan root = %q, want %q", cfg.Conan.Root, want)
+	}
+	if want := filepath.Join(root, "deps", "conan"); cfg.Conan.BuildRoot != want {
+		t.Fatalf("conan build_root = %q, want %q", cfg.Conan.BuildRoot, want)
+	}
+	if cfg.Conan.Profile != "default" {
+		t.Fatalf("conan profile = %q, want default", cfg.Conan.Profile)
+	}
 }

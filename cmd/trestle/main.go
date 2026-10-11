@@ -13,7 +13,7 @@ import (
 	"golang.org/x/term"
 	"trestle/internal/app"
 	"trestle/internal/config"
-	"trestle/internal/deps/vcpkg"
+	"trestle/internal/deps"
 	"trestle/internal/diag"
 	"trestle/internal/policy"
 	"trestle/internal/runlog"
@@ -304,7 +304,7 @@ func dashboardServices(path string) tuimodel.Services {
 		},
 		SetProfile:      func(profile string) error { return app.SetProfile(path, profile) },
 		SetCompileFlags: func(flags string) error { return app.SetFlags(path, flags, "") },
-		SearchPackages: func(ctx context.Context, query string) ([]vcpkg.Port, error) {
+		SearchPackages: func(ctx context.Context, query string) ([]deps.PackageEntry, error) {
 			return app.SearchPackages(ctx, path, query)
 		},
 		RemovePackage: func(name string) error { return app.RemovePackage(path, name) },
@@ -392,5 +392,6 @@ func usage() {
 	fmt.Println("  trestle logs [-C dir] [operation-id]")
 	fmt.Println("  trestle toolchain [-C dir] [--refresh]")
 	fmt.Println("  trestle vcpkg [-C dir] [-root path] [-search query] | [-install -ports zlib,fmt]")
+	fmt.Println("  package references accept vcpkg ports (zlib) and conan references (fmt/10.2.1@x/stable)")
 	fmt.Println("  trestle version")
 }

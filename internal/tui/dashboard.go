@@ -14,7 +14,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 	"trestle/internal/config"
-	"trestle/internal/deps/vcpkg"
+	"trestle/internal/deps"
 	"trestle/internal/diag"
 	"trestle/internal/policy"
 	"trestle/internal/runlog"
@@ -35,7 +35,7 @@ type Services struct {
 	InstallPackage    func(context.Context, string, func(string)) error
 	SetProfile        func(string) error
 	SetCompileFlags   func(string) error
-	SearchPackages    func(context.Context, string) ([]vcpkg.Port, error)
+	SearchPackages    func(context.Context, string) ([]deps.PackageEntry, error)
 	RemovePackage     func(string) error
 	SetPackageVersion func(string, string) error
 	SetCompiler       func(string) error
@@ -140,7 +140,7 @@ type installEvent struct {
 	err  error
 }
 type packageSearchMessage struct {
-	ports []vcpkg.Port
+	ports []deps.PackageEntry
 	err   error
 }
 type workflowEvent struct {
@@ -204,7 +204,15 @@ type dashboardModel struct {
 	inputText          string
 	inputKind          string
 	inputPackage       string
-	packageResults     []vcpkg.Port
+	packageResults     []deps.PackageEntry
+	packagePackages    []deps.Package
+	packageLevel       packageLevel
+	packageSelected    int
+	packageRequested   string
+	packageReturnRoute Route
+	packageReturnFocus focusArea
+	packageReturnCurs  int
+	packageReturnScrol int
 	installEvents      chan installEvent
 	installLog         []string
 	installCancel      context.CancelFunc
@@ -370,9 +378,21 @@ func (model dashboardModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			model.setMessage("No matching packages found", false)
 		} else {
 			model.packageResults = value.ports
+			// One row per package name, so a library offered by both vcpkg and
+			// conan is chosen once instead of twice.
+			model.packagePackages = deps.Merge(value.ports)
+			model.packageLevel = packageListLevel
 			model.cursor = len(model.config.Packages)
 			model.scroll = max(0, model.cursor-2)
-			model.setMessage(fmt.Sprintf("Found %d matching packages · n jumps to results, enter installs", len(value.ports)), false)
+			if model.packageRequested != "" {
+				// A pinned version jumps straight into the picker with that
+				// release highlighted, ready to install with enter or i.
+				if model.enterPackageByName(value.ports) {
+					model.setMessage(fmt.Sprintf("%s %s · enter installs this version, esc returns", queryName(value.ports), model.packageRequested), false)
+					return model, nil
+				}
+			}
+			model.setMessage(fmt.Sprintf("Found %d package%s · enter chooses a version and source", len(model.packagePackages), plural(len(model.packagePackages))), false)
 		}
 	case mutationMessage:
 		model.mutating = false
@@ -555,6 +575,26 @@ func (model dashboardModel) handleKey(message tea.KeyPressMsg) (tea.Model, tea.C
 			model.workflowCancel()
 		}
 		return model, tea.Quit
+	case "esc", "backspace":
+		// esc is the universal "return" key: it steps back out of the package
+		// drill-down before it does anything else, so the user always has a way
+		// back to the previous level.
+		if model.route == PackagesRoute && model.packageLevel == packageCandidatesLevel {
+			model.leaveCandidates()
+			model.setMessage("Back to packages", false)
+			return model, nil
+		}
+		if model.inputMode {
+			model.closeInput()
+			model.setMessage("Cancelled", false)
+			return model, nil
+		}
+		if model.help || model.details || model.history {
+			model.help, model.details, model.history = false, false, false
+			return model, nil
+		}
+		model.setMessage("Nothing to go back to", false)
+		return model, nil
 	case "?":
 		model.saveOverlayPosition()
 		model.details, model.history = false, false
@@ -579,10 +619,15 @@ func (model dashboardModel) handleKey(message tea.KeyPressMsg) (tea.Model, tea.C
 			model.focus = focusContent
 			model.keepCursorVisible()
 		} else if model.route == PackagesRoute {
-			index := model.cursor - len(model.config.Packages)
-			if index >= 0 && index < len(model.packageResults) {
-				name := model.packageResults[index].Name
-				return model.installPackage(name)
+			if model.packageLevel == packageCandidatesLevel {
+				pkg, candidate, ok := model.selectedCandidate()
+				if !ok {
+					return model, nil
+				}
+				return model.installPackage(referenceFor(pkg, candidate))
+			}
+			if model.enterCandidates() {
+				return model, nil
 			}
 		} else if model.route == ToolchainsRoute {
 			if component, ok := model.selectedComponent(); ok {
@@ -710,9 +755,9 @@ func (model dashboardModel) handleKey(message tea.KeyPressMsg) (tea.Model, tea.C
 			return model, nil
 		}
 		model.route, model.focus = PackagesRoute, focusContent
-		model.openInput("install", "Install vcpkg package by name")
+		model.openInput("install", "Install package by name (vcpkg port or conan name/version)")
 	case "n":
-		if model.route == PackagesRoute && len(model.packageResults) > 0 {
+		if model.route == PackagesRoute && model.packageLevel == packageListLevel && len(model.packagePackages) > 0 {
 			model.cursor = len(model.config.Packages)
 			model.scroll = max(0, model.cursor-2)
 			model.setMessage("Cursor jumped to first search result", false)
@@ -723,10 +768,27 @@ func (model dashboardModel) handleKey(message tea.KeyPressMsg) (tea.Model, tea.C
 		if model.route == ImportRoute {
 			return model.startProjectImport()
 		} else if model.route == PackagesRoute {
-			index := model.cursor - len(model.config.Packages)
-			if index >= 0 && index < len(model.packageResults) {
-				return model.installPackage(model.packageResults[index].Name)
+			if model.packageLevel == packageCandidatesLevel {
+				pkg, candidate, ok := model.selectedCandidate()
+				if !ok {
+					return model, nil
+				}
+				return model.installPackage(referenceFor(pkg, candidate))
 			}
+			// On the package list "i" is the quick action: install the newest
+			// version right away, without stepping into the version picker.
+			pkg, ok := model.selectedPackage()
+			if !ok {
+				return model, nil
+			}
+			candidate, ok := pkg.Preferred(model.packageRequested)
+			if !ok {
+				model.setMessage("No installable version is available for "+pkg.Name, true)
+				return model, nil
+			}
+			notice := "Installing " + pkg.Name + " " + fallback(candidate.Version, "latest")
+			model.setMessage(notice+" from "+candidate.Provider+"…", false)
+			return model.installPackage(referenceFor(pkg, candidate))
 		}
 	case "f":
 		if model.route == TargetsRoute || model.route == BuildRoute {
@@ -742,15 +804,20 @@ func (model dashboardModel) handleKey(message tea.KeyPressMsg) (tea.Model, tea.C
 				model.setMessage("Job view", false)
 			}
 		} else if model.route == PackagesRoute {
-			index := model.cursor - len(model.config.Packages)
-			if index >= 0 && index < len(model.packageResults) && len(model.packageResults[index].Features) > 0 {
-				model.openInput("features", "Features for "+model.packageResults[index].Name+" (comma separated)")
-				model.inputPackage = model.packageResults[index].Name
+			if model.packageLevel != packageListLevel {
+				return model, nil
+			}
+			if pkg, ok := model.selectedPackage(); ok {
+				features := candidateFeatures(model, pkg)
+				if len(features) > 0 {
+					model.openInput("features", "Features for "+pkg.Name+" (comma separated)")
+					model.inputPackage = pkg.Name
+				}
 			}
 		}
 	case "/", "s":
 		model.route, model.focus = PackagesRoute, focusContent
-		model.openInput("search", "Search vcpkg registry")
+		model.openInput("search", "Search vcpkg and conan (name:version pins a release, e.g. fmt:11.2.0)")
 	case "d":
 		if model.route == PackagesRoute {
 			names := sortedPackageNames(model.config.Packages)
@@ -917,8 +984,11 @@ func (model dashboardModel) handleInput(key tea.Key) (tea.Model, tea.Cmd) {
 			}
 			model.searching = true
 			model.packageResults = nil
+			// A "name:version" term remembers the version so the page can
+			// highlight it and the quick install action can target it.
+			model.packageRequested = deps.ParseQuery(text).Version
 			model.cursor, model.scroll = max(0, len(model.config.Packages)-1), 0
-			model.setMessage("Searching vcpkg index for “"+text+"”…", false)
+			model.setMessage("Searching vcpkg and conan indexes for “"+text+"”…", false)
 			return model, tea.Batch(func() tea.Msg {
 				ports, err := model.services.SearchPackages(context.Background(), text)
 				return packageSearchMessage{ports: ports, err: err}
@@ -1087,6 +1157,7 @@ func settingsRows(cfg config.Config) []settingRow {
 	rows := []settingRow{
 		{"project.name", "Project name", cfg.Project.Name}, {"build.build_dir", "Build directory", cfg.Build.BuildDir}, {"build.c_standard", "C standard", cfg.Build.CStandard}, {"build.cxx_standard", "C++ standard", cfg.Build.CXXStandard}, {"build.compile_flags", "Common compile flags", strings.Join(cfg.Build.CompileFlags, " ")}, {"build.c_flags", "C flags", strings.Join(cfg.Build.CFlags, " ")}, {"build.cxx_flags", "C++ flags", strings.Join(cfg.Build.CXXFlags, " ")}, {"build.link_flags", "Link flags", strings.Join(cfg.Build.LinkFlags, " ")}, {"build.default_targets", "Default targets", strings.Join(cfg.Build.DefaultTargets, ",")}, {"build.compile_commands", "Compile commands", cfg.Build.CompileCommands}, {"toolchain.c", "C compiler", cfg.Toolchain.C}, {"toolchain.cxx", "C++ compiler", cfg.Toolchain.CXX}, {"toolchain.msvc", "MSVC toolset", cfg.Toolchain.MSVC}, {"toolchain.archiver", "Archiver", cfg.Toolchain.Archiver}, {"toolchain.linker", "Linker", cfg.Toolchain.Linker}, {"toolchain.setup", "Environment script", cfg.Toolchain.Setup}, {"toolchain.cuda", "CUDA version", cfg.Toolchain.CUDA}, {"toolchain.cuda_root", "CUDA root override", cfg.Toolchain.CUDARoot}, {"toolchain.cache_dir", "Toolchain cache", cfg.Toolchain.CacheDir}, {"toolchain.cuda_mode", "CUDA mode", cfg.Toolchain.CUDAMode}, {"toolchain.cuda_architectures", "CUDA architectures", strings.Join(cfg.Toolchain.CUDAArchitectures, ",")}, {"vcpkg.root", "vcpkg root", cfg.Vcpkg.Root}, {"vcpkg.triplet", "vcpkg triplet", cfg.Vcpkg.Triplet}, {"vcpkg.crt_linkage", "CRT linkage", cfg.Vcpkg.CRTLinkage}, {"vcpkg.library_linkage", "Library linkage", cfg.Vcpkg.LibraryLinkage}, {"package.output", "Release ZIP", cfg.Package.Output}}
 	rows = append(rows, settingRow{"toolchain.mode", "Execution mode", cfg.Toolchain.Mode}, settingRow{"toolchain.wsl_distribution", "WSL distribution", cfg.Toolchain.WSLDistribution}, settingRow{"toolchain.vulkan", "Vulkan SDK", cfg.Toolchain.Vulkan}, settingRow{"toolchain.vulkan_execution", "Vulkan execution", cfg.Toolchain.VulkanExecution}, settingRow{"toolchain.vulkan_wsl_distribution", "Vulkan distribution", cfg.Toolchain.VulkanWSLDistribution}, settingRow{"toolchain.cuda_execution", "CUDA execution", cfg.Toolchain.CUDAExecution}, settingRow{"toolchain.cuda_wsl_distribution", "CUDA distribution", cfg.Toolchain.CUDAWSLDistribution})
+	rows = append(rows, settingRow{"conan.root", "conan home", cfg.Conan.Root}, settingRow{"conan.build_root", "conan build root", cfg.Conan.BuildRoot}, settingRow{"conan.profile", "conan profile", cfg.Conan.Profile})
 	for _, name := range sortedTargetNames(cfg.Targets) {
 		target := cfg.Targets[name]
 		prefix := "target:" + name + ":"
@@ -1219,7 +1290,7 @@ func (model dashboardModel) startMutation(progress, done string, action func() e
 
 func (model dashboardModel) installPackage(name string) (tea.Model, tea.Cmd) {
 	if model.services.InstallPackage == nil {
-		model.setMessage("Configure [vcpkg].root before installing packages", true)
+		model.setMessage("Configure [vcpkg].root or [conan].root before installing packages", true)
 		return model, nil
 	}
 	if model.busy() {
@@ -1230,7 +1301,7 @@ func (model dashboardModel) installPackage(name string) (tea.Model, tea.Cmd) {
 	model.mutating, model.operation = true, "Installing "+name
 	model.installEvents, model.installLog, model.installCancel = events, nil, cancel
 	model.logFollow, model.logScroll, model.diskLog, model.latestInstall, model.focus, model.lastError = true, 0, nil, true, focusLog, nil
-	model.setMessage("Preparing vcpkg install for "+name+"…", false)
+	model.setMessage("Preparing install for "+name+"…", false)
 	start := func() tea.Msg {
 		go func() {
 			err := model.services.InstallPackage(installCtx, name, func(line string) {
@@ -1585,7 +1656,12 @@ func (model dashboardModel) itemCount() int {
 	case PresetsRoute:
 		return len(model.config.CompilerPresets)
 	case PackagesRoute:
-		return len(model.config.Packages) + len(model.packageResults)
+		// The candidate level replaces the whole page, including the configured
+		// list, so only the version rows are selectable there.
+		if model.packageLevel == packageCandidatesLevel {
+			return model.packageRows()
+		}
+		return len(model.config.Packages) + model.packageRows()
 	case TestsRoute:
 		if model.testFileMode {
 			return len(model.testFiles())
@@ -1815,7 +1891,7 @@ func (model dashboardModel) routeHeading() (string, string) {
 	case ImportRoute:
 		return "Project import", "CMake File API and version-compatible Xmake introspection"
 	case PackagesRoute:
-		return "Packages", "vcpkg dependencies"
+		return "Packages", "vcpkg and conan dependencies"
 	case TestsRoute:
 		return "Test suites", "jobs, groups and source-file selection"
 	case BuildRoute:
@@ -2121,14 +2197,18 @@ func (model dashboardModel) testLines(p palette, width int) []string {
 }
 
 func (model dashboardModel) packageLines(p palette, width int) []string {
+	if model.packageLevel == packageCandidatesLevel {
+		lines := model.packageCandidateLines(p, width)
+		return append(lines, "", p.faint.Render(model.packageHint()))
+	}
 	names := sortedPackageNames(model.config.Packages)
 	installer := "installer unavailable"
 	if model.probe.Vcpkg {
 		installer = "installer " + model.probe.VcpkgRoot
 	}
-	lines := []string{p.good.Render("● online index") + p.faint.Render("  vcpkg.io · "+installer), ""}
+	lines := []string{p.good.Render("● online index") + p.faint.Render("  vcpkg.io + conan.center · "+installer), ""}
 	if model.searching {
-		lines = append(lines, p.accent.Render("◌ Searching vcpkg index…")+p.faint.Render("  esc cancels, results appear in place"))
+		lines = append(lines, p.accent.Render("◌ Searching package indexes…")+p.faint.Render("  esc cancels, results appear in place"))
 		lines = append(lines, "")
 	}
 	if len(names) == 0 {
@@ -2145,41 +2225,60 @@ func (model dashboardModel) packageLines(p palette, width int) []string {
 			if len(pkg.Features) > 0 {
 				featureText = " [" + strings.Join(pkg.Features, ",") + "]"
 			}
-			lines = append(lines, model.selectableRow(p, index, ansi.Truncate(fmt.Sprintf("%-22s %-18s %s", name+featureText, version, pkg.Triplet), width-3, "…")))
+			detail := pkg.Triplet
+			if detail == "" {
+				detail = fallback(providerOf(model.config.Packages, name), "vcpkg")
+			}
+			lines = append(lines, model.selectableRow(p, index, ansi.Truncate(fmt.Sprintf("%-22s %-18s %s", name+featureText, version, detail), width-3, "…")))
 		}
 	}
-	if len(model.packageResults) > 0 {
-		lines = append(lines, "", p.faint.Render(fmt.Sprintf(" VCPKG.IO RESULTS · %d MATCHES · ENTER TO DOWNLOAD & INSTALL", len(model.packageResults))))
-		for index, port := range model.packageResults {
+	if len(model.packagePackages) > 0 {
+		lines = append(lines, "", p.faint.Render(fmt.Sprintf(" MATCHES · %d PACKAGES · ENTER TO CHOOSE A VERSION", len(model.packagePackages))))
+		for index, pkg := range model.packagePackages {
 			marker := "○"
-			_, configured := model.config.Packages[port.Name]
-			if port.Installed || configured {
+			_, configured := model.config.Packages[pkg.Name]
+			if pkg.Installed || configured {
 				marker = "✓"
 			}
-			lines = append(lines, model.selectableRow(p, len(names)+index, ansi.Truncate(fmt.Sprintf("%s  %-22s %s", marker, port.Name, port.Version), width-3, "…")))
+			// A name offered by several providers shows them all, so the row
+			// makes clear the choice happens on the next level.
+			sources := providerSummary(pkg)
+			lines = append(lines, model.selectableRow(p, len(names)+index, ansi.Truncate(fmt.Sprintf("%s  %-24s %s", marker, pkg.Name, sources), width-3, "…")))
 			if len(names)+index == model.cursor && model.focus == focusContent {
-				lines = append(lines, p.text.Render("     "+ansi.Truncate(port.Description, max(12, width-7), "…")))
-				metadata := []string{"source " + fallback(port.Source, "vcpkg.io")}
-				if port.License != "" {
-					metadata = append(metadata, "license "+port.License)
+				if pkg.Description != "" {
+					lines = append(lines, p.text.Render("     "+ansi.Truncate(pkg.Description, max(12, width-7), "…")))
 				}
-				if port.Updated != "" {
-					metadata = append(metadata, "updated "+port.Updated)
-				}
-				lines = append(lines, p.faint.Render("     "+strings.Join(metadata, " · ")))
-				if len(port.Features) > 0 {
-					lines = append(lines, p.faint.Render("     features: "+ansi.Truncate(strings.Join(port.Features, ", "), max(12, width-16), "…")))
-				}
-				if len(port.Dependencies) > 0 {
-					lines = append(lines, p.faint.Render("     depends:  "+ansi.Truncate(strings.Join(port.Dependencies, ", "), max(12, width-16), "…")))
-				}
-				if port.PackageURL != "" {
-					lines = append(lines, p.faint.Render("     details:  "+ansi.Truncate(port.PackageURL, max(12, width-16), "…")))
-				}
+				lines = append(lines, p.faint.Render("     "+fmt.Sprintf("%d version%s · enter to pick one · esc to return", len(pkg.Candidates), plural(len(pkg.Candidates)))))
 			}
 		}
 	}
-	return append(lines, "", p.faint.Render("/ search website   enter/i install   f features   a install by name   n next page of results"))
+	return append(lines, "", p.faint.Render(model.packageHint()))
+}
+
+// providerSummary lists the providers offering a package, so one merged row can
+// still show that both vcpkg and conan have it.
+func providerSummary(pkg deps.Package) string {
+	seen := map[string]bool{}
+	var names []string
+	for _, candidate := range pkg.Candidates {
+		provider := fallback(candidate.Provider, "vcpkg")
+		if seen[provider] {
+			continue
+		}
+		seen[provider] = true
+		names = append(names, provider)
+	}
+	if len(names) == 0 {
+		return "no versions"
+	}
+	return strings.Join(names, " + ")
+}
+
+func plural(count int) string {
+	if count == 1 {
+		return ""
+	}
+	return "s"
 }
 
 func (model dashboardModel) buildLines(p palette, width int) []string {
@@ -2320,6 +2419,18 @@ func (model dashboardModel) selectableRow(p palette, index int, row string) stri
 	return p.muted.Render("  " + row)
 }
 
+// selectableRowHighlighted renders a row for a version the user explicitly
+// requested, keeping the cursor treatment but marking it in the accent colour.
+func (model dashboardModel) selectableRowHighlighted(p palette, index int, row string) string {
+	if index == model.cursor && model.focus == focusContent {
+		return p.selected.Render("› " + row + " ")
+	}
+	if index == model.cursor {
+		return p.text.Render("  " + row)
+	}
+	return p.accent.Render("  " + row)
+}
+
 func emptyState(p palette, title, detail string) []string {
 	return []string{"", p.muted.Render("  ◌  ") + p.title.Render(title), p.faint.Render("     " + detail)}
 }
@@ -2344,9 +2455,9 @@ func (model dashboardModel) helpView(p palette, width, height int) string {
 		keyValue(p, "↑ ↓ / j k", "navigate routes or rows"), keyValue(p, "tab / ← →", "switch navigation and content focus"),
 		keyValue(p, "1 … 9 / 0", "jump directly to a screen"), keyValue(p, "b", "build the active profile"),
 		keyValue(p, "r", "refresh configuration and probes"), keyValue(p, "p", "toggle debug/release profile"),
-		keyValue(p, "/", "search the official vcpkg.io index"), keyValue(p, "enter / i", "run the selected screen action"),
+		keyValue(p, "/", "search the vcpkg.io and conan.center indexes"), keyValue(p, "enter / i", "run the selected screen action"),
 		keyValue(p, "toolchains", "enter connect · e environment · c CUDA · v Vulkan"),
-		keyValue(p, "tests", "enter job/file · g group · a all · f view"), keyValue(p, "packages", "f features · a install · d remove"),
+		keyValue(p, "tests", "enter job/file · g group · a all · f view"), keyValue(p, "packages", "enter choose version · esc go back · f features · a install · d remove"),
 		keyValue(p, "targets", "enter build · f force build (skip availability check)"), keyValue(p, "tasks", "enter preview · y confirm · n cancel"),
 		keyValue(p, "q", "leave Project Console"), "", p.faint.Render("Inputs: enter saves · esc cancels · ctrl+u clears · ctrl+w deletes a word"),
 	}
@@ -2482,4 +2593,13 @@ func sortedPackageNames(values map[string]config.Package) []string {
 	}
 	sort.Strings(names)
 	return names
+}
+
+// providerOf names the package manager backing a configured package. An empty
+// provider means vcpkg, the historical default.
+func providerOf(values map[string]config.Package, name string) string {
+	if pkg, ok := values[name]; ok && pkg.Provider != "" {
+		return pkg.Provider
+	}
+	return "vcpkg"
 }

@@ -150,6 +150,10 @@ func taskSettingValue(cfg config.Config, key string) string {
 		return cfg.Vcpkg.Root
 	case "vcpkg.triplet":
 		return cfg.Vcpkg.Triplet
+	case "conan.root":
+		return cfg.Conan.Root
+	case "conan.profile":
+		return cfg.Conan.Profile
 	}
 	return ""
 }
@@ -286,6 +290,10 @@ func applyTaskSetting(cfg *config.Config, key, value string) error {
 		cfg.Vcpkg.Root = value
 	case "vcpkg.triplet":
 		cfg.Vcpkg.Triplet = value
+	case "conan.root":
+		cfg.Conan.Root = value
+	case "conan.profile":
+		cfg.Conan.Profile = value
 	default:
 		return fmt.Errorf("task cannot set %q", key)
 	}
@@ -293,7 +301,7 @@ func applyTaskSetting(cfg *config.Config, key, value string) error {
 }
 
 func applyTaskSettingAt(cfg *config.Config, path, key, value string) error {
-	if key == "vcpkg.root" && value != "" && !filepath.IsAbs(value) {
+	if (key == "vcpkg.root" || key == "conan.root") && value != "" && !filepath.IsAbs(value) {
 		root, err := filepath.Abs(filepath.Dir(path))
 		if err != nil {
 			return err

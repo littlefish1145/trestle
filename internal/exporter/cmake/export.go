@@ -280,8 +280,12 @@ func (g *generator) emitDependency(name string, dep config.Dependency) {
 		g.line("target_link_libraries(%s %s %s)", quote(name), scope, strings.Join(mapStrings(pkg.Libraries, quote), " "))
 	}
 	if len(pkg.IncludeDirs) == 0 && len(pkg.Defines) == 0 && len(pkg.LibraryDirs) == 0 && len(pkg.Libraries) == 0 {
-		g.warnings = append(g.warnings, fmt.Sprintf("package %q resolves its usage through vcpkg at build time; only a comment was exported", dep.Package))
-		g.line("# usage is resolved by trestle's vcpkg integration at build time")
+		provider := pkg.Provider
+		if provider == "" {
+			provider = "vcpkg"
+		}
+		g.warnings = append(g.warnings, fmt.Sprintf("package %q resolves its usage through %s at build time; only a comment was exported", dep.Package, provider))
+		g.line("%s", "# usage is resolved by trestle's "+provider+" integration at build time")
 	}
 }
 

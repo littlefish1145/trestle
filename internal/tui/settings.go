@@ -14,7 +14,8 @@ func (model dashboardModel) settingsGroups() []settingsGroup {
 		{"project.", "Project", "name and workspace identity"},
 		{"build.", "Build", "output directories, language standards and flags"},
 		{"toolchain.", "Toolchain & SDKs", "compilers, environment, CUDA and Vulkan"},
-		{"vcpkg.", "Dependencies", "vcpkg root, target triplet and linkage"},
+		{"vcpkg.", "vcpkg", "vcpkg root, target triplet and linkage"},
+		{"conan.", "conan", "conan home, build root, profile and options"},
 		{"package.", "Release", "archive output"},
 	}
 	for _, name := range sortedTargetNames(model.editableConfig().Targets) {

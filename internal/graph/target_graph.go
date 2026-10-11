@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"trestle/internal/config"
+	"trestle/internal/deps/conan"
 	"trestle/internal/deps/vcpkg"
 	"trestle/internal/fsx"
 	"trestle/internal/model"
@@ -201,7 +202,17 @@ func resolveTarget(project *model.ResolvedProject, id model.TargetID) error {
 	return nil
 }
 
+// resolvePackage dispatches on the configured provider so vcpkg and conan
+// packages resolve through their own client while returning the same neutral
+// usage. Undeclared providers keep the historical vcpkg behavior.
 func resolvePackage(ctx context.Context, cfg config.Config, pkg config.Package) (model.Usage, error) {
+	if pkg.Provider == "conan" {
+		resolved, err := (conan.Resolver{Root: cfg.Conan.Root, BuildRoot: conanBuildRoot(cfg), Profile: cfg.Build.Profile}).Resolve(ctx, pkg)
+		if err != nil {
+			return model.Usage{}, fmt.Errorf("package %s: %w", pkg.Port, err)
+		}
+		return resolved.Usage, nil
+	}
 	if pkg.Triplet == "" || pkg.Triplet == "auto" {
 		pkg.Triplet = cfg.Vcpkg.Triplet
 	}
@@ -210,6 +221,16 @@ func resolvePackage(ctx context.Context, cfg config.Config, pkg config.Package) 
 		return model.Usage{}, fmt.Errorf("package %s: %w", pkg.Port, err)
 	}
 	return resolved.Usage, nil
+}
+
+// conanBuildRoot returns where conan install output folders live: the build
+// directory's parent, so per-profile conan-<profile> outputs sit beside the
+// ordinary build tree. A dedicated [conan].build_root can override it later.
+func conanBuildRoot(cfg config.Config) string {
+	if cfg.Build.BuildDir != "" {
+		return filepath.Dir(cfg.Build.BuildDir)
+	}
+	return ""
 }
 
 func mergeUsage(left, right model.Usage) model.Usage {

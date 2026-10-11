@@ -123,6 +123,11 @@ func Validate(cfg Config) error {
 			}
 		}
 	}
+	for name, pkg := range cfg.Packages {
+		if err := validatePackageProvider(name, pkg); err != nil {
+			return err
+		}
+	}
 	for name, task := range cfg.Tasks {
 		if len(task.Command) > 0 && strings.TrimSpace(task.Command[0]) == "" {
 			return fmt.Errorf("task %q has an empty command", name)
@@ -162,9 +167,27 @@ func Validate(cfg Config) error {
 	return nil
 }
 
+// validatePackageProvider accepts the built-in providers. The shared Packages
+// page renders whichever provider is configured, a Conan package must name a
+// conan recipe reference (name/version[@user/channel]), and "manual" declares
+// hand-written usage paths instead of a package-manager lookup.
+func validatePackageProvider(name string, pkg Package) error {
+	switch pkg.Provider {
+	case "", "vcpkg", "manual":
+		return nil
+	case "conan":
+		if pkg.Version != "" && strings.Contains(pkg.Version, "[") {
+			return fmt.Errorf("package %q: conan features belong on the reference name, not the version", name)
+		}
+		return nil
+	default:
+		return fmt.Errorf("package %q uses unsupported provider %q; use vcpkg or conan", name, pkg.Provider)
+	}
+}
+
 func taskSettingAllowed(key string) bool {
 	switch key {
-	case "build.profile", "toolchain.c", "toolchain.cxx", "toolchain.msvc", "toolchain.mode", "toolchain.wsl_distribution", "vcpkg.root", "vcpkg.triplet":
+	case "build.profile", "toolchain.c", "toolchain.cxx", "toolchain.msvc", "toolchain.mode", "toolchain.wsl_distribution", "vcpkg.root", "vcpkg.triplet", "conan.root", "conan.profile":
 		return true
 	}
 	return false

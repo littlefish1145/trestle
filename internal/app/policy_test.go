@@ -206,6 +206,44 @@ func TestTaskRunsInPreviewedDirectoryAndReportsSavedChanges(t *testing.T) {
 	}
 }
 
+// Tasks may pin the conan installation just like they pin vcpkg's: the value
+// is allowed by validation, previewed, applied, and stored.
+func TestTaskMayPinConanInstallation(t *testing.T) {
+	t.Setenv("TRESTLE_TASK_TEST_HELPER", "1")
+	root := t.TempDir()
+	path := filepath.Join(root, "trestle.toml")
+	cfg := config.Default("demo")
+	cfg.Tasks = map[string]config.Task{"pin-conan": {
+		Command: []string{os.Args[0], "-test.run=^TestTaskHelperProcess$"},
+		Set: map[string]string{
+			"conan.root":    "conan-home",
+			"conan.profile": "debug-x86",
+		},
+	}}
+	if err := config.Save(path, cfg); err != nil {
+		t.Fatal(err)
+	}
+	preview, err := PreviewTask(path, "pin-conan")
+	if err != nil {
+		t.Fatalf("conan settings must be previewable: %v", err)
+	}
+	var output []string
+	if err := ExecuteTaskPreview(context.Background(), path, "pin-conan", preview, func(line string) { output = append(output, line) }); err != nil {
+		t.Fatalf("conan settings must apply: %v\n%s", err, strings.Join(output, "\n"))
+	}
+	loaded, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Conan.Profile != "debug-x86" {
+		t.Fatalf("conan.profile was not saved: %+v", loaded.Conan)
+	}
+	// A relative conan.root resolves against the project, like vcpkg.root.
+	if want := filepath.Join(root, "conan-home"); loaded.Conan.Root != want {
+		t.Fatalf("conan.root = %q, want %q", loaded.Conan.Root, want)
+	}
+}
+
 func TestTaskTimeoutAndCancellationKeepConfigUnchanged(t *testing.T) {
 	t.Setenv("TRESTLE_TASK_TEST_HELPER", "1")
 	for _, tc := range []struct {

@@ -13,6 +13,7 @@ import (
 
 	"trestle/internal/condition"
 	"trestle/internal/config"
+	"trestle/internal/deps/conan"
 	"trestle/internal/deps/vcpkg"
 	"trestle/internal/model"
 	"trestle/internal/sdk/vulkan"
@@ -136,6 +137,9 @@ func (p *Probe) hasWSL(distribution string) bool {
 	return found
 }
 
+// hasPackage dispatches on the configured provider: conan packages check the
+// per-profile install output, everything else keeps the vcpkg resolution
+// (including manual path-only packages).
 func (p *Probe) hasPackage(name string) bool {
 	if found, ok := p.packages[name]; ok {
 		return found
@@ -145,6 +149,21 @@ func (p *Probe) hasPackage(name string) bool {
 		p.packageErrors[name] = "package is not declared in [packages]"
 		return false
 	}
+	var err error
+	if pkg.Provider == "conan" {
+		err = p.checkConanPackage(pkg)
+	} else {
+		err = p.checkVcpkgPackage(pkg)
+	}
+	if err != nil {
+		p.packageErrors[name] = err.Error()
+	}
+	found := err == nil
+	p.packages[name] = found
+	return found
+}
+
+func (p *Probe) checkVcpkgPackage(pkg config.Package) error {
 	if pkg.Triplet == "" || pkg.Triplet == "auto" {
 		pkg.Triplet = p.cfg.Vcpkg.Triplet
 	}
@@ -153,19 +172,35 @@ func (p *Probe) hasPackage(name string) bool {
 		root = filepath.Join(p.root, root)
 	}
 	resolved, err := (vcpkg.Resolver{Root: root, Profile: p.cfg.Build.Profile, CRTLinkage: p.cfg.Vcpkg.CRTLinkage, LibraryLinkage: p.cfg.Vcpkg.LibraryLinkage}).Resolve(p.ctx, pkg)
-	if err == nil {
-		if resolved.Method == vcpkg.ResolutionManual {
-			err = p.checkManualPackagePaths(pkg)
-		} else {
-			err = p.checkPackageUsagePaths(resolved.Usage)
-		}
-	}
 	if err != nil {
-		p.packageErrors[name] = err.Error()
+		return err
 	}
-	found := err == nil
-	p.packages[name] = found
-	return found
+	if resolved.Method == vcpkg.ResolutionManual {
+		return p.checkManualPackagePaths(pkg)
+	}
+	return p.checkPackageUsagePaths(resolved.Usage)
+}
+
+func (p *Probe) checkConanPackage(pkg config.Package) error {
+	if hasConanManualMetadata(pkg) {
+		return p.checkManualPackagePaths(pkg)
+	}
+	buildRoot := p.cfg.Build.BuildDir
+	if buildRoot != "" && !filepath.IsAbs(buildRoot) {
+		buildRoot = filepath.Join(p.root, buildRoot)
+	}
+	resolved, err := (conan.Resolver{Root: p.cfg.Conan.Root, BuildRoot: filepath.Dir(buildRoot), Profile: p.cfg.Build.Profile}).Resolve(p.ctx, pkg)
+	if err != nil {
+		return err
+	}
+	if resolved.Method == conan.ResolutionManual {
+		return p.checkManualPackagePaths(pkg)
+	}
+	return p.checkPackageUsagePaths(resolved.Usage)
+}
+
+func hasConanManualMetadata(pkg config.Package) bool {
+	return len(pkg.IncludeDirs) > 0 || len(pkg.LibraryDirs) > 0 || len(pkg.Libraries) > 0 || len(pkg.Defines) > 0
 }
 
 func (p *Probe) checkManualPackagePaths(pkg config.Package) error {

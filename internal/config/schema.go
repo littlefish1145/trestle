@@ -11,6 +11,7 @@ type Config struct {
 	Build             Build                     `toml:"build"`
 	Toolchain         Toolchain                 `toml:"toolchain"`
 	Vcpkg             Vcpkg                     `toml:"vcpkg"`
+	Conan             Conan                     `toml:"conan"`
 	CompilerPresets   map[string]CompilerPreset `toml:"compiler_presets"`
 	Targets           map[string]Target         `toml:"targets"`
 	Packages          map[string]Package        `toml:"packages"`
@@ -86,6 +87,20 @@ type Vcpkg struct {
 	Triplet        string `toml:"triplet"`
 	CRTLinkage     string `toml:"crt_linkage"`
 	LibraryLinkage string `toml:"library_linkage"`
+}
+
+// Conan selects the Conan 2 installation used by provider "conan" packages.
+// Root holds the conan home (cache) directory, BuildRoot is the parent folder
+// that receives per-profile conan-<profile> install outputs (defaulting to the
+// build directory's parent), and Profile is the profile conan resolves with
+// `conan profile detect`. Settings/Options are passed through as -s/-o on
+// every install so cross builds stay reproducible.
+type Conan struct {
+	Root      string            `toml:"root"`
+	BuildRoot string            `toml:"build_root"`
+	Profile   string            `toml:"profile"`
+	Settings  map[string]string `toml:"settings"`
+	Options   map[string]string `toml:"options"`
 }
 
 type Target struct {
