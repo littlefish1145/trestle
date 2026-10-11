@@ -24,7 +24,9 @@ func (DetectorImpl) DetectWithSetup(ctx context.Context, requested, setup string
 }
 
 func EnvironmentForSetup(ctx context.Context, setup string) map[string]string {
-	environment := environmentForSetup(ctx, setup)
+	// Best effort: these callers pass the environment on to a child tool, so an
+	// incomplete probe degrades it rather than failing the operation.
+	environment, _ := environmentForSetup(ctx, setup)
 	if root := visualStudioRootFromSetup(setup); root != "" {
 		if environment == nil {
 			environment = map[string]string{}
@@ -179,7 +181,8 @@ func EnvironmentForVcpkg(ctx context.Context, setup string, toolPaths ...string)
 			effectiveSetup = candidate
 		}
 	}
-	environment := environmentForSetup(ctx, effectiveSetup)
+	// Best effort as above: vcpkg receives whatever the probe produced.
+	environment, _ := environmentForSetup(ctx, effectiveSetup)
 	if root != "" {
 		if environment == nil {
 			environment = map[string]string{}
@@ -261,7 +264,11 @@ func (t Toolchain) List() []Toolchain { return []Toolchain{t} }
 
 func withMSVCEnvironment(ctx context.Context, candidate Toolchain, setup string) (Toolchain, error) {
 	setup = ResolveMSVCSetup(ctx, setup, candidate.Archiver, candidate.Linker, candidate.CC, candidate.CXX)
-	environment := msvcEnvironment(environmentForSetup(ctx, setup))
+	probed, probeErr := environmentForSetup(ctx, setup)
+	if probeErr != nil {
+		return Toolchain{}, fmt.Errorf("E_TOOLCHAIN_TIMEOUT: establishing the Visual Studio environment for %s did not complete: %w", candidate.CXX, probeErr)
+	}
+	environment := msvcEnvironment(probed)
 	if environment["INCLUDE"] == "" || environment["LIB"] == "" {
 		return Toolchain{}, fmt.Errorf("E_MSVC_ENVIRONMENT_NOT_FOUND: compiler %s targets the MSVC ABI, but no valid Visual Studio x64 C++ environment was found", candidate.CXX)
 	}
@@ -408,20 +415,30 @@ func visualStudioRootFromToolPath(path string) string {
 	return ""
 }
 
-func environmentForSetup(ctx context.Context, setup string) map[string]string {
+// environmentForSetup returns the variables a setup script contributes. A
+// nil map with a nil error means the script ran and produced no usable
+// environment; a non-nil error means the probe itself did not complete, so the
+// caller can report a timeout rather than claiming the tools are absent.
+func environmentForSetup(ctx context.Context, setup string) (map[string]string, error) {
 	if setup == "" {
 		return visualStudioEnvironment(ctx)
 	}
 	if _, err := os.Stat(setup); err != nil {
-		return nil
+		return nil, nil
 	}
 	command := exec.CommandContext(ctx, "cmd.exe", "/d", "/c", "call vcvars64.bat >nul && set")
 	command.Dir = filepath.Dir(setup)
 	output, err := command.Output()
 	if err != nil {
-		return nil
+		// A deadline that expires mid-probe kills cmd.exe, and reporting that
+		// as "no Visual Studio environment" sends the user to reinstall tools
+		// that are already present.
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
+		return nil, nil
 	}
-	return parseSetupEnvironment(string(output))
+	return parseSetupEnvironment(string(output)), nil
 }
 
 func parseSetupEnvironment(output string) map[string]string {
@@ -449,32 +466,41 @@ var requiredEnvironment = map[string]bool{
 	"UCRTVERSION":        true,
 }
 
-func visualStudioEnvironment(ctx context.Context) map[string]string {
+// visualStudioEnvironment derives the MSVC environment from the newest Visual
+// Studio installation, reporting an error only when the probing itself was cut
+// short; no installation simply yields no environment.
+func visualStudioEnvironment(ctx context.Context) (map[string]string, error) {
 	if runtime.GOOS != "windows" {
-		return nil
+		return nil, nil
 	}
 	vswhere := filepath.Join(os.Getenv("ProgramFiles(x86)"), "Microsoft Visual Studio", "Installer", "vswhere.exe")
 	if _, err := os.Stat(vswhere); err != nil {
-		return nil
+		return nil, nil
 	}
 	output, err := exec.CommandContext(ctx, vswhere, "-latest", "-products", "*", "-requires", "Microsoft.VisualStudio.Component.VC.Tools.x86.x64", "-property", "installationPath").CombinedOutput()
 	if err != nil {
-		return nil
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
+		return nil, nil
 	}
 	installation := strings.TrimSpace(string(output))
 	if installation == "" {
-		return nil
+		return nil, nil
 	}
 	devcmd := filepath.Join(installation, "Common7", "Tools", "VsDevCmd.bat")
 	if _, err := os.Stat(devcmd); err != nil {
-		return nil
+		return nil, nil
 	}
 	command := exec.CommandContext(ctx, "cmd.exe", "/d", "/c", fmt.Sprintf("call %s -arch=x64 >nul && set", devcmd))
 	environment, err := command.Output()
 	if err != nil {
-		return nil
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
+		return nil, nil
 	}
-	return parseSetupEnvironment(string(environment))
+	return parseSetupEnvironment(string(environment)), nil
 }
 
 func findArchiverInEnvironment(kind Kind, compiler string, environment map[string]string) string {

@@ -2,11 +2,13 @@ package toolchain
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 func requireWindows(t *testing.T) {
@@ -120,8 +122,60 @@ func TestEnvironmentForSetupHandlesQuotedPath(t *testing.T) {
 	if err := os.WriteFile(setup, []byte(data), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	environment := environmentForSetup(context.Background(), setup)
+	environment, err := environmentForSetup(context.Background(), setup)
+	if err != nil {
+		t.Fatalf("environment probe failed: %v", err)
+	}
 	if environment["INCLUDE"] != `C:\ABI SDK\include` || environment["LIB"] != `C:\ABI SDK\lib` || !strings.HasPrefix(environment["PATH"], `C:\ABI SDK\bin;`) {
 		t.Fatalf("setup environment was not captured: %#v", environment)
+	}
+}
+
+// A probe that the caller's deadline kills must report itself as incomplete.
+// Reporting it as a missing environment told users to reinstall Visual Studio
+// when their tools were present and only the detection budget had run out.
+func TestEnvironmentForSetupReportsKilledProbeAsError(t *testing.T) {
+	requireWindows(t)
+
+	root := filepath.Join(t.TempDir(), "Visual Studio")
+	setup := filepath.Join(root, "VC", "Auxiliary", "Build", "vcvars64.bat")
+	if err := os.MkdirAll(filepath.Dir(setup), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// A script that outlives the deadline below, so the kill lands mid-probe.
+	// The short ping also keeps the test quick: cmd.exe's output pipe stays
+	// open until this grandchild exits, so the probe only returns once it does.
+	data := "@echo off\r\nping -n 3 127.0.0.1 >nul\r\nset INCLUDE=C:\\ABI SDK\\include\r\nset LIB=C:\\ABI SDK\\lib\r\n"
+	if err := os.WriteFile(setup, []byte(data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+	environment, err := environmentForSetup(ctx, setup)
+	if err == nil {
+		t.Fatalf("killed probe reported success with environment %#v", environment)
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("killed probe reported %v, want a deadline error", err)
+	}
+}
+
+// A setup script that runs to completion but sets nothing usable is a genuine
+// absence of environment, so it must stay an error-free nil result rather than
+// being reported as a timeout.
+func TestEnvironmentForSetupTreatsEmptyResultAsAbsent(t *testing.T) {
+	requireWindows(t)
+
+	setup := filepath.Join(t.TempDir(), "vcvars64.bat")
+	if err := os.WriteFile(setup, []byte("@echo off\r\necho nothing useful\r\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	environment, err := environmentForSetup(context.Background(), setup)
+	if err != nil {
+		t.Fatalf("empty environment reported as failure: %v", err)
+	}
+	if environment["INCLUDE"] != "" || environment["LIB"] != "" {
+		t.Fatalf("unexpected environment: %#v", environment)
 	}
 }

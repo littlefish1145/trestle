@@ -436,7 +436,13 @@ func (p *Probe) resolveToolchain() (toolchain.Toolchain, error) {
 		return p.toolchainResult, p.toolchainError
 	}
 	p.toolchainChecked = true
-	ctx, cancel := context.WithTimeout(p.ctx, 8*time.Second)
+	// Detection runs several child tools: the cached inventory may be cold,
+	// Visual Studio discovery queries vswhere, and the MSVC environment waits
+	// on vcvars64.bat. On a loaded machine that chain needs real headroom;
+	// cutting it short used to surface as a bogus "no Visual Studio
+	// environment" message, so the budget stays generous and an overrun is
+	// reported as a timeout instead.
+	ctx, cancel := context.WithTimeout(p.ctx, 20*time.Second)
 	defer cancel()
 	p.toolchainResult, p.toolchainError = toolchain.DetectConfigured(ctx, toolchain.Request{
 		Mode:            p.cfg.Toolchain.Mode,
