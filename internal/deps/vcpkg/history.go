@@ -353,7 +353,15 @@ func (client Client) ResolveVersion(ctx context.Context, name, version string) (
 		}
 		return nil, fmt.Errorf("E_VCPKG_HISTORY: %s has no version %s%s", name, version, suffix)
 	}
-	return matched, nil
+	if wantedPort >= 0 {
+		// An explicit "#n" pins one revision, so at most one entry can match.
+		return matched, nil
+	}
+	// Without a "#n" the request names a version, and a version can have
+	// several port revisions. Only the newest is the one the user meant; the
+	// others are packaging fixes for the same upstream release and installing
+	// them would silently pick a different one on each run.
+	return matched[:1], nil
 }
 
 // splitPortVersion separates a "11.0.2#3" request into its version and
