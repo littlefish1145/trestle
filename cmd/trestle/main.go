@@ -136,6 +136,9 @@ func run(command string, args []string) (result error) {
 			set.BoolVar(&install, "install", false, "install ports")
 			set.StringVar(&portsText, "ports", "", "comma-separated ports")
 			set.StringVar(&vcpkgTriplet, "triplet", "", "vcpkg triplet")
+		case "export-cmake":
+			output = set.String("output", "CMakeLists.txt", "output path relative to the project")
+			set.BoolVar(&force, "force", false, "overwrite an existing CMakeLists.txt")
 		}
 	}
 	if err := set.Parse(args); err != nil {
@@ -230,6 +233,9 @@ func run(command string, args []string) (result error) {
 		return err
 	case "import-xmake":
 		return app.ImportXmake(ctx, path, func(line string) { fmt.Println(line) })
+	case "export-cmake":
+		_, err := app.ExportCMake(ctx, path, *output, force, func(line string) { fmt.Println(line) })
+		return err
 	case "package":
 		return app.PackageWithProgress(ctx, path, *output, func(line string) { fmt.Println(line) })
 	case "release":
@@ -378,6 +384,8 @@ func usage() {
 	fmt.Println("  trestle test [-C dir] [-job name | -group name | -file source | -all]")
 	fmt.Println("  trestle import [-C dir]          import CMake through the File API")
 	fmt.Println("  trestle import-xmake [-C dir]    import Xmake targets (new and legacy Xmake)")
+	fmt.Println("  trestle export-cmake [-C dir] [-output CMakeLists.txt] [-force]")
+	fmt.Println("                                 reverse-export trestle.toml to CMakeLists.txt (experimental)")
 	fmt.Println("  trestle package [-C dir] [-output dist/app.zip]")
 	fmt.Println("  trestle release [-C dir] [-optimization balanced|speed|size|custom:name] [-targets app,tool] [-output dist/app.zip]")
 	fmt.Println("  trestle doctor [-C dir]")

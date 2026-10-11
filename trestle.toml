@@ -21,7 +21,7 @@ schema_version = 7
 [toolchain]
   msvc = "14.30~14.50"
   c = "clang-cl"
-  cxx = "clang-cl"
+  cxx = "g++"
   archiver = "auto"
   linker = "auto"
   setup = ""

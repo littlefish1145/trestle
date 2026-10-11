@@ -57,6 +57,9 @@ type registryPort struct {
 	Dependencies   json.RawMessage `json:"Dependencies"`
 }
 
+// Search returns every matching port when limit is zero or negative, so a
+// query that matches many ports is never silently truncated. Callers that need
+// a bounded view still pass an explicit positive limit.
 func (registry WebRegistry) Search(ctx context.Context, query string, limit int) ([]Port, error) {
 	ports, err := registry.load(ctx)
 	if err != nil {
@@ -99,10 +102,11 @@ func filterPorts(ports []Port, query string, limit int) []Port {
 		}
 		return ranked[i].port.Name < ranked[j].port.Name
 	})
-	if limit <= 0 {
-		limit = 50
+	if limit > 0 {
+		limit = min(limit, len(ranked))
+	} else {
+		limit = len(ranked)
 	}
-	limit = min(limit, len(ranked))
 	result := make([]Port, limit)
 	for index := range result {
 		result[index] = ranked[index].port

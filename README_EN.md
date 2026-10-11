@@ -25,6 +25,7 @@ Trestle brings compiler discovery, dependency resolution, project import, Ninja 
 - C/C++ include dependency tracking for correct incremental rebuilds, including wrapper files that include implementation sources.
 - vcpkg search, installation, transitive metadata, triplets, CRT/linkage handling, pkg-config parsing, and runtime DLL deployment.
 - Native CMake File API and Xmake import.
+- Reverse export (experimental): render `trestle.toml` as an equivalent `CMakeLists.txt` with matching targets, scopes, and tests; Trestle-only sections stay as comments.
 - Test selection by job, group, owning source file, or the complete suite.
 - Release workflows with built-in or custom optimization presets and ZIP packaging of outputs and runtime dependencies.
 - `compile_commands.json` for VS Code/clangd and `.trestle/commands.json` for editor automation.
@@ -104,6 +105,7 @@ trestle test --file FILE        Run the test that owns a source file
 trestle test --all              Run the complete test suite
 trestle import                  Select Xmake or CMake import automatically
 trestle import-xmake            Import an Xmake project
+trestle export-cmake            Reverse-export trestle.toml to CMakeLists.txt (experimental; -force overwrites)
 trestle release                 Build and create a release ZIP
 trestle vcpkg --search QUERY    Search vcpkg ports
 trestle vcpkg --install --ports fmt,zlib

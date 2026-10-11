@@ -25,6 +25,7 @@ Trestle 把编译器发现、依赖解析、项目导入、Ninja 构建、测试
 - 跟踪 C/C++ include 依赖，源文件或 wrapper include 变化会触发正确的增量重编译。
 - 集成 vcpkg 在线搜索、安装、传递依赖、triplet、CRT/linkage、pkg-config 和运行时 DLL 部署。
 - 原生导入 CMake File API 与 Xmake 项目。
+- 反向导出（实验）：将 `trestle.toml` 生成等价的 `CMakeLists.txt`，目标、作用域与测试一一对应，Trestle 专有段落以注释保留。
 - 测试支持单个 job、分组、源文件归属和全部运行。
 - Release 页面/命令支持内置或自定义优化预设，并将目标及运行时依赖打包为 ZIP。
 - 为 VS Code/clangd 生成 `compile_commands.json`，并生成 `.trestle/commands.json`。
@@ -104,6 +105,7 @@ trestle test --file FILE        运行拥有该源文件的测试
 trestle test --all              运行全部测试
 trestle import                  自动选择 Xmake 或 CMake 导入
 trestle import-xmake            导入 Xmake
+trestle export-cmake            反向导出 trestle.toml 至 CMakeLists.txt（实验；-force 覆盖已存在文件）
 trestle release                 构建并生成 ZIP 发布包
 trestle vcpkg --search QUERY    搜索 vcpkg 包
 trestle vcpkg --install --ports fmt,zlib

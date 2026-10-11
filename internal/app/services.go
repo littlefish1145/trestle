@@ -1038,7 +1038,7 @@ func SearchPackages(ctx context.Context, path, query string) ([]vcpkg.Port, erro
 	}
 	registry := vcpkg.WebRegistry{CachePath: filepath.Join(filepath.Dir(path), ".trestle", "cache", "vcpkg-index.json")}
 	client, clientErr := vcpkg.NewClient(cfg.Vcpkg.Root)
-	if ports, cached := registry.SearchCached(query, 50); cached {
+	if ports, cached := registry.SearchCached(query, 0); cached {
 		if clientErr == nil {
 			for index := range ports {
 				ports[index].Installed = client.IsInstalled(ports[index].Name)
@@ -1057,7 +1057,7 @@ func SearchPackages(ctx context.Context, path, query string) ([]vcpkg.Port, erro
 			return ports, nil
 		}
 	}
-	ports, webErr := registry.Search(ctx, query, 50)
+	ports, webErr := registry.Search(ctx, query, 0)
 	if webErr != nil {
 		return nil, fmt.Errorf("online search failed (%v); local fallback unavailable (%v)", webErr, clientErr)
 	}
@@ -1183,7 +1183,7 @@ func Vcpkg(ctx context.Context, root, query string, ports []string, triplet stri
 			}
 			return client.InstallWithProgress(ctx, ports, triplet, emit)
 		}
-		results, err := (vcpkg.WebRegistry{}).Search(ctx, query, 50)
+		results, err := (vcpkg.WebRegistry{}).Search(ctx, query, 0)
 		if err != nil {
 			return err
 		}

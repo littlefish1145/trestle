@@ -365,11 +365,14 @@ func (model dashboardModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		if value.err != nil {
 			model.lastError = value.err
 			model.setMessage(value.err.Error(), true)
+		} else if len(value.ports) == 0 {
+			model.packageResults = nil
+			model.setMessage("No matching packages found", false)
 		} else {
 			model.packageResults = value.ports
 			model.cursor = len(model.config.Packages)
 			model.scroll = max(0, model.cursor-2)
-			model.setMessage(fmt.Sprintf("Found %d matching packages", len(value.ports)), false)
+			model.setMessage(fmt.Sprintf("Found %d matching packages · n jumps to results, enter installs", len(value.ports)), false)
 		}
 	case mutationMessage:
 		model.mutating = false
@@ -708,6 +711,14 @@ func (model dashboardModel) handleKey(message tea.KeyPressMsg) (tea.Model, tea.C
 		}
 		model.route, model.focus = PackagesRoute, focusContent
 		model.openInput("install", "Install vcpkg package by name")
+	case "n":
+		if model.route == PackagesRoute && len(model.packageResults) > 0 {
+			model.cursor = len(model.config.Packages)
+			model.scroll = max(0, model.cursor-2)
+			model.setMessage("Cursor jumped to first search result", false)
+		} else if model.route == ToolchainsRoute || model.route == PresetsRoute {
+			model.openInput("save-preset", "Save current compiler setup as preset")
+		}
 	case "i":
 		if model.route == ImportRoute {
 			return model.startProjectImport()
@@ -804,10 +815,6 @@ func (model dashboardModel) handleKey(message tea.KeyPressMsg) (tea.Model, tea.C
 			model.openInput("apply-preset", "Apply compiler preset")
 		} else if model.route == SettingsRoute {
 			model.openInput("cxx-flags", "Set C++-only compiler flags")
-		}
-	case "n":
-		if model.route == ToolchainsRoute || model.route == PresetsRoute {
-			model.openInput("save-preset", "Save current compiler setup as preset")
 		}
 	case "o":
 		if model.route == ReleaseRoute {
@@ -909,7 +916,9 @@ func (model dashboardModel) handleInput(key tea.Key) (tea.Model, tea.Cmd) {
 				return model, nil
 			}
 			model.searching = true
-			model.setMessage("Searching vcpkg registry for “"+text+"”…", false)
+			model.packageResults = nil
+			model.cursor, model.scroll = max(0, len(model.config.Packages)-1), 0
+			model.setMessage("Searching vcpkg index for “"+text+"”…", false)
 			return model, tea.Batch(func() tea.Msg {
 				ports, err := model.services.SearchPackages(context.Background(), text)
 				return packageSearchMessage{ports: ports, err: err}
@@ -2118,6 +2127,10 @@ func (model dashboardModel) packageLines(p palette, width int) []string {
 		installer = "installer " + model.probe.VcpkgRoot
 	}
 	lines := []string{p.good.Render("● online index") + p.faint.Render("  vcpkg.io · "+installer), ""}
+	if model.searching {
+		lines = append(lines, p.accent.Render("◌ Searching vcpkg index…")+p.faint.Render("  esc cancels, results appear in place"))
+		lines = append(lines, "")
+	}
 	if len(names) == 0 {
 		lines = append(lines, p.muted.Render("No packages configured."))
 	} else {
@@ -2136,7 +2149,7 @@ func (model dashboardModel) packageLines(p palette, width int) []string {
 		}
 	}
 	if len(model.packageResults) > 0 {
-		lines = append(lines, "", p.faint.Render(" VCPKG.IO RESULTS · ENTER TO DOWNLOAD & INSTALL"))
+		lines = append(lines, "", p.faint.Render(fmt.Sprintf(" VCPKG.IO RESULTS · %d MATCHES · ENTER TO DOWNLOAD & INSTALL", len(model.packageResults))))
 		for index, port := range model.packageResults {
 			marker := "○"
 			_, configured := model.config.Packages[port.Name]
@@ -2166,7 +2179,7 @@ func (model dashboardModel) packageLines(p palette, width int) []string {
 			}
 		}
 	}
-	return append(lines, "", p.faint.Render("/ search website   enter/i install   f features   a install by name"))
+	return append(lines, "", p.faint.Render("/ search website   enter/i install   f features   a install by name   n next page of results"))
 }
 
 func (model dashboardModel) buildLines(p palette, width int) []string {
@@ -2412,7 +2425,7 @@ func (model dashboardModel) shortcutLine(p palette, width int) string {
 	case ImportRoute:
 		contextKeys = "↵ / i auto import CMake/Xmake   r refresh"
 	case PackagesRoute:
-		contextKeys = "/ web search   ↵ install   f features   a by name"
+		contextKeys = "/ web search   ↵ install   f features   a by name   n jump to results"
 	case TestsRoute:
 		contextKeys = "↵ selected   g group   a all   f files   m group"
 	case SettingsRoute:
