@@ -131,7 +131,7 @@ func acquire(ctx context.Context, resource, operation string, shared bool) (*Loc
 		data, _ := json.Marshal(LockOwner{canonical, operation, os.Getpid(), time.Now().UTC()})
 		if err := AtomicWrite(path+".json", data); err != nil {
 			lock.Close()
-			return nil, err
+			return nil, fmt.Errorf("writing lock owner metadata: %w", err)
 		}
 	}
 	return lock, nil

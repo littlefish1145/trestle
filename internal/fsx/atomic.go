@@ -34,7 +34,7 @@ func AtomicWrite(path string, data []byte) error {
 	if err = temporary.Close(); err != nil {
 		return err
 	}
-	return Replace(name, path)
+	return replaceWithRetry(name, path)
 }
 
 func Hash(value any) string {
