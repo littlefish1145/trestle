@@ -223,11 +223,24 @@ func sortPortVersions(versions []PortVersion) {
 	})
 }
 
+// compareVersionStrings reports a positive number when left is newer than
+// right. Dot-separated numbers compare numerically, so 1.10 is newer than 1.2.
+// Ports using the version-date or version-string scheme have no numeric parts:
+// those compare lexicographically, which orders ISO dates newest-first, and
+// they sort after every numeric version. The reverse comparison this used to
+// perform treated a newer date as smaller, so a date-scheme port listed its
+// history oldest-first and appeared to have no current release.
 func compareVersionStrings(left, right string) int {
 	leftParts, leftOK := versionNumbers(left)
 	rightParts, rightOK := versionNumbers(right)
 	if !leftOK || !rightOK {
-		return strings.Compare(right, left)
+		switch {
+		case leftOK:
+			return 1
+		case rightOK:
+			return -1
+		}
+		return strings.Compare(left, right)
 	}
 	for index := 0; index < len(leftParts) || index < len(rightParts); index++ {
 		a, b := 0, 0
