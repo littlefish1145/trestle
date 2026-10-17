@@ -1,3 +1,6 @@
+// Package cmake imports a CMake project into a trestle configuration by
+// configuring it with the CMake File API and translating the reply into
+// targets, tests, and toolchain settings.
 package cmake
 
 import (
@@ -14,6 +17,9 @@ import (
 	"trestle/internal/config"
 )
 
+// Result summarizes an import: the project name, how many targets were
+// written, any warnings, and the generated sources that still need
+// materializing.
 type Result struct {
 	Project          string
 	Targets          int
@@ -22,6 +28,8 @@ type Result struct {
 	generatedTargets []string
 }
 
+// Options carries the compiler choices and environment overrides used to
+// configure CMake during an import.
 type Options struct {
 	CCompiler   string
 	CXXCompiler string
@@ -106,6 +114,8 @@ func Import(ctx context.Context, sourceRoot, configPath string, progress func(st
 	return ImportWithOptions(ctx, sourceRoot, configPath, progress, Options{})
 }
 
+// ImportWithOptions is Import with explicit compiler and environment options,
+// used when trestle must pin the CMake configure to a specific toolchain.
 func ImportWithOptions(ctx context.Context, sourceRoot, configPath string, progress func(string), options Options) (Result, error) {
 	expected, snapshotErr := config.Snapshot(configPath)
 	if snapshotErr != nil {
