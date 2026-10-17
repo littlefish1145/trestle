@@ -39,6 +39,9 @@ type Package struct {
 	Dependencies []string
 }
 
+// Client drives the conan executable for one project: its install location,
+// the folder holding per-profile install outputs, the active profile, and the
+// settings, options, and environment that shape every invocation.
 type Client struct {
 	Executable  string
 	Root        string
@@ -137,6 +140,7 @@ func (client Client) run(ctx context.Context, code string, progress func(string)
 
 type writerFunc func([]byte) (int, error)
 
+// Write calls the wrapped function, letting it act as an io.Writer.
 func (fn writerFunc) Write(data []byte) (int, error) { return fn(data) }
 
 // Search looks recipe references up in conan and adapts them to the neutral
@@ -243,6 +247,8 @@ type conanTimestamp struct {
 	Text    string
 }
 
+// MarshalJSON writes the timestamp back in the shape conan expects, preferring
+// the original text when one was parsed.
 func (value conanTimestamp) MarshalJSON() ([]byte, error) {
 	if value.Text != "" {
 		return json.Marshal(value.Text)
@@ -250,6 +256,8 @@ func (value conanTimestamp) MarshalJSON() ([]byte, error) {
 	return json.Marshal(value.Seconds)
 }
 
+// UnmarshalJSON accepts either the epoch-seconds number or an ISO string,
+// recording whichever form conan sent.
 func (value *conanTimestamp) UnmarshalJSON(data []byte) error {
 	text := strings.Trim(strings.TrimSpace(string(data)), `"`)
 	if text == "" || text == "null" {
@@ -263,6 +271,7 @@ func (value *conanTimestamp) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+// Format renders the timestamp as a date, or "" when conan sent none.
 // Format renders the timestamp as a date, or "" when conan sent none.
 func (value conanTimestamp) Format() string {
 	if value.Text != "" {

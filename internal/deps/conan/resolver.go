@@ -33,13 +33,19 @@ type ResolvedPackage struct {
 	Method    ResolutionMethod
 }
 
+// ResolutionMethod identifies how a conan package's usage was derived.
 type ResolutionMethod string
 
+// The ways a conan package's usage can be determined: from generator output or
+// from manual include/library/define metadata.
 const (
 	ResolutionGenerators ResolutionMethod = "generators"
 	ResolutionManual     ResolutionMethod = "manual"
 )
 
+// Resolve returns the compile and link usage for pkg, either from its conan
+// install output or from manual metadata when the package declares its own
+// paths.
 func (resolver Resolver) Resolve(ctx context.Context, pkg config.Package) (ResolvedPackage, error) {
 	if hasManualMetadata(pkg) {
 		return ResolvedPackage{Name: pkg.Port, Reference: Reference(pkg), Usage: manualUsage(pkg), Method: ResolutionManual}, nil
