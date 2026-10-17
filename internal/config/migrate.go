@@ -126,6 +126,10 @@ func coerceString(value any) (string, bool) {
 	return "", false
 }
 
+// Migrate rewrites a trestle.toml document to the current schema version,
+// applying each versioned step in order, and returns the re-encoded TOML. A
+// document already at the current version is returned normalized but otherwise
+// unchanged.
 func Migrate(data []byte) ([]byte, error) {
 	var document map[string]any
 	if err := toml.Unmarshal(data, &document); err != nil {

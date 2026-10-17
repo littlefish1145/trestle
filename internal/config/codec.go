@@ -18,12 +18,17 @@ import (
 	"trestle/internal/toolchain"
 )
 
+// ErrNotFound reports that no trestle.toml exists at the requested path, so
+// callers such as init can distinguish an absent file from an unreadable one.
 var ErrNotFound = errors.New("trestle.toml not found")
 
 // DefaultToolchainCacheDir stores the discovered toolchain inventory inside the
 // project's ignored .trestle directory.
 const DefaultToolchainCacheDir = ".trestle/toolchain"
 
+// Default returns a minimal, valid configuration for a new project, with
+// sensible language standards, a single executable target and an auto-detected
+// toolchain.
 func Default(projectName string) Config {
 	if projectName == "" {
 		projectName = "trestle-project"
@@ -59,6 +64,8 @@ func Default(projectName string) Config {
 	}
 }
 
+// Load reads trestle.toml from path and decodes it. It returns ErrNotFound when
+// the file does not exist.
 func Load(path string) (Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -100,6 +107,8 @@ func Decode(path string, data []byte) (Config, error) {
 	return cfg, nil
 }
 
+// Fingerprint returns the SHA-256 hex digest of raw configuration bytes, used to
+// detect concurrent edits between loading and saving.
 func Fingerprint(data []byte) string { return fmt.Sprintf("%x", sha256.Sum256(data)) }
 
 // Root is the project directory holding trestle.toml, used to resolve
@@ -292,6 +301,9 @@ func cleanPaths(paths []string) []string {
 	return result
 }
 
+// Save validates cfg and writes it to path, but only when the file on disk still
+// matches the version cfg was loaded from. The staleness check is skipped when
+// path does not point at cfg's own source.
 func Save(path string, cfg Config) error {
 	expected := ""
 	absolute, _ := filepath.Abs(path)
@@ -307,6 +319,10 @@ func Save(path string, cfg Config) error {
 	return SaveExpected(path, cfg, expected)
 }
 
+// SaveExpected writes cfg to path after confirming the file still matches
+// expected, normalizing project-local paths relative to the file's directory and
+// preserving an unmodified pre-migration original as a backup. An empty expected
+// disables the staleness check.
 func SaveExpected(path string, cfg Config, expected string) error {
 	root := filepath.Dir(path)
 	canonical, err := fsx.Canonical(path)

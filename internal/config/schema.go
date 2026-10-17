@@ -1,8 +1,20 @@
+// Package config defines trestle's on-disk configuration model, validates it,
+// migrates older schema versions to the current one, and reads and writes
+// trestle.toml safely.
 package config
 
+// CurrentSchemaVersion is the schema revision this build writes. A file carrying
+// a newer number is rejected and an older one is migrated up to this version.
 const CurrentSchemaVersion = 7
+
+// DefaultFileName is the file trestle looks for when a project directory is
+// opened without an explicit configuration path.
 const DefaultFileName = "trestle.toml"
 
+// Config is the complete trestle.toml document: project identity, build and
+// toolchain settings, dependency providers, targets, rules and tasks. The
+// unexported fields record where the document was loaded from so a save can
+// detect concurrent edits.
 type Config struct {
 	sourcePath        string
 	sourceFingerprint string
@@ -20,10 +32,15 @@ type Config struct {
 	Tasks             map[string]Task           `toml:"tasks"`
 }
 
+// Project identifies the project, seeding default output names and the default
+// target when none is configured.
 type Project struct {
 	Name string `toml:"name"`
 }
 
+// Build holds settings that apply to every target unless a rule or a target
+// overrides them: the build profile, output directory, language standards and
+// the global compile and link flags.
 type Build struct {
 	Profile            string   `toml:"profile"`
 	BuildDir           string   `toml:"build_dir"`
@@ -68,6 +85,9 @@ type Toolchain struct {
 	Preset                string   `toml:"preset"`
 }
 
+// CompilerPreset is a named, reusable toolchain selection that rules and package
+// optimization settings can refer to instead of repeating compiler and flag
+// settings.
 type CompilerPreset struct {
 	C               string   `toml:"c"`
 	CXX             string   `toml:"cxx"`
@@ -82,6 +102,9 @@ type CompilerPreset struct {
 	LinkFlags       []string `toml:"link_flags"`
 }
 
+// Vcpkg selects the vcpkg installation and the triplet its ports are built for.
+// An empty Root falls back to VCPKG_ROOT, and Triplet may be "auto" to let
+// trestle choose one from the target architecture.
 type Vcpkg struct {
 	Root           string `toml:"root"`
 	Triplet        string `toml:"triplet"`
@@ -103,6 +126,8 @@ type Conan struct {
 	Options   map[string]string `toml:"options"`
 }
 
+// Target is one buildable unit: its sources, artifact type and output name, the
+// usage requirements it exposes, and the targets or packages it depends on.
 type Target struct {
 	When               string       `toml:"when"`
 	RequiresTools      []string     `toml:"requires_tools"`
@@ -161,12 +186,18 @@ type Task struct {
 	Set         map[string]string `toml:"set"`
 }
 
+// TaskSettingChange records one configuration field a task would set, showing
+// its current value and the value the task proposes, so a preview can be
+// reviewed before the task runs.
 type TaskSettingChange struct {
 	Field  string
 	Before string
 	After  string
 }
 
+// TaskPreview is the dry-run view of a task: the resolved working directory and
+// timeout, the settings it would change, and a fingerprint pinning the project
+// state the preview was computed against.
 type TaskPreview struct {
 	Task        Task
 	WorkingDir  string
@@ -175,12 +206,17 @@ type TaskPreview struct {
 	Fingerprint string
 }
 
+// Dependency names one edge in the target graph: exactly one of Target or
+// Package is set, and Scope controls how the dependency's usage propagates.
 type Dependency struct {
 	Target  string `toml:"target"`
 	Package string `toml:"package"`
 	Scope   string `toml:"scope"`
 }
 
+// Package declares a dependency supplied by a package manager or by hand. Port
+// is the upstream package name (defaulting to the map key), and the manual
+// fields supply usage directly when the provider exposes no metadata.
 type Package struct {
 	Provider     string   `toml:"provider"`
 	Port         string   `toml:"port"`
@@ -194,6 +230,8 @@ type Package struct {
 	RuntimeFiles []string `toml:"runtime_files"`
 }
 
+// PackageOutput configures the distributable archive built by the package
+// command: its format, destination, optimization preset and included targets.
 type PackageOutput struct {
 	Format       string   `toml:"format"`
 	Output       string   `toml:"output"`

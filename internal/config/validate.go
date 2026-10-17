@@ -9,6 +9,9 @@ import (
 	"trestle/internal/toolchain"
 )
 
+// Validate reports the first problem that would make cfg unusable, checking the
+// schema version, required fields, cross-references between targets, rules,
+// packages and tasks, and finally that the target graph has no cycle.
 func Validate(cfg Config) error {
 	if cfg.SchemaVersion != CurrentSchemaVersion {
 		if cfg.SchemaVersion > CurrentSchemaVersion {
