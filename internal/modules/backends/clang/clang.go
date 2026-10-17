@@ -1,3 +1,6 @@
+// Package clang implements the C++ modules backend for Clang. It scans with
+// clang-scan-deps and compiles module interfaces and their consumers with
+// Clang's -fmodule-file and --precompile flags.
 package clang
 
 import (
@@ -11,6 +14,8 @@ import (
 	"trestle/internal/modules/p1689"
 )
 
+// Backend implements the modules.Support contract for Clang, driving
+// clang-scan-deps for scanning and Clang's module flags for consumers.
 type Backend struct {
 	Compiler   string
 	Scanner    string
@@ -29,6 +34,8 @@ func (backend Backend) wrap(args []string) (string, []string) {
 	return backend.Runner, wrapped
 }
 
+// Scan returns the p1689 module dependencies of source by running
+// clang-scan-deps over the compiler invocation.
 func (backend Backend) Scan(ctx context.Context, source string) (p1689.Document, error) {
 	if backend.Scanner == "" {
 		return p1689.Document{}, fmt.Errorf("E_MODULE_SCAN_FAILED: clang-scan-deps is not configured")
@@ -50,6 +57,8 @@ func (backend Backend) Scan(ctx context.Context, source string) (p1689.Document,
 	return p1689.Decode(bytes.NewReader(output))
 }
 
+// CompileModule builds source into a precompiled module interface at output,
+// passing along the module files named in references.
 func (backend Backend) CompileModule(source, output string, references []modules.Reference) (string, []string, error) {
 	args := []string{"-std=" + backend.Standard, "--precompile", source, "-o", output}
 	consumerArgs, err := backend.ConsumerArgs(references)
@@ -62,6 +71,8 @@ func (backend Backend) CompileModule(source, output string, references []modules
 	return exe, args, nil
 }
 
+// CompileModuleObject compiles source into an object file while also emitting
+// the module dependency file next to it.
 func (backend Backend) CompileModuleObject(source, output string, references []modules.Reference) (string, []string, error) {
 	args := []string{"-std=" + backend.Standard, "-MMD", "-MF", output + ".d", "-c", source, "-o", output}
 	consumerArgs, err := backend.ConsumerArgs(references)
@@ -73,6 +84,8 @@ func (backend Backend) CompileModuleObject(source, output string, references []m
 	return exe, args, nil
 }
 
+// ConsumerArgs renders references as -fmodule-file flags so a consumer can
+// import the named modules.
 func (backend Backend) ConsumerArgs(references []modules.Reference) ([]string, error) {
 	result := make([]string, 0, len(references)*2)
 	for _, reference := range references {

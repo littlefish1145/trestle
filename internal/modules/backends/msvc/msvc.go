@@ -1,3 +1,6 @@
+// Package msvc implements the C++ modules backend for MSVC. It scans with
+// /scanDependencies and compiles module interfaces into IFC files with
+// /interface.
 package msvc
 
 import (
@@ -13,12 +16,16 @@ import (
 	"trestle/internal/modules/p1689"
 )
 
+// Backend implements the modules.Support contract for MSVC, using
+// /scanDependencies and the IFC output produced by /interface.
 type Backend struct {
 	Compiler string
 	Standard string
 	Options  []string
 }
 
+// Scan runs cl /scanDependencies and decodes the JSON dependency file it
+// writes.
 func (backend Backend) Scan(ctx context.Context, source string) (p1689.Document, error) {
 	directory, err := os.MkdirTemp("", "trestle-msvc-module-")
 	if err != nil {
@@ -42,6 +49,8 @@ func (backend Backend) Scan(ctx context.Context, source string) (p1689.Document,
 	return p1689.Decode(bytes.NewReader(data))
 }
 
+// CompileModule compiles a module interface with /interface, writing the IFC
+// beside output and attaching every reference as a /reference option.
 func (backend Backend) CompileModule(source, output string, references []modules.Reference) (string, []string, error) {
 	ifc := filepath.Join(filepath.Dir(output), filepath.Base(output)+".ifc")
 	args := []string{"/nologo", "/std:c++20", "/interface", "/c", source, "/Fo" + output, "/ifcOutput", ifc}
@@ -51,6 +60,8 @@ func (backend Backend) CompileModule(source, output string, references []modules
 	return backend.Compiler, append(args, backend.Options...), nil
 }
 
+// ConsumerArgs renders references as /reference options so consumers can
+// import the named interfaces.
 func (backend Backend) ConsumerArgs(references []modules.Reference) ([]string, error) {
 	result := make([]string, 0, len(references)*2)
 	for _, reference := range references {

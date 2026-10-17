@@ -1,3 +1,5 @@
+// Package gcc implements the C++ modules backend for GCC. It scans with
+// -fdeps-format=p1689r5 and compiles module interfaces through -fmodules-ts.
 package gcc
 
 import (
@@ -13,12 +15,16 @@ import (
 	"trestle/internal/modules/p1689"
 )
 
+// Backend implements the modules.Support contract for GCC, using -fmodules-ts
+// and the p1689r5 dependency format.
 type Backend struct {
 	Compiler string
 	Standard string
 	Options  []string
 }
 
+// Scan runs the compiler in dependency-scanning mode and decodes the p1689r5
+// file it writes.
 func (backend Backend) Scan(ctx context.Context, source string) (p1689.Document, error) {
 	directory, err := os.MkdirTemp("", "trestle-gcc-module-")
 	if err != nil {
@@ -41,6 +47,8 @@ func (backend Backend) Scan(ctx context.Context, source string) (p1689.Document,
 	return p1689.Decode(bytes.NewReader(data))
 }
 
+// CompileModule builds source into a module interface object at output,
+// referencing the already-built modules in references.
 func (backend Backend) CompileModule(source, output string, references []modules.Reference) (string, []string, error) {
 	args := []string{"-std=" + strings.TrimPrefix(backend.Standard, "c++"), "-fmodules-ts", "-c", source, "-o", output}
 	consumerArgs, err := backend.ConsumerArgs(references)
@@ -51,6 +59,8 @@ func (backend Backend) CompileModule(source, output string, references []modules
 	return backend.Compiler, append(args, backend.Options...), nil
 }
 
+// ConsumerArgs renders references as -fmodule-reference flags so GCC can find
+// imported module interfaces.
 func (backend Backend) ConsumerArgs(references []modules.Reference) ([]string, error) {
 	result := make([]string, 0, len(references))
 	for _, reference := range references {
