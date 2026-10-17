@@ -6,8 +6,11 @@ import (
 	"strings"
 )
 
+// CFamilyParser handles C, C++, Objective-C, and CUDA sources and headers,
+// including preprocessor conditionals and C++20 module declarations.
 type CFamilyParser struct{}
 
+// Accepts reports whether path has an extension belonging to the C family.
 func (p *CFamilyParser) Accepts(path string) bool {
 	switch strings.ToLower(filepath.Ext(path)) {
 	case ".c", ".h", ".cc", ".cpp", ".cxx", ".c++", ".hpp", ".hh", ".hxx", ".inl", ".ipp", ".m", ".mm", ".cu", ".ixx", ".cppm":
@@ -29,6 +32,10 @@ type conditionFrame struct {
 	branches     []conditionBranch
 }
 
+// Parse scans a C-family file token by token, tracking #if conditionals,
+// includes, symbols, entry points, tests, and modules. The returned info's
+// Confidence drops when a condition cannot be resolved from the request's
+// defines.
 func (p *CFamilyParser) Parse(request Request) (SourceInfo, error) {
 	data, err := os.ReadFile(request.Path)
 	if err != nil {

@@ -6,15 +6,27 @@ import (
 	"strings"
 )
 
+// RustParser handles .rs files, extracting use imports and #[test] functions.
 type RustParser struct{}
+
+// GoParser handles .go files, extracting import paths and Test-prefixed
+// functions.
 type GoParser struct{}
+
+// PythonParser handles .py and .pyw files, extracting import statements and
+// pytest-style test functions.
 type PythonParser struct{}
+
+// JavaScriptParser handles JavaScript and TypeScript sources, extracting import
+// and require calls along with test cases.
 type JavaScriptParser struct{}
 
+// Accepts reports whether path has a Rust .rs extension.
 func (p *RustParser) Accepts(path string) bool {
 	return strings.EqualFold(filepath.Ext(path), ".rs")
 }
 
+// Parse records the use imports and test functions found in a Rust file.
 func (p *RustParser) Parse(request Request) (SourceInfo, error) {
 	info, tokens, err := parseGeneric(request, LanguageRust)
 	if err != nil {
@@ -45,10 +57,12 @@ func (p *RustParser) Parse(request Request) (SourceInfo, error) {
 	return info, nil
 }
 
+// Accepts reports whether path has a .go extension.
 func (p *GoParser) Accepts(path string) bool {
 	return strings.EqualFold(filepath.Ext(path), ".go")
 }
 
+// Parse records the import paths and Test functions found in a Go file.
 func (p *GoParser) Parse(request Request) (SourceInfo, error) {
 	info, tokens, err := parseGeneric(request, LanguageGo)
 	if err != nil {
@@ -95,11 +109,13 @@ func (p *GoParser) Parse(request Request) (SourceInfo, error) {
 	return info, nil
 }
 
+// Accepts reports whether path is a Python .py or .pyw file.
 func (p *PythonParser) Accepts(path string) bool {
 	extension := strings.ToLower(filepath.Ext(path))
 	return extension == ".py" || extension == ".pyw"
 }
 
+// Parse records the imports and pytest-style tests found in a Python file.
 func (p *PythonParser) Parse(request Request) (SourceInfo, error) {
 	info, tokens, err := parseGeneric(request, LanguagePython)
 	if err != nil {
@@ -123,6 +139,7 @@ func (p *PythonParser) Parse(request Request) (SourceInfo, error) {
 	return info, nil
 }
 
+// Accepts reports whether path is a JavaScript or TypeScript source.
 func (p *JavaScriptParser) Accepts(path string) bool {
 	switch strings.ToLower(filepath.Ext(path)) {
 	case ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts":
@@ -132,6 +149,8 @@ func (p *JavaScriptParser) Accepts(path string) bool {
 	}
 }
 
+// Parse records the imports, require calls, and tests found in a JavaScript or
+// TypeScript file.
 func (p *JavaScriptParser) Parse(request Request) (SourceInfo, error) {
 	info, tokens, err := parseGeneric(request, languageFor(request.Path))
 	if err != nil {
