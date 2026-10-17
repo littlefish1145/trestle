@@ -12,6 +12,8 @@ import (
 	"trestle/internal/processx"
 )
 
+// Progress is a snapshot of a running build: how many edges have finished out
+// of the total, the percentage complete, and how many are running.
 type Progress struct {
 	Finished int
 	Total    int
@@ -19,15 +21,20 @@ type Progress struct {
 	Running  int
 }
 
+// EventSink receives build progress and output as they happen, letting a caller
+// render live status instead of waiting for the build to finish.
 type EventSink interface {
 	Progress(Progress)
 	Output(stream, text string)
 }
 
+// StatusSink is an EventSink that writes each event to a writer in a plain
+// line-oriented form.
 type StatusSink struct {
 	Out io.Writer
 }
 
+// Progress writes the build progress as a single status line.
 func (sink StatusSink) Progress(value Progress) {
 	if sink.Out == nil {
 		return
@@ -35,12 +42,16 @@ func (sink StatusSink) Progress(value Progress) {
 	fmt.Fprintf(sink.Out, "progress: %d/%d %d%% running=%d\n", value.Finished, value.Total, value.Percent, value.Running)
 }
 
+// Output writes a line of build output tagged with the stream it came from.
 func (sink StatusSink) Output(stream, text string) {
 	if sink.Out != nil && text != "" {
 		fmt.Fprintf(sink.Out, "%s: %s", stream, text)
 	}
 }
 
+// RunWithEvents runs executable with args and streams Ninja's progress to sink,
+// decoding the NINJA_STATUS lines Trestle injects. Output not recognised as
+// progress is forwarded to the sink, or to options.Stdout when no sink is set.
 func (runner Runner) RunWithEvents(ctx context.Context, executable string, args []string, options Options, sink EventSink) error {
 	path, err := exec.LookPath(executable)
 	if err != nil {
@@ -108,6 +119,8 @@ func (runner Runner) RunWithEvents(ctx context.Context, executable string, args 
 	return nil
 }
 
+// StatusDetail strips the NINJA_STATUS marker from a line and returns the human
+// readable remainder, such as the name of the file being built.
 func StatusDetail(line string) string {
 	start := strings.Index(line, "@@TRESTLE:")
 	if start < 0 {
@@ -121,6 +134,8 @@ func StatusDetail(line string) string {
 	return strings.TrimSpace(line[payloadStart+end+2:])
 }
 
+// ParseStatus extracts progress from a NINJA_STATUS line, reporting false when
+// the line carries no marker or a malformed payload.
 func ParseStatus(line string) (Progress, bool) {
 	start := strings.Index(line, "@@TRESTLE:")
 	if start < 0 {

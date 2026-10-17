@@ -1,3 +1,5 @@
+// Package runner executes the Ninja build tool and turns its status output into
+// progress events a caller can render.
 package runner
 
 import (
@@ -12,8 +14,12 @@ import (
 	"trestle/internal/diag"
 )
 
+// Runner runs an external build command, currently Ninja, honouring the context
+// so a build can be cancelled.
 type Runner struct{}
 
+// Options controls how a build command is launched: its working directory, the
+// extra environment, where its streams go, and an optional raw output sink.
 type Options struct {
 	Dir       string
 	Env       []string
@@ -22,6 +28,8 @@ type Options struct {
 	RawOutput io.Writer
 }
 
+// Run looks up executable on PATH and runs it with args, returning a diagnostic
+// when the tool is missing or the build fails.
 func (Runner) Run(ctx context.Context, executable string, args []string, options Options) error {
 	path, err := exec.LookPath(executable)
 	if err != nil {
