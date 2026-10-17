@@ -1,3 +1,6 @@
+// Package xmake imports an xmake project into a trestle configuration by
+// introspecting its targets, preferring xmake's JSON output and falling back to
+// the legacy text and per-target protocols.
 package xmake
 
 import (
@@ -35,6 +38,9 @@ type target struct {
 	Deps        []string `json:"deps"`
 }
 
+// UnmarshalJSON decodes one xmake target from its loose JSON shape, accepting
+// the alternative field spellings xmake emits and inferring a kind when none is
+// given.
 func (result *target) UnmarshalJSON(data []byte) error {
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(data, &fields); err != nil {
@@ -130,6 +136,8 @@ type commandRunner func(context.Context, string, string, ...string) ([]byte, err
 
 var legacyNamePattern = regexp.MustCompile(`^[A-Za-z0-9_.+@/-]+$`)
 
+// Parse decodes xmake's target metadata, accepting the aggregate JSON
+// envelope, a keyed or list collection, or a single target object.
 func Parse(data []byte) ([]target, error) {
 	payload, decodeErr := extractJSON(data)
 	if decodeErr != nil {
@@ -197,6 +205,8 @@ func parseTargetCollection(data []byte) ([]target, error) {
 	return list, nil
 }
 
+// ParseLegacyTarget reads the human-readable `xmake show -t <name>` text for
+// one target, used when the JSON protocol is unavailable.
 func ParseLegacyTarget(name string, data []byte) (target, error) {
 	result := target{Name: name}
 	section := ""
@@ -449,6 +459,8 @@ func formatAttempt(args []string, err error, output []byte) string {
 	return message
 }
 
+// Import introspects an xmake project and writes an equivalent trestle.toml,
+// preserving the existing file's unrelated sections.
 func Import(ctx context.Context, root, configPath string, progress func(string)) error {
 	expected, snapshotErr := config.Snapshot(configPath)
 	if snapshotErr != nil {
