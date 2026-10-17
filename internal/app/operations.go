@@ -216,28 +216,50 @@ func checkPackagePlatform(cfg config.Config) error {
 	return nil
 }
 
+// checkPackageTarget rejects vcpkg packages whose explicit triplet targets a
+// platform that does not match the resolved toolchain.
 func checkPackageTarget(cfg config.Config, tc toolchain.Toolchain) error {
-	osName, arch := toolchain.TargetPlatform(tc)
-	prefix := vcpkg.TripletFor(osName, arch)
-	if toolchain.TargetABI(tc) == "mingw" {
-		prefix = strings.Split(prefix, "-")[0] + "-mingw"
-	}
+	prefix, osName, arch := targetTripletPrefix(tc)
 	for name, pkg := range cfg.Packages {
 		if pkg.Provider != "vcpkg" {
 			continue
 		}
-		triplet := pkg.Triplet
-		if triplet == "" || triplet == "auto" {
-			triplet = cfg.Vcpkg.Triplet
-		}
-		lower := strings.ToLower(triplet)
-		known := strings.Contains(lower, "-windows") || strings.Contains(lower, "-mingw") || strings.Contains(lower, "-linux") || strings.Contains(lower, "-osx")
-		if !known {
+		triplet := packageTriplet(cfg, pkg)
+		if !isKnownTargetTriplet(triplet) {
 			continue
 		}
-		if !strings.HasPrefix(lower, prefix) {
+		if !strings.HasPrefix(strings.ToLower(triplet), prefix) {
 			return fmt.Errorf("E_VCPKG_TARGET_MISMATCH: package %s triplet %s does not match target %s/%s (%s); reinstall for %s or explicitly configure the matching compiler ABI", name, triplet, osName, arch, tc.CXX, prefix)
 		}
 	}
 	return nil
+}
+
+// targetTripletPrefix derives the vcpkg triplet prefix the toolchain targets,
+// along with the platform it names for error reporting. A mingw ABI rewrites the
+// architecture segment of the triplet accordingly.
+func targetTripletPrefix(tc toolchain.Toolchain) (prefix, osName, arch string) {
+	osName, arch = toolchain.TargetPlatform(tc)
+	prefix = vcpkg.TripletFor(osName, arch)
+	if toolchain.TargetABI(tc) == "mingw" {
+		prefix = strings.Split(prefix, "-")[0] + "-mingw"
+	}
+	return prefix, osName, arch
+}
+
+// packageTriplet resolves the effective vcpkg triplet for a package, falling
+// back to the project default when the package leaves it unset or automatic.
+func packageTriplet(cfg config.Config, pkg config.Package) string {
+	triplet := pkg.Triplet
+	if triplet == "" || triplet == "auto" {
+		triplet = cfg.Vcpkg.Triplet
+	}
+	return triplet
+}
+
+// isKnownTargetTriplet reports whether a triplet names a concrete target
+// platform, so unqualified and custom triplets are left unchecked.
+func isKnownTargetTriplet(triplet string) bool {
+	lower := strings.ToLower(triplet)
+	return strings.Contains(lower, "-windows") || strings.Contains(lower, "-mingw") || strings.Contains(lower, "-linux") || strings.Contains(lower, "-osx")
 }
