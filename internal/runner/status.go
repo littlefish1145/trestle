@@ -57,13 +57,27 @@ func (runner Runner) RunWithEvents(ctx context.Context, executable string, args 
 	if err != nil {
 		return fmt.Errorf("E_NINJA_NOT_FOUND: %q is required but was not found: %w", executable, err)
 	}
+	command, source, err := startStatusCommand(ctx, path, args, options)
+	if err != nil {
+		return err
+	}
+	if err := forwardStatus(command, source, options, sink); err != nil {
+		return err
+	}
+	return waitForCommand(ctx, command)
+}
+
+// startStatusCommand launches the build command with the NINJA_STATUS marker
+// injected into its environment and returns a reader over its standard output.
+// Raw output is teed so the caller still sees the unparsed stream.
+func startStatusCommand(ctx context.Context, path string, args []string, options Options) (*exec.Cmd, io.Reader, error) {
 	command := processx.Command(ctx, path, args...)
 	command.Dir = options.Dir
 	environment := append(os.Environ(), "NINJA_STATUS=@@TRESTLE:%f:%t:%p:%r@@")
 	command.Env = append(environment, options.Env...)
 	stdout, err := command.StdoutPipe()
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
 	command.Stderr = options.Stderr
 	if options.RawOutput != nil {
@@ -74,12 +88,19 @@ func (runner Runner) RunWithEvents(ctx context.Context, executable string, args 
 		}
 	}
 	if err := command.Start(); err != nil {
-		return err
+		return nil, nil, err
 	}
 	var source io.Reader = stdout
 	if options.RawOutput != nil {
 		source = io.TeeReader(stdout, options.RawOutput)
 	}
+	return command, source, nil
+}
+
+// forwardStatus reads the command output line by line, reporting recognised
+// NINJA_STATUS lines as progress and forwarding the rest to the sink. A read
+// failure waits for the command first so the process is still reaped.
+func forwardStatus(command *exec.Cmd, source io.Reader, options Options, sink EventSink) error {
 	reader := bufio.NewReader(source)
 	for {
 		line, readErr := reader.ReadString('\n')
@@ -90,25 +111,41 @@ func (runner Runner) RunWithEvents(ctx context.Context, executable string, args 
 		if line == "" && readErr == io.EOF {
 			break
 		}
-		text := strings.TrimSuffix(strings.TrimSuffix(line, "\n"), "\r")
-		if progress, ok := ParseStatus(text); ok {
-			if sink != nil {
-				sink.Progress(progress)
-			}
-			if detail := StatusDetail(text); detail != "" && sink != nil {
-				sink.Output("stdout", detail+"\n")
-			}
+		if emitStatusLine(line, options, sink) {
 			continue
-		}
-		if sink != nil {
-			sink.Output("stdout", line)
-		} else if options.Stdout != nil {
-			_, _ = io.WriteString(options.Stdout, line)
 		}
 		if readErr == io.EOF {
 			break
 		}
 	}
+	return nil
+}
+
+// emitStatusLine decodes one output line: a NINJA_STATUS line becomes progress
+// and any detail on sink, while any other text is written to sink or, when no
+// sink is set, to options.Stdout. It reports whether the line carried progress.
+func emitStatusLine(line string, options Options, sink EventSink) bool {
+	text := strings.TrimSuffix(strings.TrimSuffix(line, "\n"), "\r")
+	if progress, ok := ParseStatus(text); ok {
+		if sink != nil {
+			sink.Progress(progress)
+			if detail := StatusDetail(text); detail != "" {
+				sink.Output("stdout", detail+"\n")
+			}
+		}
+		return true
+	}
+	if sink != nil {
+		sink.Output("stdout", line)
+	} else if options.Stdout != nil {
+		_, _ = io.WriteString(options.Stdout, line)
+	}
+	return false
+}
+
+// waitForCommand waits for the command to finish, preferring a cancelled context
+// over the process exit and wrapping a non-zero exit as a build failure.
+func waitForCommand(ctx context.Context, command *exec.Cmd) error {
 	waitErr := command.Wait()
 	if ctx.Err() != nil {
 		return ctx.Err()
