@@ -14,10 +14,14 @@ import (
 	"trestle/internal/runlog"
 )
 
+// Doctor checks the project and its environment and prints a report to standard
+// output.
 func Doctor(path string) error {
 	return DoctorWithContext(context.Background(), path, func(line string) { fmt.Println(line) })
 }
 
+// DoctorWithContext runs the project diagnostics, reporting each check through
+// progress and returning the joined failures.
 func DoctorWithContext(ctx context.Context, path string, progress func(string)) error {
 	return runOperation(ctx, path, "doctor", progress, func(ctx context.Context, emit func(string)) error {
 		var failures []error

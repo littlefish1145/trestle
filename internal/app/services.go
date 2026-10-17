@@ -1,3 +1,6 @@
+// Package app implements the trestle operations behind the command line and the
+// interactive console: project setup, toolchain and package configuration,
+// manifest generation, building, testing, and packaging.
 package app
 
 import (
@@ -40,6 +43,9 @@ import (
 	"trestle/internal/toolchain/cuda"
 )
 
+// BuildResult reports what a generation run produced: the manifest path, the
+// profile, per-target output paths, extra runtime files, and the environment the
+// build needs.
 type BuildResult struct {
 	ConfigPath     string
 	Manifest       string
@@ -49,6 +55,8 @@ type BuildResult struct {
 	Environment    map[string]string
 }
 
+// Init creates a new project at root, writing a default trestle.toml, a starter
+// src/main.cpp, and a .gitignore when they are missing.
 func Init(root, name string) error {
 	if strings.TrimSpace(name) == "" {
 		absolute, err := filepath.Abs(root)
@@ -84,6 +92,9 @@ func Init(root, name string) error {
 	return nil
 }
 
+// Configure resolves the requested compiler, profile, package, CUDA, and module
+// settings into a portable trestle.toml, filling in an auto-detected vcpkg
+// triplet when needed.
 func Configure(path, compiler, c, profile, vcpkgRoot, triplet, msvc, cudaVersion, cudaMode, setup, moduleScanner string, modulesEnabled bool) error {
 	cfg, err := ensureProjectConfig(path)
 	if err != nil {
@@ -223,6 +234,7 @@ func cudaRoot(ctx context.Context, cfg config.Config) (string, error) {
 	return toolchain.ResolveCUDARoot(ctx, toolchainRequest(cfg))
 }
 
+// SetProfile stores the build profile, which must be "debug" or "release".
 func SetProfile(path, profile string) error {
 	if profile != "debug" && profile != "release" {
 		return fmt.Errorf("profile must be debug or release")
@@ -235,6 +247,8 @@ func SetProfile(path, profile string) error {
 	return config.Save(path, cfg)
 }
 
+// SetCompileFlags replaces the project-wide compile flags with the
+// whitespace-separated values in flags.
 func SetCompileFlags(path, flags string) error {
 	cfg, err := config.Load(path)
 	if err != nil {
@@ -244,6 +258,9 @@ func SetCompileFlags(path, flags string) error {
 	return config.Save(path, cfg)
 }
 
+// SetCompiler records a native C++ compiler selector, clearing any WSL or
+// environment setup and re-resolving the toolchain so a bad choice is rejected
+// before it is saved.
 func SetCompiler(path, compiler string) error {
 	cfg, err := config.Load(path)
 	if err != nil {
@@ -270,6 +287,7 @@ func SetCompiler(path, compiler string) error {
 	return config.Save(path, cfg)
 }
 
+// SetWSLCompiler records a compiler that runs inside the named WSL distribution.
 func SetWSLCompiler(path, distribution, compiler string) error {
 	cfg, err := config.Load(path)
 	if err != nil {
@@ -287,6 +305,9 @@ func SetWSLCompiler(path, distribution, compiler string) error {
 	return config.Save(path, cfg)
 }
 
+// SetEnvironment stores an environment setup script, or clears it when given
+// "inherit" or "none"; a non-empty script is resolved so its concrete C,
+// archiver, and linker tools are recorded.
 func SetEnvironment(path, setup string) error {
 	cfg, err := config.Load(path)
 	if err != nil {
@@ -312,10 +333,15 @@ func SetEnvironment(path, setup string) error {
 	return config.Save(path, cfg)
 }
 
+// SetCUDA enables or disables native CUDA for the project, recording the version
+// range or toolkit root in root.
 func SetCUDA(path string, enabled bool, root string) error {
 	return SetCUDAConnection(path, enabled, root, "native", "")
 }
 
+// SetCUDAConnection enables or disables CUDA with an explicit execution
+// environment, resolving a WSL toolkit through the distribution or a native
+// toolkit to its version range.
 func SetCUDAConnection(configPath string, enabled bool, root, execution, distribution string) error {
 	cfg, err := config.Load(configPath)
 	if err != nil {
@@ -388,6 +414,8 @@ func toolkitVersionOfRoot(root, reported string) (string, bool) {
 	return "", false
 }
 
+// SetVulkanConnection enables or disables the Vulkan SDK, detecting the SDK root
+// either natively or inside a WSL distribution.
 func SetVulkanConnection(configPath string, enabled bool, root, execution, distribution string) error {
 	cfg, err := config.Load(configPath)
 	if err != nil {
@@ -432,6 +460,8 @@ func SetVulkanConnection(configPath string, enabled bool, root, execution, distr
 	return config.Save(configPath, cfg)
 }
 
+// SetTestGroup assigns a test job to a group so it can be selected together with
+// other jobs.
 func SetTestGroup(path, job, group string) error {
 	cfg, err := config.Load(path)
 	if err != nil {
@@ -461,6 +491,7 @@ func importCMake(ctx context.Context, path string, progress func(string)) (cmake
 	return cmakeimport.ImportWithOptions(ctx, filepath.Dir(path), path, progress, options)
 }
 
+// ImportXmake imports targets from an xmake.lua project into trestle.toml.
 func ImportXmake(ctx context.Context, path string, progress func(string)) error {
 	return runOperation(ctx, path, "import xmake", progress, func(ctx context.Context, emit func(string)) error {
 		ctx, release, err := acquireResource(ctx, filepath.Join(filepath.Dir(path), ".trestle", "import"), "import xmake", false)
@@ -472,6 +503,8 @@ func ImportXmake(ctx context.Context, path string, progress func(string)) error 
 	})
 }
 
+// SetFlags replaces the project-wide compile and link flags, leaving each group
+// unchanged when its argument is empty.
 func SetFlags(path, compile, link string) error {
 	cfg, err := config.Load(path)
 	if err != nil {
@@ -486,6 +519,8 @@ func SetFlags(path, compile, link string) error {
 	return config.Save(path, cfg)
 }
 
+// ConfigureCompilerOptions updates the toolchain execution mode, WSL
+// distribution, and C and C++ flag lists, ignoring empty arguments.
 func ConfigureCompilerOptions(path, mode, distribution, cflags, cxxflags string) error {
 	cfg, err := config.Load(path)
 	if err != nil {
@@ -506,6 +541,7 @@ func ConfigureCompilerOptions(path, mode, distribution, cflags, cxxflags string)
 	return config.Save(path, cfg)
 }
 
+// SetLanguageFlags replaces the flags for one group: "c", "cxx", or "link".
 func SetLanguageFlags(path, language, flags string) error {
 	cfg, err := config.Load(path)
 	if err != nil {
@@ -525,6 +561,8 @@ func SetLanguageFlags(path, language, flags string) error {
 	return config.Save(path, cfg)
 }
 
+// SetDefaultTargets records the targets built when no target is requested,
+// rejecting unknown names.
 func SetDefaultTargets(path string, targets []string) error {
 	cfg, err := config.Load(path)
 	if err != nil {
@@ -539,6 +577,8 @@ func SetDefaultTargets(path string, targets []string) error {
 	return config.Save(path, cfg)
 }
 
+// ApplyCompilerPreset copies a stored compiler preset into the live toolchain and
+// flag settings.
 func ApplyCompilerPreset(path, name string) error {
 	cfg, err := config.Load(path)
 	if err != nil {
@@ -581,6 +621,8 @@ func applyCompilerPreset(cfg *config.Config, name string, preset config.Compiler
 	cfg.Toolchain.Preset = name
 }
 
+// SaveCompilerPreset stores the current compiler and flag settings under name for
+// later reuse.
 func SaveCompilerPreset(path, name string) error {
 	cfg, err := config.Load(path)
 	if err != nil {
@@ -594,6 +636,8 @@ func SaveCompilerPreset(path, name string) error {
 	return config.Save(path, cfg)
 }
 
+// DeleteCompilerPreset removes a stored compiler preset and clears any references
+// to it from the toolchain and release optimization settings.
 func DeleteCompilerPreset(path, name string) error {
 	cfg, err := config.Load(path)
 	if err != nil {
@@ -612,6 +656,8 @@ func DeleteCompilerPreset(path, name string) error {
 	return config.Save(path, cfg)
 }
 
+// SetProjectSetting edits one project, build, toolchain, package, target, or
+// preset field addressed by key, validating the result before saving.
 func SetProjectSetting(path, key, value string) error {
 	cfg, err := config.Load(path)
 	if err != nil {
@@ -795,6 +841,8 @@ func SetProjectSetting(path, key, value string) error {
 	return config.Save(path, cfg)
 }
 
+// OptimizationPresetNames lists the built-in release optimizations followed by
+// each compiler preset as a "custom:" entry.
 func OptimizationPresetNames(cfg config.Config) []string {
 	result := []string{"balanced", "speed", "size"}
 	names := make([]string, 0, len(cfg.CompilerPresets))
@@ -808,6 +856,8 @@ func OptimizationPresetNames(cfg config.Config) []string {
 	return result
 }
 
+// ConfigureRelease records the release optimization, targets, and output path,
+// validating each before saving.
 func ConfigureRelease(path, preset string, targets []string, output string) error {
 	cfg, err := config.Load(path)
 	if err != nil {
@@ -950,6 +1000,8 @@ func releaseWithProgress(ctx context.Context, path string, progress func(string)
 	return packageSelectedWithContext(ctx, path, targets, progress)
 }
 
+// AddPackage records a package as a dependency of targetName, or of the most
+// likely target when targetName is empty.
 func AddPackage(path, name, targetName string) error {
 	cfg, err := config.Load(path)
 	if err != nil {
@@ -1296,6 +1348,8 @@ func defaultTarget(cfg config.Config) string {
 	return "app"
 }
 
+// RemovePackage drops a package and removes it from every target's dependency
+// list.
 func RemovePackage(path, name string) error {
 	cfg, err := config.Load(path)
 	if err != nil {
@@ -1315,6 +1369,7 @@ func RemovePackage(path, name string) error {
 	return config.Save(path, cfg)
 }
 
+// SetPackageVersion pins a configured package to a specific version.
 func SetPackageVersion(path, name, version string) error {
 	cfg, err := config.Load(path)
 	if err != nil {
@@ -1329,6 +1384,8 @@ func SetPackageVersion(path, name, version string) error {
 	return config.Save(path, cfg)
 }
 
+// Vcpkg searches the vcpkg registry, or installs the given ports with the
+// requested triplet when install is set.
 func Vcpkg(ctx context.Context, root, query string, ports []string, triplet string, install bool) error {
 	return runOperation(ctx, config.DefaultFileName, "vcpkg", func(line string) { fmt.Println(line) }, func(ctx context.Context, emit func(string)) error {
 		if install {
@@ -1429,10 +1486,14 @@ func cudaVersions(inventory toolchain.Inventory) []string {
 	return result
 }
 
+// Generate writes the Ninja manifest and supporting metadata for the project at
+// path.
 func Generate(path string) (BuildResult, error) {
 	return GenerateWithContext(context.Background(), path)
 }
 
+// GenerateWithContext is Generate with a caller-supplied context, reusing a
+// resolved configuration already carried by ctx when present.
 func GenerateWithContext(ctx context.Context, path string) (BuildResult, error) {
 	if cfg, ok := ctx.Value(configurationKey{}).(config.Config); ok {
 		return generateWithConfig(ctx, path, cfg)
@@ -1893,14 +1954,18 @@ func writeGenerationState(manifestDir string, cfg config.Config, project model.R
 	return state.Save(filepath.Join(manifestDir, ".trestle", "generation.json"), generation)
 }
 
+// Build generates and runs the build for the project's default targets.
 func Build(path string) error {
 	return BuildTargetsWithProgress(context.Background(), path, nil, false, func(line string) { fmt.Println(line) })
 }
 
+// BuildWithProgress is Build reporting progress through the callback.
 func BuildWithProgress(ctx context.Context, path string, progress func(string)) error {
 	return BuildTargetsWithProgress(ctx, path, nil, false, progress)
 }
 
+// BuildTargetsWithProgress generates and builds the selected targets, or every
+// target when all is set.
 func BuildTargetsWithProgress(ctx context.Context, path string, targets []string, all bool, progress func(string)) error {
 	return BuildTargetsWithOptions(ctx, path, targets, all, false, progress)
 }
@@ -2063,6 +2128,8 @@ func listOrNone(values []string) string {
 	return strings.Join(values, ", ")
 }
 
+// TestJob describes one test target: its name, group, source files, run
+// arguments, and working directory.
 type TestJob struct {
 	Name       string
 	Group      string
@@ -2071,6 +2138,8 @@ type TestJob struct {
 	WorkingDir string
 }
 
+// TestSelection chooses which test jobs to run by job, group, or source file, or
+// all of them when All is set.
 type TestSelection struct {
 	Job   string
 	Group string
@@ -2078,6 +2147,7 @@ type TestSelection struct {
 	All   bool
 }
 
+// ListTests returns the test jobs declared by the project.
 func ListTests(path string) ([]TestJob, error) {
 	cfg, err := config.Load(path)
 	if err != nil {
@@ -2185,6 +2255,7 @@ func runTests(ctx context.Context, path string, selection TestSelection, progres
 	return nil
 }
 
+// Test runs every test job in the project.
 func Test(path string) error {
 	return RunTests(context.Background(), path, TestSelection{All: true}, func(line string) { fmt.Println(line) })
 }
@@ -2204,6 +2275,8 @@ type progressWriter struct {
 
 var sourceDiagnosticPattern = regexp.MustCompile(`(?i)^([^:]+\.(?:c|cc|cpp|cxx|h|hpp))(?::|\()[0-9]+`)
 
+// Write buffers incoming build output and forwards each complete line to the
+// callback.
 func (writer *progressWriter) Write(data []byte) (int, error) {
 	writer.mu.Lock()
 	defer writer.mu.Unlock()
@@ -2219,6 +2292,7 @@ func (writer *progressWriter) Write(data []byte) (int, error) {
 	return count, nil
 }
 
+// Flush forwards any buffered output that was not terminated by a newline.
 func (writer *progressWriter) Flush() {
 	writer.mu.Lock()
 	defer writer.mu.Unlock()
@@ -2300,6 +2374,7 @@ func (writer *progressWriter) classifyFailure(path string) (target, stage, sourc
 	return "", "build", filepath.Base(filepath.FromSlash(normalized))
 }
 
+// Progress reports aggregate build progress to the status callback.
 func (writer *progressWriter) Progress(value runner.Progress) {
 	callback := writer.statusCallback
 	if callback == nil {
@@ -2310,6 +2385,7 @@ func (writer *progressWriter) Progress(value runner.Progress) {
 	}
 }
 
+// Output forwards a chunk of build output text.
 func (writer *progressWriter) Output(_ string, text string) {
 	_, _ = writer.Write([]byte(text))
 }

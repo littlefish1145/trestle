@@ -15,6 +15,8 @@ import (
 	"trestle/internal/toolchain"
 )
 
+// ConfigureInteractive detects compilers and the Vulkan SDK, prompts for the
+// executable and shader options, and writes a starter trestle.toml.
 func ConfigureInteractive(path string, input *os.File, output *os.File) error {
 	cfg, err := ensureProjectConfig(path)
 	if err != nil {

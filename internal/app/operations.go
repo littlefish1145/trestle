@@ -36,6 +36,7 @@ func operationConfig(ctx context.Context, path string) (config.Config, error) {
 	return policy.ApplyAt(ctx, cfg, filepath.Dir(path))
 }
 
+// ImportCMake imports targets from a CMake project through its File API.
 func ImportCMake(ctx context.Context, path string, progress func(string)) (cmakeimport.Result, error) {
 	var result cmakeimport.Result
 	err := runOperation(ctx, path, "import cmake", progress, func(ctx context.Context, emit func(string)) error {
@@ -95,6 +96,8 @@ type operationOutput struct {
 	cancel context.CancelFunc
 }
 
+// Write records operation output to the run log, cancelling the operation if the
+// log can no longer be written.
 func (output operationOutput) Write(data []byte) (int, error) {
 	n, err := output.run.Write(data)
 	if err != nil {
@@ -154,17 +157,27 @@ func buildResources(ctx context.Context, cfg config.Config, label string) (conte
 	return child, release, nil
 }
 
+// BuildTargetsWithOptions generates and builds the selected targets, optionally
+// building every target and bypassing availability checks.
 func BuildTargetsWithOptions(ctx context.Context, path string, targets []string, all, force bool, progress func(string)) error {
 	return runOperation(ctx, path, "build", progress, func(ctx context.Context, emit func(string)) error {
 		return buildTargetsWithOptions(ctx, path, targets, all, force, emit)
 	})
 }
+
+// RunTests builds and runs the test jobs matching selection.
 func RunTests(ctx context.Context, path string, selection TestSelection, progress func(string)) error {
 	return runOperation(ctx, path, "test", progress, func(ctx context.Context, emit func(string)) error { return runTests(ctx, path, selection, emit) })
 }
+
+// InstallPackage downloads and builds a package with the provider implied by its
+// reference, then records it as a dependency.
 func InstallPackage(ctx context.Context, path, name string, progress func(string)) error {
 	return runOperation(ctx, path, "install "+name, progress, func(ctx context.Context, emit func(string)) error { return installPackage(ctx, path, name, emit) })
 }
+
+// ExecuteTaskPreview runs a task that has already been previewed, re-validating
+// that the project still matches the preview before applying its settings.
 func ExecuteTaskPreview(ctx context.Context, path, name string, preview config.TaskPreview, progress func(string)) error {
 	return runOperation(ctx, path, "task "+name, progress, func(ctx context.Context, emit func(string)) error {
 		ctx, release, err := acquireResource(ctx, filepath.Join(filepath.Dir(path), ".trestle", "tasks", fsx.Hash(name)), "task "+name, false)
@@ -175,6 +188,9 @@ func ExecuteTaskPreview(ctx context.Context, path, name string, preview config.T
 		return executeTaskPreview(ctx, path, name, preview, emit)
 	})
 }
+
+// ReleaseWithProgress applies the release optimization, builds the release
+// targets, and writes the release ZIP.
 func ReleaseWithProgress(ctx context.Context, path string, progress func(string)) error {
 	return runOperation(ctx, path, "release", progress, func(ctx context.Context, emit func(string)) error { return releaseWithProgress(ctx, path, emit) })
 }

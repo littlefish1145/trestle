@@ -20,11 +20,15 @@ import (
 	"trestle/internal/processx"
 )
 
+// AssessTargets resolves the project against the toolchain and returns each
+// target's policy status.
 func AssessTargets(ctx context.Context, path string) (config.Config, map[string]policy.Status, error) {
 	cfg, statuses, _, err := AssessTargetsWithReport(ctx, path)
 	return cfg, statuses, err
 }
 
+// AssessTargetsWithReport is AssessTargets returning the diagnostic report that
+// explains the statuses and any toolchain selection error.
 func AssessTargetsWithReport(ctx context.Context, path string) (config.Config, map[string]policy.Status, policy.Report, error) {
 	cfg, err := config.Load(path)
 	if err != nil {
@@ -56,6 +60,8 @@ func ExecuteTask(ctx context.Context, path, name string, progress func(string)) 
 	return ExecuteTaskPreview(ctx, path, name, preview, progress)
 }
 
+// ExecuteTaskExpected runs a task only when its current definition still matches
+// expected, guarding against a stale preview.
 func ExecuteTaskExpected(ctx context.Context, path, name string, expected config.Task, progress func(string)) error {
 	preview, err := PreviewTask(path, name)
 	if err != nil {
@@ -67,6 +73,9 @@ func ExecuteTaskExpected(ctx context.Context, path, name string, expected config
 	return ExecuteTaskPreview(ctx, path, name, preview, progress)
 }
 
+// PreviewTask resolves a named task against the current project, returning the
+// command, working directory, settings changes, and a fingerprint of the
+// configuration it was previewed against.
 func PreviewTask(path, name string) (config.TaskPreview, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -324,6 +333,8 @@ type taskWriter struct {
 	progress func(string)
 }
 
+// Write buffers task output and forwards each complete line to the progress
+// callback.
 func (w *taskWriter) Write(data []byte) (int, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -339,6 +350,8 @@ func (w *taskWriter) Write(data []byte) (int, error) {
 	}
 	return len(data), nil
 }
+
+// Flush forwards any buffered task output that was not terminated by a newline.
 func (w *taskWriter) Flush() {
 	w.mu.Lock()
 	defer w.mu.Unlock()

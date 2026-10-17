@@ -9,6 +9,8 @@ import (
 	"trestle/internal/source"
 )
 
+// AnalyzeProject scans the source tree under root and prints a summary of
+// languages, entry points, detected tests, and local include edges.
 func AnalyzeProject(root string, output io.Writer) error {
 	project, err := source.Analyze(root)
 	if err != nil {

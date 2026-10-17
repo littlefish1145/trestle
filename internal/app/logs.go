@@ -7,6 +7,8 @@ import (
 	"trestle/internal/runlog"
 )
 
+// Logs lists the recorded operations, or writes the full log of the operation
+// with the given id to output.
 func Logs(path, id string, output io.Writer) error {
 	records, err := runlog.List(path)
 	if err != nil {

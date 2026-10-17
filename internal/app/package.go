@@ -13,10 +13,12 @@ import (
 	"trestle/internal/graph"
 )
 
+// Package builds the configured targets and writes them to a release ZIP.
 func Package(path, output string) error {
 	return PackageWithProgress(context.Background(), path, output, func(line string) { fmt.Println(line) })
 }
 
+// PackageWithProgress is Package reporting progress through the callback.
 func PackageWithProgress(ctx context.Context, path, output string, progress func(string)) error {
 	return runOperation(ctx, path, "package", progress, func(ctx context.Context, emit func(string)) error {
 		if output != "" {
