@@ -92,30 +92,48 @@ func Init(root, name string) error {
 	return nil
 }
 
+// ConfigureOptions carries the settings resolved from the command-line flags and
+// applied by Configure. Empty string fields, and a false ModulesEnabled, leave
+// the corresponding configuration value untouched.
+type ConfigureOptions struct {
+	Path           string
+	Compiler       string
+	C              string
+	Profile        string
+	VcpkgRoot      string
+	Triplet        string
+	MSVC           string
+	CUDAVersion    string
+	CUDAMode       string
+	Setup          string
+	ModuleScanner  string
+	ModulesEnabled bool
+}
+
 // Configure resolves the requested compiler, profile, package, CUDA, and module
 // settings into a portable trestle.toml, filling in an auto-detected vcpkg
 // triplet when needed.
-func Configure(path, compiler, c, profile, vcpkgRoot, triplet, msvc, cudaVersion, cudaMode, setup, moduleScanner string, modulesEnabled bool) error {
-	cfg, err := ensureProjectConfig(path)
+func Configure(options ConfigureOptions) error {
+	cfg, err := ensureProjectConfig(options.Path)
 	if err != nil {
 		return err
 	}
-	if compiler != "" {
-		cfg.Toolchain.CXX = toolchain.PortableSelector(compiler)
+	if options.Compiler != "" {
+		cfg.Toolchain.CXX = toolchain.PortableSelector(options.Compiler)
 	}
-	if c != "" {
-		cfg.Toolchain.C = toolchain.PortableSelector(c)
+	if options.C != "" {
+		cfg.Toolchain.C = toolchain.PortableSelector(options.C)
 	}
-	if profile != "" {
-		cfg.Build.Profile = profile
+	if options.Profile != "" {
+		cfg.Build.Profile = options.Profile
 	}
-	if msvc != "" {
-		cfg.Toolchain.MSVC = strings.TrimSpace(msvc)
+	if options.MSVC != "" {
+		cfg.Toolchain.MSVC = strings.TrimSpace(options.MSVC)
 	}
-	if setup != "" {
+	if options.Setup != "" {
 		// A vcvars path still names one machine. Record the toolset version it
 		// belongs to instead so the committed configuration stays portable.
-		if version, ok := toolchain.MSVCToolsetVersion(setup); ok && cfg.Toolchain.MSVC == "" {
+		if version, ok := toolchain.MSVCToolsetVersion(options.Setup); ok && cfg.Toolchain.MSVC == "" {
 			cfg.Toolchain.MSVC = version + "~" + version
 		}
 		cfg.Toolchain.Setup = ""
@@ -124,29 +142,29 @@ func Configure(path, compiler, c, profile, vcpkgRoot, triplet, msvc, cudaVersion
 	if err != nil {
 		return err
 	}
-	if vcpkgRoot != "" {
-		cfg.Vcpkg.Root = vcpkgRoot
+	if options.VcpkgRoot != "" {
+		cfg.Vcpkg.Root = options.VcpkgRoot
 	}
 	if cfg.Vcpkg.Root == "" {
 		cfg.Vcpkg.Root = os.Getenv("VCPKG_ROOT")
 	}
-	if triplet != "" {
-		cfg.Vcpkg.Triplet = triplet
+	if options.Triplet != "" {
+		cfg.Vcpkg.Triplet = options.Triplet
 	}
-	if cudaVersion != "" {
-		version, root, resolveErr := configureCUDA(context.Background(), cfg, cudaVersion)
+	if options.CUDAVersion != "" {
+		version, root, resolveErr := configureCUDA(context.Background(), cfg, options.CUDAVersion)
 		if resolveErr != nil {
 			return resolveErr
 		}
 		cfg.Toolchain.CUDA, cfg.Toolchain.CUDARoot = version, root
 	}
-	if cudaMode != "" {
-		cfg.Toolchain.CUDAMode = cudaMode
+	if options.CUDAMode != "" {
+		cfg.Toolchain.CUDAMode = options.CUDAMode
 	}
-	if moduleScanner != "" {
-		cfg.Toolchain.ModuleScanner = moduleScanner
+	if options.ModuleScanner != "" {
+		cfg.Toolchain.ModuleScanner = options.ModuleScanner
 	}
-	if modulesEnabled {
+	if options.ModulesEnabled {
 		cfg.Build.Modules = true
 	}
 	if cfg.Vcpkg.Root != "" && (cfg.Vcpkg.Triplet == "" || cfg.Vcpkg.Triplet == "auto") {
@@ -161,7 +179,7 @@ func Configure(path, compiler, c, profile, vcpkgRoot, triplet, msvc, cudaVersion
 		}
 		cfg.Vcpkg.Triplet = selected
 	}
-	if err := config.Save(path, cfg); err != nil {
+	if err := config.Save(options.Path, cfg); err != nil {
 		return err
 	}
 	fmt.Printf("toolchain: %s (%s)\n", tc.Kind, tc.Version)

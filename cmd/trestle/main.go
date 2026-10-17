@@ -188,7 +188,20 @@ func run(command string, args []string) (result error) {
 		if *cudaExecution == "" && *cudaDistribution == "" {
 			configuredCUDA = *cudaRoot
 		}
-		if err := app.Configure(path, *compiler, *c, *profile, *vcpkgRoot, *triplet, *msvc, configuredCUDA, *cudaMode, *setup, *moduleScanner, *modulesEnabled); err != nil {
+		if err := app.Configure(app.ConfigureOptions{
+			Path:           path,
+			Compiler:       *compiler,
+			C:              *c,
+			Profile:        *profile,
+			VcpkgRoot:      *vcpkgRoot,
+			Triplet:        *triplet,
+			MSVC:           *msvc,
+			CUDAVersion:    configuredCUDA,
+			CUDAMode:       *cudaMode,
+			Setup:          *setup,
+			ModuleScanner:  *moduleScanner,
+			ModulesEnabled: *modulesEnabled,
+		}); err != nil {
 			return err
 		}
 		if *cudaExecution != "" || *cudaDistribution != "" {
