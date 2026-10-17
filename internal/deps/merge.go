@@ -43,40 +43,65 @@ func Merge(entries []PackageEntry) []Package {
 		if name == "" {
 			continue
 		}
-		position, ok := index[name]
-		if !ok {
-			index[name] = len(packages)
-			packages = append(packages, Package{Name: name, Description: entry.Description, Installed: entry.Installed})
-			position = len(packages) - 1
-		}
-		target := &packages[position]
-		if target.Description == "" {
-			target.Description = entry.Description
-		}
-		target.Installed = target.Installed || entry.Installed
-		target.Candidates = append(target.Candidates, Candidate{
-			Version:      entry.Version,
-			Provider:     entry.Provider,
-			Source:       entry.Source,
-			Installed:    entry.Installed,
-			Updated:      entry.Updated,
-			License:      entry.License,
-			PackageURL:   entry.PackageURL,
-			Description:  entry.Description,
-			Features:     entry.Features,
-			Dependencies: entry.Dependencies,
-		})
+		position := ensurePackage(&packages, index, name, entry)
+		mergeCandidate(&packages[position], entry)
 	}
 	for i := range packages {
 		sortCandidates(packages[i].Candidates)
 	}
+	sortPackages(packages)
+	return packages
+}
+
+// ensurePackage returns the position of name in *packages, appending a new
+// Package seeded from entry the first time the name is seen. Repeated names
+// share the position recorded in index so they collapse into one row.
+func ensurePackage(packages *[]Package, index map[string]int, name string, entry PackageEntry) int {
+	if position, ok := index[name]; ok {
+		return position
+	}
+	index[name] = len(*packages)
+	*packages = append(*packages, Package{Name: name, Description: entry.Description, Installed: entry.Installed})
+	return len(*packages) - 1
+}
+
+// mergeCandidate folds one provider entry into its package row: it fills in a
+// missing description, propagates installed state, and records the entry as
+// another candidate.
+func mergeCandidate(target *Package, entry PackageEntry) {
+	if target.Description == "" {
+		target.Description = entry.Description
+	}
+	target.Installed = target.Installed || entry.Installed
+	target.Candidates = append(target.Candidates, candidateFromEntry(entry))
+}
+
+// candidateFromEntry projects a flat provider entry into a Candidate, copying
+// the fields the UI displays.
+func candidateFromEntry(entry PackageEntry) Candidate {
+	return Candidate{
+		Version:      entry.Version,
+		Provider:     entry.Provider,
+		Source:       entry.Source,
+		Installed:    entry.Installed,
+		Updated:      entry.Updated,
+		License:      entry.License,
+		PackageURL:   entry.PackageURL,
+		Description:  entry.Description,
+		Features:     entry.Features,
+		Dependencies: entry.Dependencies,
+	}
+}
+
+// sortPackages orders installed packages ahead of the rest, then by name, so
+// the currently installed rows stay at the top of a stable list.
+func sortPackages(packages []Package) {
 	sort.SliceStable(packages, func(i, j int) bool {
 		if packages[i].Installed != packages[j].Installed {
 			return packages[i].Installed
 		}
 		return packages[i].Name < packages[j].Name
 	})
-	return packages
 }
 
 // Preferred returns the candidate the quick-install action should use: the

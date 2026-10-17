@@ -135,35 +135,67 @@ func Migrate(data []byte) ([]byte, error) {
 	if err := toml.Unmarshal(data, &document); err != nil {
 		return nil, err
 	}
-	version := 0
-	switch value := document["schema_version"].(type) {
-	case int64:
-		version = int(value)
-	case int:
-		version = value
-	case float64:
-		version = int(value)
-	}
-	if version == 0 {
-		return nil, fmt.Errorf("E_CONFIG_MISSING_REQUIRED: schema_version is required")
-	}
-	if version > CurrentSchemaVersion {
-		return nil, fmt.Errorf("E_CONFIG_NEWER_SCHEMA: project requires schema %d; this executable supports up to %d", version, CurrentSchemaVersion)
-	}
-	if version < 1 {
-		return nil, fmt.Errorf("E_CONFIG_OLD_SCHEMA: schema %d is not supported", version)
+	version := documentVersion(document["schema_version"])
+	if err := checkSchemaVersion(version); err != nil {
+		return nil, err
 	}
 	coerceVersionFields(document)
+	if err := applyMigrations(document, version); err != nil {
+		return nil, err
+	}
+	return encodeDocument(document)
+}
+
+// documentVersion reads the schema_version field, which TOML decodes as one of
+// several integer types depending on how the literal was written. A missing or
+// non-numeric value yields 0, which checkSchemaVersion treats as absent.
+func documentVersion(value any) int {
+	switch typed := value.(type) {
+	case int64:
+		return int(typed)
+	case int:
+		return typed
+	case float64:
+		return int(typed)
+	}
+	return 0
+}
+
+// checkSchemaVersion rejects documents that cannot be migrated: a missing or
+// zero version, one newer than this executable understands, and one below the
+// first supported schema.
+func checkSchemaVersion(version int) error {
+	if version == 0 {
+		return fmt.Errorf("E_CONFIG_MISSING_REQUIRED: schema_version is required")
+	}
+	if version > CurrentSchemaVersion {
+		return fmt.Errorf("E_CONFIG_NEWER_SCHEMA: project requires schema %d; this executable supports up to %d", version, CurrentSchemaVersion)
+	}
+	if version < 1 {
+		return fmt.Errorf("E_CONFIG_OLD_SCHEMA: schema %d is not supported", version)
+	}
+	return nil
+}
+
+// applyMigrations runs every versioned step from the document's schema up to the
+// current one, stamping schema_version after each step so a later step sees the
+// version it produced.
+func applyMigrations(document map[string]any, version int) error {
 	for current := version; current < CurrentSchemaVersion; current++ {
 		migrate, ok := migrations[current]
 		if !ok {
-			return nil, fmt.Errorf("E_CONFIG_MIGRATION: missing migration from schema %d", current)
+			return fmt.Errorf("E_CONFIG_MIGRATION: missing migration from schema %d", current)
 		}
 		if err := migrate(document); err != nil {
-			return nil, fmt.Errorf("migrate schema %d to %d: %w", current, current+1, err)
+			return fmt.Errorf("migrate schema %d to %d: %w", current, current+1, err)
 		}
 		document["schema_version"] = int64(current + 1)
 	}
+	return nil
+}
+
+// encodeDocument re-encodes a migrated document as TOML.
+func encodeDocument(document map[string]any) ([]byte, error) {
 	var output bytes.Buffer
 	if err := toml.NewEncoder(&output).Encode(document); err != nil {
 		return nil, err

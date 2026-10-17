@@ -15,33 +15,60 @@ func InstalledDependencies(layout Layout, port string) []string {
 		return nil
 	}
 	defer file.Close()
-	fields := map[string]string{}
 	var result []string
-	flush := func() {
-		if fields["Package"] == port && (fields["Architecture"] == "" || fields["Architecture"] == layout.Triplet) {
-			for _, raw := range strings.Split(fields["Depends"], ",") {
-				name := strings.TrimSpace(raw)
-				if cut := strings.IndexAny(name, " [: "); cut >= 0 {
-					name = name[:cut]
-				}
-				if name != "" {
-					result = append(result, name)
-				}
-			}
-		}
-		fields = map[string]string{}
-	}
+	fields := map[string]string{}
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
 		line := scanner.Text()
 		if strings.TrimSpace(line) == "" {
-			flush()
+			result = append(result, dependenciesForPort(fields, layout, port)...)
+			fields = map[string]string{}
 			continue
 		}
-		if index := strings.Index(line, ":"); index > 0 {
-			fields[line[:index]] = strings.TrimSpace(line[index+1:])
+		fields = parseStatusField(fields, line)
+	}
+	return append(result, dependenciesForPort(fields, layout, port)...)
+}
+
+// parseStatusField adds one "Key: value" line to the paragraph being read,
+// allocating the field map on first use. Lines without a usable key are ignored.
+func parseStatusField(fields map[string]string, line string) map[string]string {
+	index := strings.Index(line, ":")
+	if index <= 0 {
+		return fields
+	}
+	if fields == nil {
+		fields = map[string]string{}
+	}
+	fields[line[:index]] = strings.TrimSpace(line[index+1:])
+	return fields
+}
+
+// dependenciesForPort returns the Depends list of a status paragraph when it
+// describes the requested port for the layout's triplet, and nil otherwise. An
+// empty Architecture means the entry applies to every triplet.
+func dependenciesForPort(fields map[string]string, layout Layout, port string) []string {
+	if fields["Package"] != port {
+		return nil
+	}
+	if architecture := fields["Architecture"]; architecture != "" && architecture != layout.Triplet {
+		return nil
+	}
+	var result []string
+	for _, raw := range strings.Split(fields["Depends"], ",") {
+		if name := dependencyName(raw); name != "" {
+			result = append(result, name)
 		}
 	}
-	flush()
 	return result
+}
+
+// dependencyName strips the version range and architecture decorations from one
+// entry of a Debian Depends list, leaving the bare port name.
+func dependencyName(raw string) string {
+	name := strings.TrimSpace(raw)
+	if cut := strings.IndexAny(name, " [: "); cut >= 0 {
+		name = name[:cut]
+	}
+	return name
 }
