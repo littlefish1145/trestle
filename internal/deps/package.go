@@ -1,3 +1,6 @@
+// Package deps presents installed and installable C/C++ dependencies in a
+// provider-neutral form, so the shared Packages page can render vcpkg and Conan
+// results the same way.
 package deps
 
 import (
