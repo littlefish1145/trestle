@@ -40,75 +40,9 @@ func ResolveAt(ctx context.Context, cfg config.Config, root string) (model.Resol
 		if err := ctx.Err(); err != nil {
 			return model.ResolvedProject{}, err
 		}
-		target := cfg.Targets[name]
-		patterns := make([]string, len(target.Sources))
-		for i, pattern := range target.Sources {
-			patterns[i] = pattern
-			if !filepath.IsAbs(pattern) {
-				patterns[i] = filepath.Join(root, pattern)
-			}
-		}
-		source, err := fsx.ResolveSources(patterns)
+		resolved, err := resolveConfigTarget(ctx, cfg, name, root)
 		if err != nil {
-			return model.ResolvedProject{}, fmt.Errorf("target %q source glob: %w", name, err)
-		}
-		if len(source) == 0 {
-			return model.ResolvedProject{}, fmt.Errorf("E_CONFIG_MISSING_REQUIRED: target %q source pattern matched no files", name)
-		}
-		resolved := model.ResolvedTarget{
-			Target: model.Target{
-				ID:               model.TargetID(name),
-				Type:             model.TargetType(target.Type),
-				Sources:          source,
-				OutputName:       target.OutputName,
-				CStandard:        target.CStandard,
-				CXXStandard:      target.CXXStandard,
-				CFlags:           target.CFlags,
-				CXXFlags:         target.CXXFlags,
-				ExportAllSymbols: target.ExportAllSymbols,
-				ShaderStage:      target.ShaderStage,
-				ShaderEntry:      target.ShaderEntry,
-				ShaderTool:       target.ShaderTool,
-				ShaderTargetEnv:  target.ShaderTargetEnv,
-				Private: model.Usage{Compile: model.CompileUsage{
-					IncludeDirs: target.PrivateIncludeDirs,
-					Defines:     target.PrivateDefines,
-					Options:     target.CompileOptions,
-				}, Link: model.LinkUsage{
-					LibraryDirs: target.LibraryDirs,
-					Items:       linkItems(target.Libraries),
-					Options:     target.LinkOptions,
-				}},
-				Public: model.Usage{Compile: model.CompileUsage{
-					IncludeDirs: target.IncludeDirs,
-					Defines:     target.Defines,
-				}},
-				Interface: model.Usage{
-					Compile: model.CompileUsage{Options: target.InterfaceCompile},
-					Link:    model.LinkUsage{Options: target.InterfaceLink},
-				},
-			},
-		}
-		for _, dep := range target.Dependencies {
-			ref := model.DependencyRef{Package: dep.Package}
-			if dep.Target != "" {
-				ref.Target = model.TargetID(dep.Target)
-			}
-			if dep.Package != "" {
-				usage, err := resolvePackage(ctx, cfg, cfg.Packages[dep.Package])
-				if err != nil {
-					return model.ResolvedProject{}, err
-				}
-				switch model.DependencyScope(dep.Scope) {
-				case model.Private:
-					resolved.Private = mergeUsage(resolved.Private, usage)
-				case model.Public:
-					resolved.Public = mergeUsage(resolved.Public, usage)
-				case model.Interface:
-					resolved.Interface = mergeUsage(resolved.Interface, usage)
-				}
-			}
-			resolved.Implementation = append(resolved.Implementation, model.Dependency{Ref: ref, Scope: model.DependencyScope(dep.Scope)})
+			return model.ResolvedProject{}, err
 		}
 		project.Targets = append(project.Targets, resolved)
 		project.ByID[resolved.ID] = resolved
@@ -121,6 +55,82 @@ func ResolveAt(ctx context.Context, cfg config.Config, root string) (model.Resol
 	return project, nil
 }
 
+// resolveConfigTarget concretizes one configured target: it expands source globs
+// relative to root and folds package dependencies into the target's usage.
+func resolveConfigTarget(ctx context.Context, cfg config.Config, name, root string) (model.ResolvedTarget, error) {
+	target := cfg.Targets[name]
+	patterns := make([]string, len(target.Sources))
+	for i, pattern := range target.Sources {
+		patterns[i] = pattern
+		if !filepath.IsAbs(pattern) {
+			patterns[i] = filepath.Join(root, pattern)
+		}
+	}
+	source, err := fsx.ResolveSources(patterns)
+	if err != nil {
+		return model.ResolvedTarget{}, fmt.Errorf("target %q source glob: %w", name, err)
+	}
+	if len(source) == 0 {
+		return model.ResolvedTarget{}, fmt.Errorf("E_CONFIG_MISSING_REQUIRED: target %q source pattern matched no files", name)
+	}
+	resolved := model.ResolvedTarget{
+		Target: model.Target{
+			ID:               model.TargetID(name),
+			Type:             model.TargetType(target.Type),
+			Sources:          source,
+			OutputName:       target.OutputName,
+			CStandard:        target.CStandard,
+			CXXStandard:      target.CXXStandard,
+			CFlags:           target.CFlags,
+			CXXFlags:         target.CXXFlags,
+			ExportAllSymbols: target.ExportAllSymbols,
+			ShaderStage:      target.ShaderStage,
+			ShaderEntry:      target.ShaderEntry,
+			ShaderTool:       target.ShaderTool,
+			ShaderTargetEnv:  target.ShaderTargetEnv,
+			Private: model.Usage{Compile: model.CompileUsage{
+				IncludeDirs: target.PrivateIncludeDirs,
+				Defines:     target.PrivateDefines,
+				Options:     target.CompileOptions,
+			}, Link: model.LinkUsage{
+				LibraryDirs: target.LibraryDirs,
+				Items:       linkItems(target.Libraries),
+				Options:     target.LinkOptions,
+			}},
+			Public: model.Usage{Compile: model.CompileUsage{
+				IncludeDirs: target.IncludeDirs,
+				Defines:     target.Defines,
+			}},
+			Interface: model.Usage{
+				Compile: model.CompileUsage{Options: target.InterfaceCompile},
+				Link:    model.LinkUsage{Options: target.InterfaceLink},
+			},
+		},
+	}
+	for _, dep := range target.Dependencies {
+		ref := model.DependencyRef{Package: dep.Package}
+		if dep.Target != "" {
+			ref.Target = model.TargetID(dep.Target)
+		}
+		if dep.Package != "" {
+			usage, err := resolvePackage(ctx, cfg, cfg.Packages[dep.Package])
+			if err != nil {
+				return model.ResolvedTarget{}, err
+			}
+			switch model.DependencyScope(dep.Scope) {
+			case model.Private:
+				resolved.Private = mergeUsage(resolved.Private, usage)
+			case model.Public:
+				resolved.Public = mergeUsage(resolved.Public, usage)
+			case model.Interface:
+				resolved.Interface = mergeUsage(resolved.Interface, usage)
+			}
+		}
+		resolved.Implementation = append(resolved.Implementation, model.Dependency{Ref: ref, Scope: model.DependencyScope(dep.Scope)})
+	}
+	return resolved, nil
+}
+
 func linkItems(names []string) []model.LinkItem {
 	items := make([]model.LinkItem, 0, len(names))
 	for _, name := range names {
@@ -130,45 +140,7 @@ func linkItems(names []string) []model.LinkItem {
 }
 
 func resolveTarget(project *model.ResolvedProject, id model.TargetID) error {
-	visited := map[model.TargetID]bool{}
-	var resolve func(model.TargetID) (model.Usage, error)
-	resolve = func(current model.TargetID) (model.Usage, error) {
-		if visited[current] {
-			return model.Usage{}, nil
-		}
-		visited[current] = true
-		defer delete(visited, current)
-		target := project.ByID[current]
-		usage := model.Usage{
-			Compile: mergeCompile(target.Public.Compile, target.Interface.Compile),
-			Link:    mergeLink(target.Public.Link, target.Interface.Link),
-		}
-		for _, dep := range target.Implementation {
-			include := dep.Scope == model.Private || dep.Scope == model.Public
-			export := dep.Scope == model.Public || dep.Scope == model.Interface
-			if dep.Ref.Package != "" {
-				if include {
-					usage.Compile = mergeCompile(usage.Compile, project.ByID[current].Private.Compile)
-				}
-				continue
-			}
-			dependency := project.ByID[dep.Ref.Target]
-			if include {
-				dependencyUsage, err := resolve(dep.Ref.Target)
-				if err != nil {
-					return model.Usage{}, err
-				}
-				usage.Compile = mergeCompile(usage.Compile, dependencyUsage.Compile)
-				usage.Link = mergeLink(usage.Link, dependencyUsage.Link)
-			}
-			if export {
-				usage.Compile = mergeCompile(usage.Compile, dependency.Interface.Compile)
-				usage.Link = mergeLink(usage.Link, dependency.Interface.Link)
-			}
-		}
-		return usage, nil
-	}
-	interfaceUsage, err := resolve(id)
+	interfaceUsage, err := resolveUsage(project, id, map[model.TargetID]bool{})
 	if err != nil {
 		return err
 	}
@@ -183,30 +155,72 @@ func resolveTarget(project *model.ResolvedProject, id model.TargetID) error {
 			project.Targets[i] = target
 		}
 	}
-	var closure func(model.TargetID) []model.TargetID
-	closure = func(current model.TargetID) []model.TargetID {
-		var result []model.TargetID
-		seen := map[model.TargetID]bool{}
-		var walk func(model.TargetID)
-		walk = func(node model.TargetID) {
-			if seen[node] {
-				return
+	project.LinkClosure[id] = linkClosure(project, id)
+	return nil
+}
+
+// resolveUsage returns the interface usage a target contributes to its
+// dependents, walking the dependency graph recursively. visited tracks the
+// active recursion stack so dependency cycles terminate.
+func resolveUsage(project *model.ResolvedProject, current model.TargetID, visited map[model.TargetID]bool) (model.Usage, error) {
+	if visited[current] {
+		return model.Usage{}, nil
+	}
+	visited[current] = true
+	defer delete(visited, current)
+	target := project.ByID[current]
+	usage := model.Usage{
+		Compile: mergeCompile(target.Public.Compile, target.Interface.Compile),
+		Link:    mergeLink(target.Public.Link, target.Interface.Link),
+	}
+	for _, dep := range target.Implementation {
+		include := dep.Scope == model.Private || dep.Scope == model.Public
+		export := dep.Scope == model.Public || dep.Scope == model.Interface
+		if dep.Ref.Package != "" {
+			if include {
+				usage.Compile = mergeCompile(usage.Compile, project.ByID[current].Private.Compile)
 			}
-			seen[node] = true
-			for _, dep := range project.ByID[node].Implementation {
-				if dep.Ref.Target != "" && dep.Scope != model.Interface {
-					walk(dep.Ref.Target)
-				}
+			continue
+		}
+		dependency := project.ByID[dep.Ref.Target]
+		if include {
+			dependencyUsage, err := resolveUsage(project, dep.Ref.Target, visited)
+			if err != nil {
+				return model.Usage{}, err
 			}
-			if node != current {
-				result = append(result, node)
+			usage.Compile = mergeCompile(usage.Compile, dependencyUsage.Compile)
+			usage.Link = mergeLink(usage.Link, dependencyUsage.Link)
+		}
+		if export {
+			usage.Compile = mergeCompile(usage.Compile, dependency.Interface.Compile)
+			usage.Link = mergeLink(usage.Link, dependency.Interface.Link)
+		}
+	}
+	return usage, nil
+}
+
+// linkClosure returns the targets linked into current, excluding the target
+// itself, interface-only dependencies, and duplicates.
+func linkClosure(project *model.ResolvedProject, current model.TargetID) []model.TargetID {
+	var result []model.TargetID
+	seen := map[model.TargetID]bool{}
+	var walk func(model.TargetID)
+	walk = func(node model.TargetID) {
+		if seen[node] {
+			return
+		}
+		seen[node] = true
+		for _, dep := range project.ByID[node].Implementation {
+			if dep.Ref.Target != "" && dep.Scope != model.Interface {
+				walk(dep.Ref.Target)
 			}
 		}
-		walk(current)
-		return result
+		if node != current {
+			result = append(result, node)
+		}
 	}
-	project.LinkClosure[id] = closure(id)
-	return nil
+	walk(current)
+	return result
 }
 
 // resolvePackage dispatches on the configured provider so vcpkg and conan
