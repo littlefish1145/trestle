@@ -288,6 +288,18 @@ func (value conanTimestamp) Format() string {
 // top-level key; keys otherwise win, so "Local Cache" maps to the localSource
 // marker and any remote name maps to itself.
 func parseListOutput(data []byte, source string) ([]Package, error) {
+	parsed, err := decodeListEnvelope(data)
+	if err != nil {
+		return nil, err
+	}
+	entries := packagesFromEnvelope(parsed, source)
+	sortPackages(entries)
+	return entries, nil
+}
+
+// decodeListEnvelope trims any leading console noise and decodes the JSON object
+// `conan list` emits.
+func decodeListEnvelope(data []byte) (listEnvelope, error) {
 	trimmed := strings.TrimLeft(string(data), " \t\r\n")
 	if start := strings.Index(trimmed, "{"); start > 0 {
 		trimmed = trimmed[start:]
@@ -298,6 +310,13 @@ func parseListOutput(data []byte, source string) ([]Package, error) {
 	if err := json.Unmarshal([]byte(trimmed), &parsed); err != nil {
 		return nil, fmt.Errorf("E_CONAN_LAYOUT: read conan list output: %w", err)
 	}
+	return parsed, nil
+}
+
+// packagesFromEnvelope turns each source key and recipe reference into a neutral
+// package record, labelling the local cache marker as installed and rendering
+// the newest revision timestamp as its update date.
+func packagesFromEnvelope(parsed listEnvelope, source string) []Package {
 	var entries []Package
 	for key, references := range parsed {
 		current := key
@@ -327,8 +346,7 @@ func parseListOutput(data []byte, source string) ([]Package, error) {
 			entries = append(entries, entry)
 		}
 	}
-	sortPackages(entries)
-	return entries, nil
+	return entries
 }
 
 const localSource = "local"
@@ -435,75 +453,34 @@ func (client Client) InstallWithProgress(ctx context.Context, reference string, 
 		return err
 	}
 	defer lock.Close()
-	args := client.installArgs(reference)
-	command := processx.Command(ctx, client.Executable, args...)
-	command.Env = client.environment()
-	stdout, err := command.StdoutPipe()
+	command, stdout, stderr, err := client.startInstall(ctx, reference)
 	if err != nil {
 		return err
 	}
-	stderr, err := command.StderrPipe()
-	if err != nil {
-		return err
-	}
-	if err := command.Start(); err != nil {
-		return fmt.Errorf("E_CONAN_INSTALL: %w", err)
-	}
+	output := &installOutput{readErrors: make(chan error, 2)}
+	outReader, errReader, progress := installReaders(ctx, stdout, stderr, progress)
+	output.progress = progress
 	var wait sync.WaitGroup
-	var callbackLock sync.Mutex
-	readErrors := make(chan error, 2)
-	outputLines := make([]string, 0, 128)
-	read := func(reader *bufio.Reader) {
-		defer wait.Done()
-		for {
-			text, readErr := reader.ReadString('\n')
-			line := strings.TrimRight(processx.DecodeOutput([]byte(text)), "\r\n")
-			if text == "" {
-				if readErr != io.EOF && readErr != nil {
-					readErrors <- readErr
-				}
-				return
-			}
-			callbackLock.Lock()
-			outputLines = append(outputLines, line)
-			if len(outputLines) > 128 {
-				outputLines = outputLines[len(outputLines)-128:]
-			}
-			if progress != nil {
-				progress(line)
-			}
-			callbackLock.Unlock()
-			if readErr != nil {
-				if readErr != io.EOF {
-					readErrors <- readErr
-				}
-				return
-			}
-		}
-	}
 	wait.Add(2)
-	var outReader, errReader io.Reader = stdout, stderr
-	if raw := processx.Output(ctx); raw != nil {
-		tee := processx.Sync(raw)
-		outReader, errReader = io.TeeReader(stdout, tee), io.TeeReader(stderr, tee)
-		progress = processx.Notify(ctx, progress)
-	}
-	go read(bufio.NewReader(outReader))
-	go read(bufio.NewReader(errReader))
+	go func() {
+		defer wait.Done()
+		output.read(bufio.NewReader(outReader))
+	}()
+	go func() {
+		defer wait.Done()
+		output.read(bufio.NewReader(errReader))
+	}()
 	wait.Wait()
-	close(readErrors)
+	close(output.readErrors)
 	commandErr := command.Wait()
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
-	for readErr := range readErrors {
+	for readErr := range output.readErrors {
 		return fmt.Errorf("E_CONAN_INSTALL: read output: %w", readErr)
 	}
 	if err := commandErr; err != nil {
-		callbackLock.Lock()
-		detail := strings.Join(outputLines, "\n")
-		callbackLock.Unlock()
-		if detail != "" {
+		if detail := output.detail(); detail != "" {
 			return fmt.Errorf("E_CONAN_INSTALL: %s", tail(detail, 8))
 		}
 		return fmt.Errorf("E_CONAN_INSTALL: %w", err)

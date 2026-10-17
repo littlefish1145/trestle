@@ -65,13 +65,7 @@ func (resolver Resolver) Resolve(ctx context.Context, pkg config.Package) (Resol
 // output: the include folder, the library folder, and each per-dependency
 // <name>-config.cmake listing targets. Runtime DLLs come from the bin folder.
 func usageFromOutput(layout Layout, pkg config.Package) (model.Usage, error) {
-	name := pkg.Port
-	if name == "" {
-		name = pkg.Provider
-	}
-	if slash := strings.Index(name, "/"); slash > 0 {
-		name = name[:slash]
-	}
+	name := resolvePackageName(pkg)
 	if _, err := os.Stat(layout.OutputDir); err != nil {
 		return model.Usage{}, fmt.Errorf("E_CONAN_LAYOUT: conan install output %q is missing", layout.OutputDir)
 	}
@@ -82,15 +76,7 @@ func usageFromOutput(layout Layout, pkg config.Package) (model.Usage, error) {
 	// CMakeDeps writes one <name>Config.cmake (or <name>-config.cmake) per
 	// dependency plus the requested package; collect the declared libraries
 	// from the package's own config file when present.
-	for _, candidate := range configCandidates(name) {
-		path := filepath.Join(layout.OutputDir, candidate)
-		data, err := os.ReadFile(path)
-		if err != nil {
-			continue
-		}
-		usage.Link.Items = append(usage.Link.Items, librariesFromConfig(string(data), layout.LibDir)...)
-		break
-	}
+	usage.Link.Items = append(usage.Link.Items, librariesFromConfigFiles(layout, name)...)
 	for _, library := range pkg.Libraries {
 		usage.Link.Items = append(usage.Link.Items, model.LinkItem{Kind: "library", Name: library, Path: existingLibrary(layout.LibDir, library)})
 	}
@@ -102,6 +88,32 @@ func usageFromOutput(layout Layout, pkg config.Package) (model.Usage, error) {
 		return model.Usage{}, fmt.Errorf("E_CONAN_LAYOUT: no CMakeDeps artifacts for %s under %s", name, layout.OutputDir)
 	}
 	return usage, nil
+}
+
+// resolvePackageName returns the package's port, falling back to the provider
+// and dropping any user/channel suffix.
+func resolvePackageName(pkg config.Package) string {
+	name := pkg.Port
+	if name == "" {
+		name = pkg.Provider
+	}
+	if slash := strings.Index(name, "/"); slash > 0 {
+		name = name[:slash]
+	}
+	return name
+}
+
+// librariesFromConfigFiles reads the first config candidate that exists under the
+// install output and returns the libraries it declares.
+func librariesFromConfigFiles(layout Layout, name string) []model.LinkItem {
+	for _, candidate := range configCandidates(name) {
+		data, err := os.ReadFile(filepath.Join(layout.OutputDir, candidate))
+		if err != nil {
+			continue
+		}
+		return librariesFromConfig(string(data), layout.LibDir)
+	}
+	return nil
 }
 
 func configCandidates(name string) []string {
