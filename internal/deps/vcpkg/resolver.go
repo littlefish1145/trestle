@@ -155,46 +155,78 @@ func (resolver Resolver) resolvePC(layout Layout, name string, visiting map[stri
 	if err != nil {
 		return model.Usage{}, fmt.Errorf("parse %s: %w", path, err)
 	}
-	libDir := layout.ReleaseLibDir
-	if strings.EqualFold(resolver.Profile, "debug") {
-		libDir = layout.DebugLibDir
-	}
+	libDir := resolver.libraryDir(layout)
 	u := model.Usage{Compile: model.CompileUsage{IncludeDirs: []string{layout.IncludeDir}}, Link: model.LinkUsage{LibraryDirs: []string{libDir}}}
-	for _, flag := range pc.Cflags {
-		if strings.HasPrefix(flag, "-I") {
-			u.Compile.IncludeDirs = append(u.Compile.IncludeDirs, strings.TrimPrefix(flag, "-I"))
-		} else if strings.HasPrefix(flag, "-D") {
-			u.Compile.Defines = append(u.Compile.Defines, strings.TrimPrefix(flag, "-D"))
-		} else {
-			u.Compile.Options = append(u.Compile.Options, flag)
-		}
-	}
+	applyPCCflags(&u.Compile, pc.Cflags)
 	libs := append([]string{}, pc.Libs...)
 	requires := append([]string{}, pc.Requires...)
-	if strings.EqualFold(resolver.LibraryLinkage, "static") || strings.Contains(layout.Triplet, "static") {
+	if resolver.usesStaticLibraries(layout) {
 		libs = append(libs, pc.LibsPrivate...)
 		requires = append(requires, pc.RequiresPrivate...)
 	}
+	u = resolver.mergeResolvedRequires(layout, u, requires, visiting)
+	applyPCLibs(&u.Link, libDir, libs)
+	return u, nil
+}
+
+// libraryDir returns the library directory for the profile this resolver is
+// configured for.
+func (resolver Resolver) libraryDir(layout Layout) string {
+	if strings.EqualFold(resolver.Profile, "debug") {
+		return layout.DebugLibDir
+	}
+	return layout.ReleaseLibDir
+}
+
+// usesStaticLibraries reports whether the resolver links libraries statically,
+// either from its own linkage setting or from a static triplet name.
+func (resolver Resolver) usesStaticLibraries(layout Layout) bool {
+	return strings.EqualFold(resolver.LibraryLinkage, "static") || strings.Contains(layout.Triplet, "static")
+}
+
+// mergeResolvedRequires merges the usage of every required pkg-config file into
+// usage. A requirement that fails to resolve is skipped rather than failing the
+// whole package.
+func (resolver Resolver) mergeResolvedRequires(layout Layout, usage model.Usage, requires []string, visiting map[string]bool) model.Usage {
 	for _, dep := range requires {
-		child, e := resolver.resolvePC(layout, dep, visiting)
-		if e == nil {
-			u = mergeUsage(u, child)
+		child, err := resolver.resolvePC(layout, dep, visiting)
+		if err == nil {
+			usage = mergeUsage(usage, child)
 		}
 	}
-	for _, flag := range libs {
+	return usage
+}
+
+// applyPCCflags folds pkg-config compiler flags into the compile usage,
+// splitting -I include directories and -D defines out of the remaining options.
+func applyPCCflags(compile *model.CompileUsage, flags []string) {
+	for _, flag := range flags {
+		if strings.HasPrefix(flag, "-I") {
+			compile.IncludeDirs = append(compile.IncludeDirs, strings.TrimPrefix(flag, "-I"))
+		} else if strings.HasPrefix(flag, "-D") {
+			compile.Defines = append(compile.Defines, strings.TrimPrefix(flag, "-D"))
+		} else {
+			compile.Options = append(compile.Options, flag)
+		}
+	}
+}
+
+// applyPCLibs folds pkg-config linker flags into the link usage, splitting -L
+// directories, -l libraries and bare archive names out of the remaining options.
+func applyPCLibs(link *model.LinkUsage, libDir string, flags []string) {
+	for _, flag := range flags {
 		switch {
 		case strings.HasPrefix(flag, "-L"):
-			u.Link.LibraryDirs = append(u.Link.LibraryDirs, strings.TrimPrefix(flag, "-L"))
+			link.LibraryDirs = append(link.LibraryDirs, strings.TrimPrefix(flag, "-L"))
 		case strings.HasPrefix(flag, "-l"):
 			name := strings.TrimPrefix(flag, "-l")
-			u.Link.Items = append(u.Link.Items, libraryItem(libDir, name))
+			link.Items = append(link.Items, libraryItem(libDir, name))
 		case strings.HasSuffix(strings.ToLower(flag), ".lib") || strings.HasSuffix(strings.ToLower(flag), ".a"):
-			u.Link.Items = append(u.Link.Items, model.LinkItem{Kind: "library", Name: flag, Path: existingLibrary(libDir, flag)})
+			link.Items = append(link.Items, model.LinkItem{Kind: "library", Name: flag, Path: existingLibrary(libDir, flag)})
 		default:
-			u.Link.Options = append(u.Link.Options, flag)
+			link.Options = append(link.Options, flag)
 		}
 	}
-	return u, nil
 }
 
 func libraryItem(dir, name string) model.LinkItem {

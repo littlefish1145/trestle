@@ -36,17 +36,11 @@ func ParsePC(path string) (PcFile, error) {
 	var result PcFile
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" || strings.HasPrefix(line, "#") {
+		key, value, isVariable, ok := parsePCLine(scanner.Text())
+		if !ok {
 			continue
 		}
-		separator := strings.IndexAny(line, "=:")
-		if separator < 0 {
-			continue
-		}
-		key := strings.TrimSpace(line[:separator])
-		value := strings.TrimSpace(line[separator+1:])
-		if line[separator] == '=' {
+		if isVariable {
 			values[key] = value
 			continue
 		}
@@ -60,25 +54,48 @@ func ParsePC(path string) (PcFile, error) {
 		if strings.Contains(value, "${") {
 			return PcFile{}, fmt.Errorf("unresolved pkg-config variable in %s: %s", key, value)
 		}
-		switch key {
-		case "Name":
-			result.Name = value
-		case "Cflags":
-			result.Cflags = splitPC(value)
-		case "Libs":
-			result.Libs = splitPC(value)
-		case "Libs.private":
-			result.LibsPrivate = splitPC(value)
-		case "Requires":
-			result.Requires = splitRequires(value)
-		case "Requires.private":
-			result.RequiresPrivate = splitRequires(value)
-		}
+		applyPCField(&result, key, value)
 	}
 	if err := scanner.Err(); err != nil {
 		return PcFile{}, err
 	}
 	return result, nil
+}
+
+// parsePCLine splits one .pc line into a key and value. A '=' assignment defines
+// a variable and reports isVariable true; a ':' assignment defines a field.
+// Blank lines, comments and lines without a separator report ok false.
+func parsePCLine(line string) (key, value string, isVariable, ok bool) {
+	line = strings.TrimSpace(line)
+	if line == "" || strings.HasPrefix(line, "#") {
+		return "", "", false, false
+	}
+	separator := strings.IndexAny(line, "=:")
+	if separator < 0 {
+		return "", "", false, false
+	}
+	key = strings.TrimSpace(line[:separator])
+	value = strings.TrimSpace(line[separator+1:])
+	return key, value, line[separator] == '=', true
+}
+
+// applyPCField copies one expanded field value into the matching slot of a
+// PcFile. Fields it does not recognise are ignored.
+func applyPCField(result *PcFile, key, value string) {
+	switch key {
+	case "Name":
+		result.Name = value
+	case "Cflags":
+		result.Cflags = splitPC(value)
+	case "Libs":
+		result.Libs = splitPC(value)
+	case "Libs.private":
+		result.LibsPrivate = splitPC(value)
+	case "Requires":
+		result.Requires = splitRequires(value)
+	case "Requires.private":
+		result.RequiresPrivate = splitRequires(value)
+	}
 }
 
 func expandPC(value string, values map[string]string) string {
@@ -98,7 +115,16 @@ func expandPC(value string, values map[string]string) string {
 	return value
 }
 
+// splitPC splits a pkg-config flag value into fields, honouring single and
+// double quotes, and rejoins a separated -I, -L or -D flag with its argument.
 func splitPC(value string) []string {
+	return joinPCFlagArguments(tokenizePC(value))
+}
+
+// tokenizePC splits a whitespace-separated pkg-config value into tokens,
+// treating single and double quotes as grouping and dropping the quote
+// characters. Both spaces and tabs separate tokens.
+func tokenizePC(value string) []string {
 	var fields []string
 	var token strings.Builder
 	var quote rune
@@ -123,6 +149,12 @@ func splitPC(value string) []string {
 	if token.Len() > 0 {
 		fields = append(fields, token.String())
 	}
+	return fields
+}
+
+// joinPCFlagArguments attaches a separated argument to a preceding -I, -L or -D
+// flag, so each returned field is a self-contained compiler or linker option.
+func joinPCFlagArguments(fields []string) []string {
 	var result []string
 	for index := 0; index < len(fields); index++ {
 		field := fields[index]

@@ -67,22 +67,47 @@ func (client Client) PortVersions(ctx context.Context, name string) ([]PortVersi
 	if name == "" {
 		return nil, fmt.Errorf("E_VCPKG_HISTORY: port name is required")
 	}
-	databasePath := versionDatabasePath(client.Root, name)
-	data, err := os.ReadFile(databasePath)
+	database, err := loadVersionDatabase(client.Root, name)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, fmt.Errorf("E_VCPKG_HISTORY: no version history for %q: %s is missing", name, filepath.Base(databasePath))
-		}
-		return nil, fmt.Errorf("E_VCPKG_HISTORY: read %s: %w", databasePath, err)
-	}
-	var database versionDatabase
-	if err := json.Unmarshal(data, &database); err != nil {
-		return nil, fmt.Errorf("E_VCPKG_HISTORY: parse %s: %w", databasePath, err)
+		return nil, err
 	}
 	manifest := client.currentManifest(name)
 	installed := client.IsInstalled(name)
-	versions := make([]PortVersion, 0, len(database.Versions))
-	for _, entry := range database.Versions {
+	versions := buildPortVersions(name, database.Versions, manifest, installed)
+	sortPortVersions(versions)
+	if err := client.fillVersionDetails(ctx, name, versions); err != nil {
+		return versions, err
+	}
+	return versions, nil
+}
+
+// loadVersionDatabase reads and parses the version database file for a port,
+// mapping a missing file and read or parse failures onto the history error
+// vocabulary.
+func loadVersionDatabase(root, name string) (versionDatabase, error) {
+	databasePath := versionDatabasePath(root, name)
+	data, err := os.ReadFile(databasePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return versionDatabase{}, fmt.Errorf("E_VCPKG_HISTORY: no version history for %q: %s is missing", name, filepath.Base(databasePath))
+		}
+		return versionDatabase{}, fmt.Errorf("E_VCPKG_HISTORY: read %s: %w", databasePath, err)
+	}
+	var database versionDatabase
+	if err := json.Unmarshal(data, &database); err != nil {
+		return versionDatabase{}, fmt.Errorf("E_VCPKG_HISTORY: parse %s: %w", databasePath, err)
+	}
+	return database, nil
+}
+
+// buildPortVersions converts version database entries into PortVersion records,
+// skipping entries that carry no upstream version. The newest entry describes
+// the port currently in the working tree, so it can reuse the already-parsed
+// manifest instead of a git call.
+func buildPortVersions(name string, entries []versionDatabaseEntry, manifest *portManifest, installed bool) []PortVersion {
+	packageURL := "https://vcpkg.io/en/package/" + name + ".html"
+	versions := make([]PortVersion, 0, len(entries))
+	for _, entry := range entries {
 		if entry.Version == "" {
 			continue
 		}
@@ -92,20 +117,14 @@ func (client Client) PortVersions(ctx context.Context, name string) ([]PortVersi
 			PortVersion: entry.PortVersion,
 			GitTree:     entry.GitTree,
 			Installed:   installed && manifest != nil && manifest.Version == entry.Version,
-			PackageURL:  "https://vcpkg.io/en/package/" + name + ".html",
+			PackageURL:  packageURL,
 		}
-		// The newest entry describes the port currently in the working tree, so
-		// it can reuse the already-parsed manifest instead of a git call.
 		if manifest != nil && manifest.Version == entry.Version && manifest.VersionDate == "" {
 			version.Current = true
 		}
 		versions = append(versions, version)
 	}
-	sortPortVersions(versions)
-	if err := client.fillVersionDetails(ctx, name, versions); err != nil {
-		return versions, err
-	}
-	return versions, nil
+	return versions
 }
 
 // portManifest is the subset of vcpkg.json needed to describe a version.
@@ -148,26 +167,33 @@ func (client Client) fillVersionDetails(ctx context.Context, name string, versio
 		if err != nil || manifest == nil {
 			continue
 		}
-		if version.Current || (version.Description == "" && version.License == "") {
-			version.Date = manifest.date()
-		}
-		if version.Description == "" {
-			version.Description = decodeText(manifest.Description)
-		}
-		if version.License == "" {
-			version.License = manifest.License
-		}
-		if version.Homepage == "" {
-			version.Homepage = manifest.Homepage
-		}
-		if len(version.Dependencies) == 0 {
-			version.Dependencies = decodeNames(manifest.Dependencies)
-		}
-		if manifest.Version != "" {
-			version.Version = manifest.Version
-		}
+		applyManifestToVersion(version, manifest)
 	}
 	return nil
+}
+
+// applyManifestToVersion fills the empty metadata fields of one version from its
+// git-tree manifest. The date is also refreshed for the current release, whose
+// manifest describes the working tree rather than a published tag.
+func applyManifestToVersion(version *PortVersion, manifest *portManifest) {
+	if version.Current || (version.Description == "" && version.License == "") {
+		version.Date = manifest.date()
+	}
+	if version.Description == "" {
+		version.Description = decodeText(manifest.Description)
+	}
+	if version.License == "" {
+		version.License = manifest.License
+	}
+	if version.Homepage == "" {
+		version.Homepage = manifest.Homepage
+	}
+	if len(version.Dependencies) == 0 {
+		version.Dependencies = decodeNames(manifest.Dependencies)
+	}
+	if manifest.Version != "" {
+		version.Version = manifest.Version
+	}
 }
 
 // manifestFromTree reads vcpkg.json out of a git tree object.
@@ -307,14 +333,7 @@ func (client Client) SearchPortsVersions(ctx context.Context, query string, limi
 		if historyErr != nil {
 			// Not every port is in the version database; fall back to the
 			// single version the local tree reports.
-			port := Port{Name: name, Installed: client.IsInstalled(name), Source: "local"}
-			if len(fields) > 1 {
-				port.Version = strings.TrimSuffix(fields[1], "#")
-			}
-			port.PackageURL = "https://vcpkg.io/en/package/" + name + ".html"
-			found = append(found, PortVersion{
-				Port: name, Version: port.Version, Current: true, Installed: port.Installed, PackageURL: port.PackageURL,
-			})
+			found = append(found, client.fallbackPortVersion(name, fields))
 			continue
 		}
 		if len(found)+len(versions) > 200 {
@@ -330,6 +349,19 @@ func (client Client) SearchPortsVersions(ctx context.Context, query string, limi
 		found = found[:limit]
 	}
 	return found, nil
+}
+
+// fallbackPortVersion builds the single version record for a port that has no
+// version database entry, using the version the local tree reports.
+func (client Client) fallbackPortVersion(name string, fields []string) PortVersion {
+	port := Port{Name: name, Installed: client.IsInstalled(name), Source: "local"}
+	if len(fields) > 1 {
+		port.Version = strings.TrimSuffix(fields[1], "#")
+	}
+	port.PackageURL = "https://vcpkg.io/en/package/" + name + ".html"
+	return PortVersion{
+		Port: name, Version: port.Version, Current: true, Installed: port.Installed, PackageURL: port.PackageURL,
+	}
 }
 
 // ResolveVersion finds the exact published version of a port. The match is

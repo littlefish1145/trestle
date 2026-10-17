@@ -192,12 +192,7 @@ func (client Client) InstallWithProgress(ctx context.Context, ports []string, tr
 		return err
 	}
 	defer lock.Close()
-	args := []string{"install"}
-	args = append(args, ports...)
-	if triplet != "" && triplet != "auto" {
-		args = append(args, "--triplet", triplet)
-	}
-	command := processx.Command(ctx, client.Executable, args...)
+	command := processx.Command(ctx, client.Executable, installArgs(ports, triplet)...)
 	command.Env = client.environment()
 	stdout, err := command.StdoutPipe()
 	if err != nil {
@@ -210,44 +205,8 @@ func (client Client) InstallWithProgress(ctx context.Context, ports []string, tr
 	if err := command.Start(); err != nil {
 		return fmt.Errorf("E_VCPKG_INSTALL: %w", err)
 	}
+	stream := &installStream{lines: make([]string, 0, 128), readErr: make(chan error, 2), progress: progress}
 	var wait sync.WaitGroup
-	var callbackLock sync.Mutex
-	readErrors := make(chan error, 2)
-	outputLines := make([]string, 0, 128)
-	read := func(reader *bufio.Reader) {
-		defer wait.Done()
-		for {
-			text, readErr := reader.ReadString('\n')
-			line := strings.TrimRight(processx.DecodeOutput([]byte(text)), "\r\n")
-			if text == "" {
-				if readErr == io.EOF {
-					return
-				}
-				if readErr != nil {
-					if readErr != io.EOF {
-						readErrors <- readErr
-					}
-					return
-				}
-				continue
-			}
-			callbackLock.Lock()
-			outputLines = append(outputLines, line)
-			if len(outputLines) > 128 {
-				outputLines = outputLines[len(outputLines)-128:]
-			}
-			if progress != nil {
-				progress(line)
-			}
-			callbackLock.Unlock()
-			if readErr != nil {
-				if readErr != io.EOF {
-					readErrors <- readErr
-				}
-				return
-			}
-		}
-	}
 	wait.Add(2)
 	var outReader, errReader io.Reader = stdout, stderr
 	if raw := processx.Output(ctx); raw != nil {
@@ -255,23 +214,21 @@ func (client Client) InstallWithProgress(ctx context.Context, ports []string, tr
 		// sink only sees valid Write calls when they are serialized here.
 		tee := processx.Sync(raw)
 		outReader, errReader = io.TeeReader(stdout, tee), io.TeeReader(stderr, tee)
-		progress = processx.Notify(ctx, progress)
+		stream.progress = processx.Notify(ctx, stream.progress)
 	}
-	go read(bufio.NewReader(outReader))
-	go read(bufio.NewReader(errReader))
+	go readInstallStream(bufio.NewReader(outReader), stream, &wait)
+	go readInstallStream(bufio.NewReader(errReader), stream, &wait)
 	wait.Wait()
-	close(readErrors)
+	close(stream.readErr)
 	commandErr := command.Wait()
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
-	for readErr := range readErrors {
+	for readErr := range stream.readErr {
 		return fmt.Errorf("E_VCPKG_INSTALL: read output: %w", readErr)
 	}
 	if err := commandErr; err != nil {
-		callbackLock.Lock()
-		detail := strings.Join(outputLines, "\n")
-		callbackLock.Unlock()
+		detail := stream.detail()
 		if detail != "" {
 			return fmt.Errorf("E_VCPKG_INSTALL: %s", tail(detail, 8))
 		}
@@ -280,18 +237,85 @@ func (client Client) InstallWithProgress(ctx context.Context, ports []string, tr
 	return nil
 }
 
+// installStream collects the complete output lines of a running vcpkg install
+// while forwarding each one to a progress callback. Its stdout and stderr
+// readers use it concurrently.
+type installStream struct {
+	lock     sync.Mutex
+	lines    []string
+	readErr  chan error
+	progress func(string)
+}
+
+// append records one complete line, trims the history to the newest 128 lines
+// and forwards the line to the progress callback.
+func (stream *installStream) append(line string) {
+	stream.lock.Lock()
+	defer stream.lock.Unlock()
+	stream.lines = append(stream.lines, line)
+	if len(stream.lines) > 128 {
+		stream.lines = stream.lines[len(stream.lines)-128:]
+	}
+	if stream.progress != nil {
+		stream.progress(line)
+	}
+}
+
+// detail returns the buffered output lines as a newline-joined string.
+func (stream *installStream) detail() string {
+	stream.lock.Lock()
+	defer stream.lock.Unlock()
+	return strings.Join(stream.lines, "\n")
+}
+
+// readInstallStream drains one of a command's output pipes, forwarding each
+// complete line to the stream and reporting a read failure on its channel. It
+// marks one wait-group entry done when it returns.
+func readInstallStream(reader *bufio.Reader, stream *installStream, wait *sync.WaitGroup) {
+	defer wait.Done()
+	for {
+		text, readErr := reader.ReadString('\n')
+		line := strings.TrimRight(processx.DecodeOutput([]byte(text)), "\r\n")
+		if text == "" {
+			if readErr == io.EOF {
+				return
+			}
+			if readErr != nil {
+				if readErr != io.EOF {
+					stream.readErr <- readErr
+				}
+				return
+			}
+			continue
+		}
+		stream.append(line)
+		if readErr != nil {
+			if readErr != io.EOF {
+				stream.readErr <- readErr
+			}
+			return
+		}
+	}
+}
+
+// installArgs builds the vcpkg install argument list, adding --triplet when a
+// concrete triplet is requested.
+func installArgs(ports []string, triplet string) []string {
+	args := []string{"install"}
+	args = append(args, ports...)
+	if triplet != "" && triplet != "auto" {
+		args = append(args, "--triplet", triplet)
+	}
+	return args
+}
+
 func (client Client) install(ctx context.Context, ports []string, triplet string, stream bool) (string, error) {
 	lock, err := fsx.TryLock(ctx, filepath.Join(client.Root, "installed"), "vcpkg install")
 	if err != nil {
 		return "", err
 	}
 	defer lock.Close()
-	args := []string{"install"}
-	args = append(args, ports...)
-	if triplet != "" && triplet != "auto" {
-		args = append(args, "--triplet", triplet)
-	}
-	command := processx.Command(ctx, client.Executable, args...)
+	command := processx.Command(ctx, client.Executable, installArgs(ports, triplet)...)
 	command.Env = client.environment()
 	var output bytes.Buffer
 	if stream {

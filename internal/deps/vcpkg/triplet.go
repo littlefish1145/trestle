@@ -35,7 +35,32 @@ type TripletCandidate struct {
 func RankTriplets(request TripletRequest) ([]TripletCandidate, error) {
 	available := append([]string{}, request.Available...)
 	sort.Strings(available)
-	arch := request.Arch
+	arch, osName := normalizeTripletTarget(request)
+	var result []TripletCandidate
+	for _, name := range available {
+		lower := strings.ToLower(name)
+		if !strings.HasPrefix(lower, arch+"-"+osName) {
+			continue
+		}
+		score, why := scoreTriplet(lower, arch, osName, request)
+		if score > 0 {
+			result = append(result, TripletCandidate{Name: name, Score: score, Why: why})
+		}
+	}
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].Score == result[j].Score {
+			return result[i].Name < result[j].Name
+		}
+		return result[i].Score > result[j].Score
+	})
+	return result, nil
+}
+
+// normalizeTripletTarget resolves the architecture and OS tokens a matching
+// triplet name must carry. Empty request fields fall back to the host, and Go's
+// architecture and OS names are translated into the ones vcpkg uses.
+func normalizeTripletTarget(request TripletRequest) (arch, osName string) {
+	arch = request.Arch
 	if arch == "" {
 		arch = runtime.GOARCH
 	}
@@ -45,7 +70,7 @@ func RankTriplets(request TripletRequest) ([]TripletCandidate, error) {
 	if arch == "386" {
 		arch = "x86"
 	}
-	osName := request.OS
+	osName = request.OS
 	if osName == "" {
 		osName = runtime.GOOS
 	}
@@ -59,45 +84,37 @@ func RankTriplets(request TripletRequest) ([]TripletCandidate, error) {
 	} else {
 		osName = "linux"
 	}
-	var result []TripletCandidate
-	for _, name := range available {
-		lower := strings.ToLower(name)
-		if !strings.HasPrefix(lower, arch+"-"+osName) {
-			continue
-		}
-		score := 0
-		why := make([]string, 0, 4)
-		if strings.Contains(lower, arch) {
-			score += 100
-			why = append(why, "architecture "+arch)
-		}
-		if strings.Contains(lower, osName) {
-			score += 80
-			why = append(why, "OS "+osName)
-		}
-		if request.Compiler != "" && strings.Contains(lower, strings.ToLower(request.Compiler)) {
-			score += 20
-			why = append(why, "compiler "+request.Compiler)
-		}
-		if request.CRTLinkage == "static" && strings.Contains(lower, "static") {
-			score += 8
-			why = append(why, "static CRT")
-		}
-		if request.LibraryLinkage == "static" && strings.HasSuffix(lower, "-static") {
-			score += 8
-			why = append(why, "static libraries")
-		}
-		if score > 0 {
-			result = append(result, TripletCandidate{Name: name, Score: score, Why: why})
-		}
+	return arch, osName
+}
+
+// scoreTriplet scores one lowercased triplet name against a request, returning
+// the points it earned and the reasons it matched. The name is assumed to carry
+// the request's architecture and OS prefix; the reasons describe each feature the
+// name matched.
+func scoreTriplet(lower, arch, osName string, request TripletRequest) (int, []string) {
+	score := 0
+	why := make([]string, 0, 4)
+	if strings.Contains(lower, arch) {
+		score += 100
+		why = append(why, "architecture "+arch)
 	}
-	sort.Slice(result, func(i, j int) bool {
-		if result[i].Score == result[j].Score {
-			return result[i].Name < result[j].Name
-		}
-		return result[i].Score > result[j].Score
-	})
-	return result, nil
+	if strings.Contains(lower, osName) {
+		score += 80
+		why = append(why, "OS "+osName)
+	}
+	if request.Compiler != "" && strings.Contains(lower, strings.ToLower(request.Compiler)) {
+		score += 20
+		why = append(why, "compiler "+request.Compiler)
+	}
+	if request.CRTLinkage == "static" && strings.Contains(lower, "static") {
+		score += 8
+		why = append(why, "static CRT")
+	}
+	if request.LibraryLinkage == "static" && strings.HasSuffix(lower, "-static") {
+		score += 8
+		why = append(why, "static libraries")
+	}
+	return score, why
 }
 
 // SelectAutoTriplet chooses the single best triplet for a request. It fails when

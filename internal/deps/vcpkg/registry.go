@@ -159,23 +159,41 @@ func (registry WebRegistry) loadRemote(ctx context.Context) ([]Port, error) {
 	if client == nil {
 		client = &http.Client{Timeout: 60 * time.Second}
 	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, indexURL, nil)
+	document, err := fetchRegistryDocument(ctx, client, indexURL)
 	if err != nil {
 		return nil, err
+	}
+	ports := registryPorts(document)
+	registry.storePorts(indexURL, ports)
+	return ports, nil
+}
+
+// fetchRegistryDocument downloads and decodes the port index at indexURL,
+// turning transport and HTTP failures into registry errors.
+func fetchRegistryDocument(ctx context.Context, client *http.Client, indexURL string) (registryDocument, error) {
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, indexURL, nil)
+	if err != nil {
+		return registryDocument{}, err
 	}
 	request.Header.Set("User-Agent", "Trestle/1 vcpkg-registry-client")
 	response, err := client.Do(request)
 	if err != nil {
-		return nil, fmt.Errorf("official vcpkg registry is unavailable: %w", err)
+		return registryDocument{}, fmt.Errorf("official vcpkg registry is unavailable: %w", err)
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("official vcpkg registry returned %s", response.Status)
+		return registryDocument{}, fmt.Errorf("official vcpkg registry returned %s", response.Status)
 	}
 	var document registryDocument
 	if err := json.NewDecoder(response.Body).Decode(&document); err != nil {
-		return nil, fmt.Errorf("decode official vcpkg registry: %w", err)
+		return registryDocument{}, fmt.Errorf("decode official vcpkg registry: %w", err)
 	}
+	return document, nil
+}
+
+// registryPorts converts the raw index records into ports, skipping records
+// without a name.
+func registryPorts(document registryDocument) []Port {
 	ports := make([]Port, 0, len(document.Source))
 	for _, item := range document.Source {
 		if item.Name == "" {
@@ -194,6 +212,12 @@ func (registry WebRegistry) loadRemote(ctx context.Context) ([]Port, error) {
 			PackageURL:   "https://vcpkg.io/en/package/" + url.PathEscape(item.Name) + ".html",
 		})
 	}
+	return ports
+}
+
+// storePorts records a freshly downloaded index in the in-memory official cache
+// and, when a cache path is configured, on disk.
+func (registry WebRegistry) storePorts(indexURL string, ports []Port) {
 	if indexURL == OfficialIndexURL {
 		officialCache.Lock()
 		officialCache.registryCache = registryCache{url: indexURL, loaded: time.Now(), ports: append([]Port(nil), ports...)}
@@ -206,7 +230,6 @@ func (registry WebRegistry) loadRemote(ctx context.Context) ([]Port, error) {
 			}
 		}
 	}
-	return ports, nil
 }
 
 func rankPort(port Port, query string) int {
