@@ -102,6 +102,21 @@ func acquire(ctx context.Context, resource, operation string, shared bool) (*Loc
 	if err != nil {
 		return nil, err
 	}
+	file, err := createLockFile(canonical, shared)
+	if err != nil {
+		return nil, err
+	}
+	lock := &Lock{file: file}
+	if err := recordLock(ctx, lock, canonical, operation, shared); err != nil {
+		return nil, err
+	}
+	return lock, nil
+}
+
+// createLockFile creates the lock file for canonical and takes an OS lock on it,
+// shared or exclusive. A busy lock is reported as an E_RESOURCE_BUSY diagnostic;
+// other failures are returned unchanged.
+func createLockFile(canonical string, shared bool) (*os.File, error) {
 	path := canonical + ".trestle-lock"
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, err
@@ -115,35 +130,63 @@ func acquire(ctx context.Context, resource, operation string, shared bool) (*Loc
 		if !lockBusy(err) {
 			return nil, err
 		}
-		var owner LockOwner
-		data, _ := os.ReadFile(path + ".json")
-		_ = json.Unmarshal(data, &owner)
-		if reader, ok := activeReaderOwner(canonical); ok {
-			owner = reader
-		}
-		detail := fmt.Sprintf("Resource: %s\nOperation: %s\nPID: %d\nStarted: %s", canonical, owner.Operation, owner.PID, owner.Started.Format(time.RFC3339))
-		e := diag.New("E_RESOURCE_BUSY", diag.StageBuild, "resource is in use", err)
-		e.Detail = strings.TrimSpace(detail)
-		e.Hints = []string{"Wait for the owning operation to finish, or cancel it in its console, then retry. Lock files do not need to be deleted."}
-		return nil, e
+		return nil, busyLockError(canonical, path, err)
 	}
-	lock := &Lock{file: file}
+	return file, nil
+}
+
+// recordLock publishes the metadata a contending process reads to identify the
+// holder: reader metadata for a shared lock, owner metadata for an exclusive
+// one. It releases lock before returning on failure.
+func recordLock(ctx context.Context, lock *Lock, canonical, operation string, shared bool) error {
 	if shared {
-		readerPath := filepath.Join(canonical+".trestle-readers", fmt.Sprintf("%d-%d", os.Getpid(), time.Now().UnixNano()))
-		reader, err := TryLock(ctx, readerPath, operation)
-		if err != nil {
-			lock.Close()
-			return nil, err
-		}
-		lock.reader, lock.readerPath = reader, readerPath
-	} else {
-		data, _ := json.Marshal(LockOwner{canonical, operation, os.Getpid(), time.Now().UTC()})
-		if err := AtomicWrite(path+".json", data); err != nil {
-			lock.Close()
-			return nil, fmt.Errorf("writing lock owner metadata: %w", err)
-		}
+		return registerReader(ctx, lock, canonical, operation)
 	}
-	return lock, nil
+	return writeOwner(lock, canonical, operation)
+}
+
+// busyLockError builds the E_RESOURCE_BUSY diagnostic for resource, describing
+// the blocking operation from owner metadata or, when the lock is held by
+// readers, from the first active reader. cause is the underlying lock error.
+func busyLockError(resource, lockPath string, cause error) error {
+	var owner LockOwner
+	data, _ := os.ReadFile(lockPath + ".json")
+	_ = json.Unmarshal(data, &owner)
+	if reader, ok := activeReaderOwner(resource); ok {
+		owner = reader
+	}
+	detail := fmt.Sprintf("Resource: %s\nOperation: %s\nPID: %d\nStarted: %s", resource, owner.Operation, owner.PID, owner.Started.Format(time.RFC3339))
+	e := diag.New("E_RESOURCE_BUSY", diag.StageBuild, "resource is in use", cause)
+	e.Detail = strings.TrimSpace(detail)
+	e.Hints = []string{"Wait for the owning operation to finish, or cancel it in its console, then retry. Lock files do not need to be deleted."}
+	return e
+}
+
+// registerReader records a shared lock's reader metadata by taking a nested
+// exclusive lock that excludes a concurrent writer. It releases lock before
+// returning when the nested lock cannot be taken.
+func registerReader(ctx context.Context, lock *Lock, canonical, operation string) error {
+	readerPath := filepath.Join(canonical+".trestle-readers", fmt.Sprintf("%d-%d", os.Getpid(), time.Now().UnixNano()))
+	reader, err := TryLock(ctx, readerPath, operation)
+	if err != nil {
+		lock.Close()
+		return err
+	}
+	lock.reader, lock.readerPath = reader, readerPath
+	return nil
+}
+
+// writeOwner records an exclusive lock's owner metadata so a contending process
+// can report which operation holds the resource. It releases lock before
+// returning when the metadata cannot be written.
+func writeOwner(lock *Lock, canonical, operation string) error {
+	path := canonical + ".trestle-lock"
+	data, _ := json.Marshal(LockOwner{canonical, operation, os.Getpid(), time.Now().UTC()})
+	if err := AtomicWrite(path+".json", data); err != nil {
+		lock.Close()
+		return fmt.Errorf("writing lock owner metadata: %w", err)
+	}
+	return nil
 }
 
 // Close releases the lock and removes any reader metadata it created. Calling

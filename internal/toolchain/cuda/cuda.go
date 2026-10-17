@@ -99,12 +99,7 @@ func DetectWSL(ctx context.Context, distribution, root string, host toolchain.To
 }
 
 func detect(ctx context.Context, root string, configuredHost *toolchain.Toolchain) (Toolchain, error) {
-	if root == "" {
-		root = os.Getenv("CUDA_PATH")
-	}
-	if root == "" {
-		root = os.Getenv("CUDA_HOME")
-	}
+	root = toolkitRoot(root)
 	if root == "" {
 		return Toolchain{}, fmt.Errorf("E_CUDA_NOT_FOUND: set CUDA_PATH or CUDA_HOME")
 	}
@@ -117,20 +112,41 @@ func detect(ctx context.Context, root string, configuredHost *toolchain.Toolchai
 	}
 	versionOutput, _ := exec.CommandContext(ctx, nvcc, "--version").CombinedOutput()
 	version := firstLine(string(versionOutput))
-	host := toolchain.Toolchain{}
-	var err error
-	if configuredHost != nil {
-		host = *configuredHost
-	} else {
-		host, err = toolchain.NewDetector().Detect(ctx, "auto")
-		if err != nil {
-			host, err = toolchain.NewDetector().Detect(ctx, "clang++")
-			if err != nil {
-				return Toolchain{}, err
-			}
-		}
+	host, err := resolveHost(ctx, configuredHost)
+	if err != nil {
+		return Toolchain{}, err
 	}
 	return Toolchain{NVCC: NVCC{Path: nvcc, Version: version}, Host: host, Toolkit: Toolkit{Root: root, Version: version}, Architectures: []string{defaultArchitecture()}}, nil
+}
+
+// toolkitRoot returns root when it is set, otherwise the CUDA_PATH or CUDA_HOME
+// environment variable.
+func toolkitRoot(root string) string {
+	if root == "" {
+		root = os.Getenv("CUDA_PATH")
+	}
+	if root == "" {
+		root = os.Getenv("CUDA_HOME")
+	}
+	return root
+}
+
+// resolveHost returns the configured host toolchain when one was supplied,
+// otherwise it auto-detects one, falling back from the platform default to
+// clang++ before reporting the detection error.
+func resolveHost(ctx context.Context, configuredHost *toolchain.Toolchain) (toolchain.Toolchain, error) {
+	if configuredHost != nil {
+		return *configuredHost, nil
+	}
+	host, err := toolchain.NewDetector().Detect(ctx, "auto")
+	if err == nil {
+		return host, nil
+	}
+	host, err = toolchain.NewDetector().Detect(ctx, "clang++")
+	if err != nil {
+		return toolchain.Toolchain{}, err
+	}
+	return host, nil
 }
 
 func defaultArchitecture() string {
@@ -171,10 +187,7 @@ func (tc Toolchain) Compile(spec toolchain.CompileSpec) (string, []string, error
 	for _, define := range spec.Defines {
 		args = append(args, "-D"+define)
 	}
-	for _, architecture := range tc.Architectures {
-		number := strings.TrimPrefix(architecture, "sm_")
-		args = append(args, "-gencode=arch=compute_"+number+",code=sm_"+number)
-	}
+	args = append(args, architectureArgs(tc.Architectures)...)
 	if tc.Mode == SeparateCompilation {
 		args = append(args, "-dc")
 	}
@@ -182,6 +195,17 @@ func (tc Toolchain) Compile(spec toolchain.CompileSpec) (string, []string, error
 	args = append(args, spec.Options...)
 	exe, args := tc.Host.Wrap(tc.NVCC.Path, args)
 	return exe, args, nil
+}
+
+// architectureArgs returns the nvcc -gencode flags targeting each sm_ version in
+// architectures, preserving their order.
+func architectureArgs(architectures []string) []string {
+	result := make([]string, 0, len(architectures))
+	for _, architecture := range architectures {
+		number := strings.TrimPrefix(architecture, "sm_")
+		result = append(result, "-gencode=arch=compute_"+number+",code=sm_"+number)
+	}
+	return result
 }
 
 func includeArgs(includes []string) []string {
@@ -221,17 +245,9 @@ func ProbeHost(ctx context.Context, tc Toolchain) error {
 	if err := os.WriteFile(source, []byte("__global__ void kernel() {}\nint main() { return 0; }\n"), 0o644); err != nil {
 		return err
 	}
-	compileSource, compileOutput := source, output
-	if tc.Host.Runner != "" {
-		distribution := runnerDistribution(tc.Host.RunnerArgs)
-		compileSource, err = toolchain.WSLPath(ctx, distribution, source)
-		if err != nil {
-			return err
-		}
-		compileOutput, err = toolchain.WSLPath(ctx, distribution, output)
-		if err != nil {
-			return err
-		}
+	compileSource, compileOutput, err := probePaths(ctx, tc.Host, source, output)
+	if err != nil {
+		return err
 	}
 	probeToolchain := tc
 	if probeToolchain.Host.Runner != "" {
@@ -246,6 +262,25 @@ func ProbeHost(ctx context.Context, tc Toolchain) error {
 		return fmt.Errorf("E_TOOLCHAIN_CUDA_HOST_INCOMPATIBLE: nvcc -ccbin %s failed: %s", tc.Host.CXX, strings.TrimSpace(string(output)))
 	}
 	return nil
+}
+
+// probePaths translates the probe source and output paths into the host
+// toolchain's filesystem, converting them to WSL paths when the host runs
+// through a runner. It returns the paths unchanged otherwise.
+func probePaths(ctx context.Context, host toolchain.Toolchain, source, output string) (string, string, error) {
+	if host.Runner == "" {
+		return source, output, nil
+	}
+	distribution := runnerDistribution(host.RunnerArgs)
+	compileSource, err := toolchain.WSLPath(ctx, distribution, source)
+	if err != nil {
+		return "", "", err
+	}
+	compileOutput, err := toolchain.WSLPath(ctx, distribution, output)
+	if err != nil {
+		return "", "", err
+	}
+	return compileSource, compileOutput, nil
 }
 
 func runnerDistribution(args []string) string {

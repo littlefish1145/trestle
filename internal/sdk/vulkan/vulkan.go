@@ -173,9 +173,10 @@ func toolBase(value string) string {
 	return path.Base(filepath.ToSlash(value))
 }
 
-// Compile builds the shader-compiler command for spec, preferring glslc and
-// falling back to glslangValidator.
-func (sdk SDK) Compile(spec ShaderSpec) (ShaderCommand, error) {
+// shaderTool returns the shader compiler to run for spec, preferring a tool
+// named by the spec, then the SDK's glslc, then its glslangValidator. It returns
+// an empty string when none is available.
+func (sdk SDK) shaderTool(spec ShaderSpec) string {
 	tool := spec.Tool
 	if tool == "" {
 		tool = sdk.Glslc
@@ -183,26 +184,32 @@ func (sdk SDK) Compile(spec ShaderSpec) (ShaderCommand, error) {
 	if tool == "" {
 		tool = sdk.Glslang
 	}
-	if tool == "" {
-		return ShaderCommand{}, fmt.Errorf("E_VULKAN_SHADER_TOOL_NOT_FOUND")
+	return tool
+}
+
+// glslangArguments builds the glslangValidator arguments for spec. The source
+// file is appended by Compile after the command is wrapped, so it is not
+// included here.
+func glslangArguments(spec ShaderSpec) []string {
+	args := []string{"-S", string(spec.Stage), "-o", spec.Output}
+	if spec.EntryPoint != "" {
+		args = append(args, "-e", spec.EntryPoint)
 	}
-	if toolBase(tool) == "glslangValidator" {
-		args := []string{"-S", string(spec.Stage), "-o", spec.Output}
-		if spec.EntryPoint != "" {
-			args = append(args, "-e", spec.EntryPoint)
-		}
-		if spec.TargetEnv != "" {
-			args = append(args, "--target-env", spec.TargetEnv)
-		}
-		for _, include := range spec.Includes {
-			args = append(args, "-I"+include)
-		}
-		for _, define := range spec.Defines {
-			args = append(args, "-D"+define)
-		}
-		exe, args := sdk.wrap(tool, append(args, spec.Source))
-		return ShaderCommand{Exe: exe, Args: args}, nil
+	if spec.TargetEnv != "" {
+		args = append(args, "--target-env", spec.TargetEnv)
 	}
+	for _, include := range spec.Includes {
+		args = append(args, "-I"+include)
+	}
+	for _, define := range spec.Defines {
+		args = append(args, "-D"+define)
+	}
+	return args
+}
+
+// glslcArguments builds the glslc arguments for spec. The source file is
+// appended by Compile after the command is wrapped, so it is not included here.
+func glslcArguments(spec ShaderSpec) []string {
 	args := []string{"-fshader-stage=" + string(spec.Stage), "-o", spec.Output}
 	if spec.EntryPoint != "" {
 		args = append(args, "-fentry-point="+spec.EntryPoint)
@@ -215,6 +222,20 @@ func (sdk SDK) Compile(spec ShaderSpec) (ShaderCommand, error) {
 	}
 	for _, define := range spec.Defines {
 		args = append(args, "-D"+define)
+	}
+	return args
+}
+
+// Compile builds the shader-compiler command for spec, preferring glslc and
+// falling back to glslangValidator.
+func (sdk SDK) Compile(spec ShaderSpec) (ShaderCommand, error) {
+	tool := sdk.shaderTool(spec)
+	if tool == "" {
+		return ShaderCommand{}, fmt.Errorf("E_VULKAN_SHADER_TOOL_NOT_FOUND")
+	}
+	args := glslcArguments(spec)
+	if toolBase(tool) == "glslangValidator" {
+		args = glslangArguments(spec)
 	}
 	exe, args := sdk.wrap(tool, append(args, spec.Source))
 	return ShaderCommand{Exe: exe, Args: args}, nil
