@@ -18,6 +18,9 @@ import (
 	"trestle/internal/modules/p1689"
 )
 
+// CommandScanner scans module dependencies by invoking clang-scan-deps
+// (possibly through a runner such as WSL), with a cache and optional path
+// mappings that keep results portable.
 type CommandScanner struct {
 	Compiler         string
 	Scanner          string
@@ -33,6 +36,9 @@ type CommandScanner struct {
 	DependencyMapper func(context.Context, string) (string, error)
 }
 
+// ScanResult is the outcome of a scan: the decoded document, the key it was
+// stored under, the discovered header dependencies, and whether the result is
+// complete enough to trust.
 type ScanResult struct {
 	Document   p1689.Document
 	Reused     bool
@@ -41,6 +47,8 @@ type ScanResult struct {
 	Complete   bool
 }
 
+// Scan returns the module dependencies for source, reusing a valid cache entry
+// when one exists and otherwise invoking the scanner and refreshing the cache.
 func (scanner CommandScanner) Scan(ctx context.Context, source string) (ScanResult, error) {
 	if scanner.Compiler == "" || scanner.Scanner == "" {
 		return ScanResult{}, fmt.Errorf("E_MODULE_SCAN_FAILED: compiler and clang-scan-deps are required")

@@ -10,17 +10,23 @@ import (
 	"trestle/internal/modules/p1689"
 )
 
+// Node is one translation unit in the module graph, with the modules it
+// provides and the modules it requires.
 type Node struct {
 	TranslationUnit string
 	Provides        []p1689.ModuleKey
 	Requires        []p1689.ModuleKey
 }
 
+// Graph is the module dependency graph: every scanned translation unit as a
+// node, and edges from a provider to each translation unit that requires it.
 type Graph struct {
 	Nodes []Node
 	Edges map[string][]string
 }
 
+// BuildGraph assembles scans into a graph, rejecting duplicate providers,
+// missing providers, and provider cycles so the build order is well-defined.
 func BuildGraph(scans []p1689.Document) (Graph, error) {
 	providers := map[string]string{}
 	nodes := make([]Node, 0, len(scans))
@@ -117,6 +123,7 @@ func findCycle(edges map[string][]string) []string {
 	return nil
 }
 
+// Scanner produces a p1689 module dependency document for a single source file.
 type Scanner interface {
 	Scan(context.Context, string) (p1689.Document, error)
 }

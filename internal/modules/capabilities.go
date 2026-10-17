@@ -10,6 +10,8 @@ import (
 	"trestle/internal/processx"
 )
 
+// CapabilityProbe records which C++ modules features a compiler and scanner
+// combination supports.
 type CapabilityProbe struct {
 	P1689Scan        bool
 	NamedModules     bool
@@ -19,6 +21,9 @@ type CapabilityProbe struct {
 	Experimental     bool
 }
 
+// ProbeClang compiles and scans a tiny module with the given compiler and
+// scanner to discover which module features work. It reports nothing when
+// either tool is missing.
 func ProbeClang(ctx context.Context, compiler, scanner string) CapabilityProbe {
 	probe := CapabilityProbe{}
 	if compiler == "" || scanner == "" {
@@ -49,6 +54,8 @@ func ProbeClang(ctx context.Context, compiler, scanner string) CapabilityProbe {
 	return probe
 }
 
+// ProbeCompiler selects a module probe for a compiler: MSVC is reported as
+// experimental, everything else is probed as Clang.
 func ProbeCompiler(ctx context.Context, compiler string) CapabilityProbe {
 	if runtime.GOOS == "windows" && strings.Contains(strings.ToLower(compiler), "cl") {
 		return CapabilityProbe{Experimental: true}
