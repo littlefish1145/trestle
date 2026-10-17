@@ -355,7 +355,7 @@ func TestRequestedVersionIsHighlightedAndMarked(t *testing.T) {
 	})
 	model.packageRequested = "10.2.1"
 	model.packageLevel = packageCandidatesLevel
-	lines := ansi.Strip(strings.Join(model.packageCandidateLines(newPalette(), 100), "\n"))
+	lines := ansi.Strip(strings.Join(model.packageCandidateLines(newPalette(false), 100), "\n"))
 	if !strings.Contains(lines, "★") {
 		t.Fatalf("requested version is not marked:\n%s", lines)
 	}

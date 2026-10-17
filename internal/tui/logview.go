@@ -194,12 +194,12 @@ func fittedPanel(p palette, title string, lines []string, width, height int, foc
 		return fitRows(append([]string{title}, lines...), width, height)
 	}
 	inner := width - 2
-	color := lipgloss.Color("8")
+	color := p.borderMuted
 	if focused {
-		color = lipgloss.Color("12")
+		color = p.borderFocus
 	}
 	body := fitRows(append([]string{p.title.Render(title)}, lines...), inner, height-2)
-	return lipgloss.NewStyle().Border(p.border).BorderForeground(color).Width(width).Height(height).MaxWidth(width).MaxHeight(height).Render(body)
+	return lipgloss.NewStyle().Border(p.border).BorderForeground(lipgloss.Color(color)).Width(width).Height(height).MaxWidth(width).MaxHeight(height).Render(body)
 }
 
 func fitRows(lines []string, width, height int) string {

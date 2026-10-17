@@ -232,7 +232,10 @@ func (client Client) InstallWithProgress(ctx context.Context, ports []string, tr
 	wait.Add(2)
 	var outReader, errReader io.Reader = stdout, stderr
 	if raw := processx.Output(ctx); raw != nil {
-		outReader, errReader = io.TeeReader(stdout, raw), io.TeeReader(stderr, raw)
+		// The two stream readers tee into the context sink concurrently, so the
+		// sink only sees valid Write calls when they are serialized here.
+		tee := processx.Sync(raw)
+		outReader, errReader = io.TeeReader(stdout, tee), io.TeeReader(stderr, tee)
 		progress = processx.Notify(ctx, progress)
 	}
 	go read(bufio.NewReader(outReader))

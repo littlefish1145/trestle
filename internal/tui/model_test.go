@@ -65,7 +65,7 @@ func TestTaskRequiresExplicitConfirmation(t *testing.T) {
 	if model.pendingTask != "prepare" || command != nil || model.mutating {
 		t.Fatal("task ran without confirmation")
 	}
-	previewView := ansi.Strip(strings.Join(model.taskLines(newPalette(), 100), "\n"))
+	previewView := ansi.Strip(strings.Join(model.taskLines(newPalette(false), 100), "\n"))
 	if !strings.Contains(previewView, `"env"`) || strings.Contains(previewView, `"version"`) {
 		t.Fatalf("task review did not show the previewed command: %s", previewView)
 	}
@@ -130,7 +130,7 @@ func TestRulesViewShowsMatchedRulesAndFinalChanges(t *testing.T) {
 	}
 	updated, _ := model.handleKey(tea.KeyPressMsg(tea.Key{Text: "v"}))
 	model = updated.(dashboardModel)
-	view := ansi.Strip(strings.Join(model.contentLines(newPalette(), 90), "\n"))
+	view := ansi.Strip(strings.Join(model.contentLines(newPalette(false), 90), "\n"))
 	for _, expected := range []string{"#1 matched", "#2 skipped", "toolchain.cxx: auto → clang++", "Effective selection"} {
 		if !strings.Contains(view, expected) {
 			t.Fatalf("rule view missing %q: %s", expected, view)
@@ -168,7 +168,7 @@ func TestSidebarKeepsRoutesOnOneLine(t *testing.T) {
 	model.route, model.focus = PresetsRoute, focusNavigation
 	for _, total := range []int{96, 110, 150} {
 		width := sidebarWidth(total)
-		plain := ansi.Strip(model.sidebar(newPalette(), width, 36))
+		plain := ansi.Strip(model.sidebar(newPalette(false), width, 36))
 		lines := strings.Split(plain, "\n")
 		seen := map[int]bool{}
 		for _, route := range routes {
@@ -260,7 +260,7 @@ func TestDashboardBuildLogFollowsAndKeepsScrolledHistory(t *testing.T) {
 
 func TestDashboardHardWrapsUnbrokenLogLines(t *testing.T) {
 	line := strings.Repeat("x", 1000) + "TAIL"
-	parts := appendWrappedLog(nil, newPalette().muted, line, 50)
+	parts := appendWrappedLog(nil, newPalette(false).muted, line, 50)
 	if len(parts) < 20 || !strings.Contains(ansi.Strip(parts[len(parts)-1]), "TAIL") {
 		t.Fatalf("unbroken log was clipped: %d rows, tail %q", len(parts), ansi.Strip(parts[len(parts)-1]))
 	}

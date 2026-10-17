@@ -5,12 +5,29 @@ import (
 	"context"
 	"io"
 	"os/exec"
+	"sync"
 )
 
 type outputKey struct{}
 type output struct {
 	writer io.Writer
 	notify func(string)
+}
+
+// Sync serializes writes to a sink consumed by more than one process stream,
+// so streams never interleave bytes inside a writer that expects Write calls
+// to be atomic.
+func Sync(w io.Writer) io.Writer { return &syncWriter{w: w} }
+
+type syncWriter struct {
+	mutex sync.Mutex
+	w     io.Writer
+}
+
+func (writer *syncWriter) Write(data []byte) (int, error) {
+	writer.mutex.Lock()
+	defer writer.mutex.Unlock()
+	return writer.w.Write(data)
 }
 
 func WithOutput(ctx context.Context, writer io.Writer, notify func(string)) context.Context {
