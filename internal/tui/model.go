@@ -7,8 +7,10 @@ import (
 	"trestle/internal/toolchain"
 )
 
+// Tab identifies one page of the configuration editor.
 type Tab int
 
+// The editor pages, in tab order.
 const (
 	ProjectTab Tab = iota
 	ToolchainTab
@@ -16,6 +18,8 @@ const (
 	PackageTab
 )
 
+// State is the editable snapshot the editor renders: the project identity, the
+// selected profile and compiler, the active tab, and any pending error.
 type State struct {
 	ProjectName string
 	Profile     string
@@ -28,8 +32,10 @@ type State struct {
 	Error       string
 }
 
+// Action is a key-level command the editor accepts from its host.
 type Action int
 
+// The input actions the editor understands.
 const (
 	NextAction Action = iota
 	PreviousAction
@@ -38,10 +44,15 @@ const (
 	InputAction
 )
 
+// Model is a self-contained terminal editor for the core project settings. It
+// performs no I/O: the host feeds actions in and prints the rendered frame.
 type Model struct {
 	state State
 }
 
+// New returns an editor seeded with the project name, profile and compiler. An
+// empty profile defaults to "debug", and the archiver is taken from the first
+// detected toolchain when one is available.
 func New(projectName, profile, compiler string, candidates []toolchain.Toolchain) Model {
 	if profile == "" {
 		profile = "debug"
@@ -49,8 +60,11 @@ func New(projectName, profile, compiler string, candidates []toolchain.Toolchain
 	return Model{state: State{ProjectName: projectName, Profile: profile, Compiler: compiler, Archiver: firstArchiver(candidates)}}
 }
 
+// State returns a copy of the editor's current values.
 func (model Model) State() State { return model.state }
 
+// Update applies an action to the editor. For InputAction, value replaces the
+// field of the active tab; other actions ignore value.
 func (model *Model) Update(action Action, value string) {
 	switch action {
 	case NextAction:
@@ -80,6 +94,8 @@ func (model *Model) Update(action Action, value string) {
 	model.state.Error = ""
 }
 
+// Render draws the editor as a multi-line plain-text frame, including the tab
+// markers and an error line when one is set.
 func (model Model) Render() string {
 	var output strings.Builder
 	fmt.Fprintln(&output, "Trestle configuration")

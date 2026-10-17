@@ -1,3 +1,6 @@
+// Package tui implements the interactive Trestle console: a Bubble Tea model
+// that probes the project, its toolchains and dependencies, and drives build,
+// test, package, release and doctor workflows from a single terminal view.
 package tui
 
 import (
@@ -21,9 +24,17 @@ import (
 	"trestle/internal/toolchain"
 )
 
+// BuildFunc runs the default build for the configured profile, forwarding
+// progress lines to the supplied callback.
 type BuildFunc func(context.Context, func(string)) error
+
+// TargetBuildFunc builds the named targets, forcing the build when force is
+// true, and forwards progress lines to the callback.
 type TargetBuildFunc func(context.Context, []string, bool, func(string)) error
 
+// Services is the set of operations the console can perform. The host supplies
+// one callback per action; a nil field disables that action, which the console
+// then reports as unavailable.
 type Services struct {
 	Build             BuildFunc
 	BuildTargets      TargetBuildFunc
@@ -59,6 +70,8 @@ type Services struct {
 	Doctor            func(context.Context, func(string)) error
 }
 
+// TestSelection narrows a test run to a job, a group, a single source file, or
+// every job, mirroring the filters the Tests screen offers.
 type TestSelection struct {
 	Job   string
 	Group string
@@ -72,8 +85,11 @@ type testJob struct {
 	Files []string
 }
 
+// Route identifies one console screen. Its value is the label shown in the
+// navigation sidebar.
 type Route string
 
+// The console screens, in navigation order.
 const (
 	OverviewRoute     Route = "Overview"
 	TargetsRoute      Route = "Targets"
@@ -281,6 +297,8 @@ func newPalette(light bool) palette {
 // tea.BackgroundColorMsg.
 func (model dashboardModel) palette() palette { return newPalette(model.lightBackground) }
 
+// RunDashboard runs the interactive console against the project file at path
+// until the user quits, returning any terminal error.
 func RunDashboard(path string, services Services) error {
 	_, err := tea.NewProgram(newDashboard(path, services)).Run()
 	return err
@@ -294,6 +312,8 @@ func newDashboard(path string, services Services) dashboardModel {
 	}
 }
 
+// Init starts the console's opening commands: the project probe, the native and
+// WSL toolchain inventories, the animation pulse, and a background-colour query.
 func (model dashboardModel) Init() tea.Cmd {
 	return tea.Batch(model.probeCommand(), model.inventoryCommand(), model.wslInventoryCommand(), pulseCommand(), func() tea.Msg { return tea.RequestBackgroundColor() })
 }
@@ -302,6 +322,8 @@ func pulseCommand() tea.Cmd {
 	return tea.Tick(120*time.Millisecond, func(value time.Time) tea.Msg { return pulseMessage(value) })
 }
 
+// Update applies a Bubble Tea message to the console, returning the next model
+// and any follow-up command.
 func (model dashboardModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	switch value := message.(type) {
 	case workflowBatch:
@@ -1796,6 +1818,7 @@ func routeIndex(route Route) int {
 	return 0
 }
 
+// View renders the complete console frame for the current model state.
 func (model dashboardModel) View() tea.View {
 	content := model.renderDashboard(model.palette())
 	view := tea.NewView(content)
