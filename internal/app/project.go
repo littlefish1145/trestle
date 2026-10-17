@@ -23,51 +23,14 @@ func ensureProjectConfig(path string) (config.Config, error) {
 	if err != nil {
 		return config.Config{}, err
 	}
-	units := project.CompilationUnits()
-	if len(units) == 0 {
+	if len(project.CompilationUnits()) == 0 {
 		return config.Config{}, fmt.Errorf("E_PROJECT_NO_SOURCES: no C, C++, CUDA, or Objective-C sources found in %s", root)
 	}
 	name := filepath.Base(root)
 	cfg = config.Default(name)
-	cfg.Targets = map[string]config.Target{}
-	entrySources := project.MainSources()
-	if len(entrySources) == 0 {
-		target := config.Target{Type: "static", Sources: relativeSources(root, units), OutputName: name}
-		if hasIncludeDirectory(root) {
-			target.IncludeDirs = []string{"include"}
-		}
-		cfg.Targets["app"] = target
-	} else if len(entrySources) == 1 {
-		info := project.Sources[entrySources[0]]
-		outputName := name
-		if len(info.EntryPoints) > 0 && info.EntryPoints[0].InferredTarget != "" {
-			outputName = info.EntryPoints[0].InferredTarget
-		}
-		target := config.Target{Type: "executable", Sources: relativeSources(root, units), OutputName: outputName}
-		if hasIncludeDirectory(root) {
-			target.IncludeDirs = []string{"include"}
-		}
-		cfg.Targets["app"] = target
-	} else {
-		for _, sourcePath := range entrySources {
-			info := project.Sources[sourcePath]
-			outputName := filepath.Base(sourcePath)
-			outputName = strings.TrimSuffix(outputName, filepath.Ext(outputName))
-			if len(info.EntryPoints) > 0 && info.EntryPoints[0].InferredTarget != "" {
-				outputName = info.EntryPoints[0].InferredTarget
-			}
-			target := config.Target{Type: "executable", Sources: relativeSources(root, []string{sourcePath}), OutputName: outputName}
-			if hasIncludeDirectory(root) {
-				target.IncludeDirs = []string{"include"}
-			}
-			cfg.Targets[targetID(outputName)] = target
-		}
-	}
-	for _, info := range project.Sources {
-		if info.Module != nil && info.Module.Provides != "" {
-			cfg.Build.Modules = true
-			break
-		}
+	cfg.Targets = projectTargets(root, name, project)
+	if projectProvidesModules(project) {
+		cfg.Build.Modules = true
 	}
 	if _, ok := cfg.Targets["app"]; !ok {
 		cfg.Build.DefaultTargets = nil
@@ -76,6 +39,56 @@ func ensureProjectConfig(path string) (config.Config, error) {
 		return config.Config{}, err
 	}
 	return config.Load(path)
+}
+
+// projectTargets builds the initial target set for a freshly detected project: a
+// static library when there are no entry points, one executable per entry point
+// when there are several, and a single "app" executable for a lone entry point.
+func projectTargets(root, name string, project source.Project) map[string]config.Target {
+	entrySources := project.MainSources()
+	targets := map[string]config.Target{}
+	switch {
+	case len(entrySources) == 0:
+		targets["app"] = detectedTarget(root, name, "static", project.CompilationUnits())
+	case len(entrySources) > 1:
+		for _, sourcePath := range entrySources {
+			info := project.Sources[sourcePath]
+			outputName := strings.TrimSuffix(filepath.Base(sourcePath), filepath.Ext(sourcePath))
+			if len(info.EntryPoints) > 0 && info.EntryPoints[0].InferredTarget != "" {
+				outputName = info.EntryPoints[0].InferredTarget
+			}
+			targets[targetID(outputName)] = detectedTarget(root, outputName, "executable", []string{sourcePath})
+		}
+	default:
+		info := project.Sources[entrySources[0]]
+		outputName := name
+		if len(info.EntryPoints) > 0 && info.EntryPoints[0].InferredTarget != "" {
+			outputName = info.EntryPoints[0].InferredTarget
+		}
+		targets["app"] = detectedTarget(root, outputName, "executable", project.CompilationUnits())
+	}
+	return targets
+}
+
+// detectedTarget assembles a target from relative sources, adding the project's
+// include directory when one exists.
+func detectedTarget(root, outputName, targetType string, sources []string) config.Target {
+	target := config.Target{Type: targetType, Sources: relativeSources(root, sources), OutputName: outputName}
+	if hasIncludeDirectory(root) {
+		target.IncludeDirs = []string{"include"}
+	}
+	return target
+}
+
+// projectProvidesModules reports whether any analyzed source exports a C++20
+// module, which enables module support in the generated configuration.
+func projectProvidesModules(project source.Project) bool {
+	for _, info := range project.Sources {
+		if info.Module != nil && info.Module.Provides != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func hasIncludeDirectory(root string) bool {

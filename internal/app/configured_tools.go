@@ -13,11 +13,7 @@ import (
 
 func configuredExecutable(ctx context.Context, cfg config.Config, tc toolchain.Toolchain, root, value, role string) (string, error) {
 	if cfg.Toolchain.Mode == "wsl" {
-		path, err := toolchain.WSLExecutable(ctx, cfg.Toolchain.WSLDistribution, value)
-		if err != nil {
-			return "", fmt.Errorf("E_WSL_TOOLCHAIN_INCOMPLETE: configured %s %q in %q: %w", role, value, cfg.Toolchain.WSLDistribution, err)
-		}
-		return path, nil
+		return configuredWSLExecutable(ctx, cfg.Toolchain.WSLDistribution, value, role)
 	}
 	requested := value
 	if strings.ContainsAny(value, `/\`) && !filepath.IsAbs(value) {
@@ -26,6 +22,25 @@ func configuredExecutable(ctx context.Context, cfg config.Config, tc toolchain.T
 	if path, err := exec.LookPath(requested); err == nil {
 		return path, nil
 	}
+	if path, ok := findToolchainExecutable(tc, value); ok {
+		return path, nil
+	}
+	return "", fmt.Errorf("E_TOOLCHAIN_EXECUTABLE: configured %s %q was not found from %s or the selected compiler environment; correct the setting or install the matching tool", role, value, root)
+}
+
+// configuredWSLExecutable resolves a configured tool inside a WSL distribution,
+// wrapping the lookup error with the role and distribution for context.
+func configuredWSLExecutable(ctx context.Context, distribution, value, role string) (string, error) {
+	path, err := toolchain.WSLExecutable(ctx, distribution, value)
+	if err != nil {
+		return "", fmt.Errorf("E_WSL_TOOLCHAIN_INCOMPLETE: configured %s %q in %q: %w", role, value, distribution, err)
+	}
+	return path, nil
+}
+
+// findToolchainExecutable looks for a bare executable name on the PATH entries
+// carried by the selected compiler environment, trying an .exe suffix too.
+func findToolchainExecutable(tc toolchain.Toolchain, value string) (string, bool) {
 	for key, paths := range tc.Env {
 		if !strings.EqualFold(key, "PATH") {
 			continue
@@ -35,11 +50,11 @@ func configuredExecutable(ctx context.Context, cfg config.Config, tc toolchain.T
 				candidate := filepath.Join(dir, value+suffix)
 				if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
 					if path, err := exec.LookPath(candidate); err == nil {
-						return path, nil
+						return path, true
 					}
 				}
 			}
 		}
 	}
-	return "", fmt.Errorf("E_TOOLCHAIN_EXECUTABLE: configured %s %q was not found from %s or the selected compiler environment; correct the setting or install the matching tool", role, value, root)
+	return "", false
 }

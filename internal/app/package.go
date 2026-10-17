@@ -11,6 +11,7 @@ import (
 	"trestle/internal/config"
 	"trestle/internal/fsx"
 	"trestle/internal/graph"
+	"trestle/internal/model"
 )
 
 // Package builds the configured targets and writes them to a release ZIP.
@@ -85,10 +86,7 @@ func packageSelectedWithContext(ctx context.Context, path string, targets []stri
 		return err
 	}
 	root := filepath.Dir(path)
-	output := cfg.Package.Output
-	if !filepath.IsAbs(output) {
-		output = filepath.Join(root, output)
-	}
+	output := packageOutputPath(root, cfg.Package.Output)
 	if err := os.MkdirAll(filepath.Dir(output), 0o755); err != nil {
 		return err
 	}
@@ -99,36 +97,9 @@ func packageSelectedWithContext(ctx context.Context, path string, targets []stri
 	defer func() { _ = file.Close(); _ = os.Remove(file.Name()) }()
 	archive := zip.NewWriter(file)
 	defer archive.Close()
-	manifestDir := filepath.Dir(result.Manifest)
-	wanted := map[string]bool{}
-	for _, name := range targets {
-		wanted[name] = true
-	}
-	count := 0
-	for _, target := range project.Targets {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		if !wanted[string(target.ID)] {
-			continue
-		}
-		rel, ok := result.Outputs[target.ID]
-		if !ok {
-			continue
-		}
-		outputPath := filepath.Join(manifestDir, rel)
-		if err := addFile(archive, outputPath, filepath.Join("bin", filepath.Base(outputPath))); err != nil {
-			return err
-		}
-		count++
-		for _, runtime := range target.LinkSelf.RuntimeFiles {
-			if !filepath.IsAbs(runtime) {
-				runtime = filepath.Join(root, runtime)
-			}
-			if err := addFile(archive, runtime, filepath.Join("bin", filepath.Base(runtime))); err != nil {
-				return err
-			}
-		}
+	count, err := writeSelectedTargets(ctx, archive, project, result, root, filepath.Dir(result.Manifest), targets)
+	if err != nil {
+		return err
 	}
 	if err := archive.Close(); err != nil {
 		return err
@@ -149,6 +120,51 @@ func packageSelectedWithContext(ctx context.Context, path string, targets []stri
 		progress(fmt.Sprintf("Release ZIP: %s · %d target artifacts", output, count))
 	}
 	return nil
+}
+
+// packageOutputPath resolves the configured archive path against the project
+// root, leaving absolute paths untouched.
+func packageOutputPath(root, output string) string {
+	if !filepath.IsAbs(output) {
+		return filepath.Join(root, output)
+	}
+	return output
+}
+
+// writeSelectedTargets writes each selected target's artifact and its runtime
+// files into the archive, returning how many target artifacts were written.
+func writeSelectedTargets(ctx context.Context, archive *zip.Writer, project model.ResolvedProject, result BuildResult, root, manifestDir string, targets []string) (int, error) {
+	wanted := map[string]bool{}
+	for _, name := range targets {
+		wanted[name] = true
+	}
+	count := 0
+	for _, target := range project.Targets {
+		if err := ctx.Err(); err != nil {
+			return 0, err
+		}
+		if !wanted[string(target.ID)] {
+			continue
+		}
+		rel, ok := result.Outputs[target.ID]
+		if !ok {
+			continue
+		}
+		outputPath := filepath.Join(manifestDir, rel)
+		if err := addFile(archive, outputPath, filepath.Join("bin", filepath.Base(outputPath))); err != nil {
+			return 0, err
+		}
+		count++
+		for _, runtime := range target.LinkSelf.RuntimeFiles {
+			if !filepath.IsAbs(runtime) {
+				runtime = filepath.Join(root, runtime)
+			}
+			if err := addFile(archive, runtime, filepath.Join("bin", filepath.Base(runtime))); err != nil {
+				return 0, err
+			}
+		}
+	}
+	return count, nil
 }
 
 func addFile(archive *zip.Writer, source, name string) error {

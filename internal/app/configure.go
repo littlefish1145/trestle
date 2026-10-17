@@ -26,57 +26,17 @@ func ConfigureInteractive(path string, input *os.File, output *os.File) error {
 	fmt.Fprintf(output, "%s C++ project detected\n", status(projectDetected))
 	candidates := toolchain.List(context.Background())
 	selected := selectCandidate(cfg, candidates)
-	if selected != nil {
-		fmt.Fprintf(output, "%s %s detected\n", status(true), toolchainLabel(*selected))
-	} else {
-		fmt.Fprintf(output, "%s supported compiler not detected\n", status(false))
-	}
+	fmt.Fprintf(output, "%s %s\n", status(selected != nil), toolchainDetectionLabel(selected))
 	_, vulkanErr := vulkan.Detect()
 	fmt.Fprintf(output, "%s Vulkan SDK detected\n", status(vulkanErr == nil))
 	_, ninjaErr := exec.LookPath("ninja")
 	fmt.Fprintf(output, "%s Ninja detected\n\n", status(ninjaErr == nil))
 	if selected != nil {
-		// Persist the portable selector, not the resolved executable, so the
-		// generated trestle.toml stays usable on other machines.
-		if cfg.Toolchain.CXX == "auto" || cfg.Toolchain.CXX == "" {
-			cfg.Toolchain.CXX = toolchain.PortableSelector(selected.CXX)
-		}
-		if cfg.Toolchain.C == "auto" || cfg.Toolchain.C == "" {
-			cfg.Toolchain.C = toolchain.PortableSelector(selected.CC)
-		}
-		if cfg.Toolchain.Archiver == "" || cfg.Toolchain.Archiver == "auto" {
-			cfg.Toolchain.Archiver = "auto"
-		}
-		if cfg.Toolchain.Linker == "" || cfg.Toolchain.Linker == "auto" {
-			cfg.Toolchain.Linker = "auto"
-		}
-		if cfg.Toolchain.MSVC == "" || cfg.Toolchain.MSVC == "auto" {
-			if version, ok := toolchain.MSVCToolsetVersion(selected.Setup); ok {
-				cfg.Toolchain.MSVC = version + "~" + version
-			} else if selected.Kind == toolchain.MSVC {
-				if version, ok := toolchain.MSVCToolsetVersion(selected.Linker); ok {
-					cfg.Toolchain.MSVC = version + "~" + version
-				}
-			}
-		}
-		cfg.Toolchain.Setup = ""
+		applyDetectedToolchain(&cfg, *selected)
 	}
-	reader := bufio.NewReader(input)
-	createExecutable := true
-	compileShaders := cfg.Build.AutoCompileShaders
-	if !term.IsTerminal(int(input.Fd())) {
-		createExecutable = ask(reader, output, fmt.Sprintf("Create executable %q?", cfg.Project.Name))
-		compileShaders = ask(reader, output, "Compile shaders automatically?")
-	} else {
-		form := huh.NewForm(
-			huh.NewGroup(
-				huh.NewConfirm().Title(fmt.Sprintf("Create executable %q?", cfg.Project.Name)).Value(&createExecutable),
-				huh.NewConfirm().Title("Compile shaders automatically?").Value(&compileShaders),
-			),
-		).WithInput(input).WithOutput(output).WithTheme(huh.ThemeFunc(huh.ThemeCharm))
-		if err := form.Run(); err != nil {
-			return err
-		}
+	createExecutable, compileShaders, err := askConfigureQuestions(input, output, cfg.Project.Name, cfg.Build.AutoCompileShaders)
+	if err != nil {
+		return err
 	}
 	if createExecutable {
 		if _, exists := cfg.Targets["app"]; !exists {
@@ -89,6 +49,67 @@ func ConfigureInteractive(path string, input *os.File, output *os.File) error {
 	}
 	fmt.Fprintf(output, "\nGenerated %s\n", config.DefaultFileName)
 	return nil
+}
+
+// toolchainDetectionLabel describes the detected compiler candidate, or the
+// absence of one.
+func toolchainDetectionLabel(selected *toolchain.Toolchain) string {
+	if selected == nil {
+		return "supported compiler not detected"
+	}
+	return toolchainLabel(*selected) + " detected"
+}
+
+// applyDetectedToolchain fills in portable defaults for the compiler settings
+// the config left on auto; the portable selector, not the resolved executable, is
+// persisted so the generated trestle.toml stays usable on other machines.
+func applyDetectedToolchain(cfg *config.Config, selected toolchain.Toolchain) {
+	if cfg.Toolchain.CXX == "auto" || cfg.Toolchain.CXX == "" {
+		cfg.Toolchain.CXX = toolchain.PortableSelector(selected.CXX)
+	}
+	if cfg.Toolchain.C == "auto" || cfg.Toolchain.C == "" {
+		cfg.Toolchain.C = toolchain.PortableSelector(selected.CC)
+	}
+	if cfg.Toolchain.Archiver == "" || cfg.Toolchain.Archiver == "auto" {
+		cfg.Toolchain.Archiver = "auto"
+	}
+	if cfg.Toolchain.Linker == "" || cfg.Toolchain.Linker == "auto" {
+		cfg.Toolchain.Linker = "auto"
+	}
+	if cfg.Toolchain.MSVC == "" || cfg.Toolchain.MSVC == "auto" {
+		if version, ok := toolchain.MSVCToolsetVersion(selected.Setup); ok {
+			cfg.Toolchain.MSVC = version + "~" + version
+		} else if selected.Kind == toolchain.MSVC {
+			if version, ok := toolchain.MSVCToolsetVersion(selected.Linker); ok {
+				cfg.Toolchain.MSVC = version + "~" + version
+			}
+		}
+	}
+	cfg.Toolchain.Setup = ""
+}
+
+// askConfigureQuestions asks whether to create an executable target and whether
+// to compile shaders automatically. It uses the terminal form when input is a
+// TTY and a line prompt otherwise.
+func askConfigureQuestions(input, output *os.File, projectName string, autoCompileShaders bool) (bool, bool, error) {
+	createExecutable := true
+	compileShaders := autoCompileShaders
+	if !term.IsTerminal(int(input.Fd())) {
+		reader := bufio.NewReader(input)
+		createExecutable = ask(reader, output, fmt.Sprintf("Create executable %q?", projectName))
+		compileShaders = ask(reader, output, "Compile shaders automatically?")
+		return createExecutable, compileShaders, nil
+	}
+	form := huh.NewForm(
+		huh.NewGroup(
+			huh.NewConfirm().Title(fmt.Sprintf("Create executable %q?", projectName)).Value(&createExecutable),
+			huh.NewConfirm().Title("Compile shaders automatically?").Value(&compileShaders),
+		),
+	).WithInput(input).WithOutput(output).WithTheme(huh.ThemeFunc(huh.ThemeCharm))
+	if err := form.Run(); err != nil {
+		return false, false, err
+	}
+	return createExecutable, compileShaders, nil
 }
 
 func hasExecutableTarget(cfg config.Config) bool {

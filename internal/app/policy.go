@@ -190,10 +190,8 @@ func executeTaskPreview(ctx context.Context, path, name string, preview config.T
 	if directory != preview.WorkingDir {
 		return fmt.Errorf("task %q working directory changed after preview", name)
 	}
-	for key, value := range task.Set {
-		if err := applyTaskSettingAt(&cfg, path, key, value); err != nil {
-			return err
-		}
+	if err := applyTaskSettings(&cfg, path, task.Set); err != nil {
+		return err
 	}
 	if err := validateTaskResult(cfg); err != nil {
 		return err
@@ -201,59 +199,87 @@ func executeTaskPreview(ctx context.Context, path, name string, preview config.T
 	if err := ctx.Err(); err != nil {
 		return fmt.Errorf("task %q cancelled before execution: %w", name, err)
 	}
-	if len(task.Command) > 0 {
-		commandCtx := ctx
-		if task.Timeout != "" {
-			duration, parseErr := time.ParseDuration(task.Timeout)
-			if parseErr != nil {
-				return parseErr
-			}
-			var cancel context.CancelFunc
-			commandCtx, cancel = context.WithTimeout(ctx, duration)
-			defer cancel()
-		}
-		command := exec.Command(task.Command[0], task.Command[1:]...)
-		command.Dir = directory
-		command.WaitDelay = 2 * time.Second
-		prepareTaskProcess(command)
-		writer := &taskWriter{progress: processx.Notify(ctx, progress)}
-		var output io.Writer = writer
-		if raw := processx.Output(ctx); raw != nil {
-			output = io.MultiWriter(raw, writer)
-		}
-		command.Stdout, command.Stderr = output, output
-		if progress != nil {
-			progress("Running in " + directory + ": " + fmt.Sprintf("%q", task.Command))
-		}
-		if err := commandCtx.Err(); err != nil {
-			if err == context.DeadlineExceeded {
-				return fmt.Errorf("task %q timed out before execution: %w", name, err)
-			}
-			return fmt.Errorf("task %q cancelled before execution: %w", name, err)
-		}
-		var stoppedByContext error
-		if err = command.Start(); err == nil {
-			done := make(chan error, 1)
-			go func() { done <- command.Wait() }()
-			select {
-			case err = <-done:
-			case <-commandCtx.Done():
-				terminateTaskProcess(command)
-				<-done
-				stoppedByContext = commandCtx.Err()
-			}
-		}
-		writer.Flush()
-		if stoppedByContext == context.DeadlineExceeded {
-			return fmt.Errorf("task %q timed out after %s: %w", name, task.Timeout, context.DeadlineExceeded)
-		}
-		if stoppedByContext == context.Canceled {
-			return fmt.Errorf("task %q cancelled: %w", name, context.Canceled)
-		}
-		if err != nil {
-			return fmt.Errorf("task %q command failed: %w", name, err)
+	if err := runTaskCommand(ctx, name, task, directory, progress); err != nil {
+		return err
+	}
+	return saveTaskSettings(ctx, path, name, before, cfg, task, preview, progress)
+}
+
+// applyTaskSettings applies every setting a task pins, resolving relative roots
+// against the project before validation.
+func applyTaskSettings(cfg *config.Config, path string, settings map[string]string) error {
+	for key, value := range settings {
+		if err := applyTaskSettingAt(cfg, path, key, value); err != nil {
+			return err
 		}
 	}
+	return nil
+}
+
+// runTaskCommand runs a task's command in its working directory, honouring the
+// task timeout and context cancellation. Tasks without a command are a no-op.
+func runTaskCommand(ctx context.Context, name string, task config.Task, directory string, progress func(string)) error {
+	if len(task.Command) == 0 {
+		return nil
+	}
+	commandCtx := ctx
+	if task.Timeout != "" {
+		duration, parseErr := time.ParseDuration(task.Timeout)
+		if parseErr != nil {
+			return parseErr
+		}
+		var cancel context.CancelFunc
+		commandCtx, cancel = context.WithTimeout(ctx, duration)
+		defer cancel()
+	}
+	command := exec.Command(task.Command[0], task.Command[1:]...)
+	command.Dir = directory
+	command.WaitDelay = 2 * time.Second
+	prepareTaskProcess(command)
+	writer := &taskWriter{progress: processx.Notify(ctx, progress)}
+	var output io.Writer = writer
+	if raw := processx.Output(ctx); raw != nil {
+		output = io.MultiWriter(raw, writer)
+	}
+	command.Stdout, command.Stderr = output, output
+	if progress != nil {
+		progress("Running in " + directory + ": " + fmt.Sprintf("%q", task.Command))
+	}
+	if err := commandCtx.Err(); err != nil {
+		if err == context.DeadlineExceeded {
+			return fmt.Errorf("task %q timed out before execution: %w", name, err)
+		}
+		return fmt.Errorf("task %q cancelled before execution: %w", name, err)
+	}
+	var stoppedByContext error
+	var runErr error
+	if runErr = command.Start(); runErr == nil {
+		done := make(chan error, 1)
+		go func() { done <- command.Wait() }()
+		select {
+		case runErr = <-done:
+		case <-commandCtx.Done():
+			terminateTaskProcess(command)
+			<-done
+			stoppedByContext = commandCtx.Err()
+		}
+	}
+	writer.Flush()
+	if stoppedByContext == context.DeadlineExceeded {
+		return fmt.Errorf("task %q timed out after %s: %w", name, task.Timeout, context.DeadlineExceeded)
+	}
+	if stoppedByContext == context.Canceled {
+		return fmt.Errorf("task %q cancelled: %w", name, context.Canceled)
+	}
+	if runErr != nil {
+		return fmt.Errorf("task %q command failed: %w", name, runErr)
+	}
+	return nil
+}
+
+// saveTaskSettings persists the settings a task applied, first checking that the
+// configuration still matches the previewed snapshot.
+func saveTaskSettings(ctx context.Context, path, name string, before []byte, cfg config.Config, task config.Task, preview config.TaskPreview, progress func(string)) error {
 	if err := ctx.Err(); err != nil {
 		return fmt.Errorf("task %q cancelled before saving settings: %w", name, err)
 	}
@@ -280,10 +306,31 @@ func executeTaskPreview(ctx context.Context, path, name string, preview config.T
 func applyTaskSetting(cfg *config.Config, key, value string) error {
 	switch key {
 	case "build.profile":
-		if value != "debug" && value != "release" {
-			return fmt.Errorf("task build.profile must be debug or release")
-		}
-		cfg.Build.Profile = value
+		return applyTaskBuildProfile(cfg, value)
+	case "toolchain.c", "toolchain.cxx", "toolchain.mode", "toolchain.wsl_distribution":
+		return applyTaskToolchainSetting(cfg, key, value)
+	case "vcpkg.root", "vcpkg.triplet":
+		return applyTaskVcpkgSetting(cfg, key, value)
+	case "conan.root", "conan.profile":
+		return applyTaskConanSetting(cfg, key, value)
+	default:
+		return fmt.Errorf("task cannot set %q", key)
+	}
+}
+
+// applyTaskBuildProfile validates and stores a task's build profile.
+func applyTaskBuildProfile(cfg *config.Config, value string) error {
+	if value != "debug" && value != "release" {
+		return fmt.Errorf("task build.profile must be debug or release")
+	}
+	cfg.Build.Profile = value
+	return nil
+}
+
+// applyTaskToolchainSetting stores a task's toolchain setting, validating the
+// compiler mode.
+func applyTaskToolchainSetting(cfg *config.Config, key, value string) error {
+	switch key {
 	case "toolchain.c":
 		cfg.Toolchain.C = value
 	case "toolchain.cxx":
@@ -295,16 +342,28 @@ func applyTaskSetting(cfg *config.Config, key, value string) error {
 		cfg.Toolchain.Mode = value
 	case "toolchain.wsl_distribution":
 		cfg.Toolchain.WSLDistribution = value
+	}
+	return nil
+}
+
+// applyTaskVcpkgSetting stores a task's vcpkg setting.
+func applyTaskVcpkgSetting(cfg *config.Config, key, value string) error {
+	switch key {
 	case "vcpkg.root":
 		cfg.Vcpkg.Root = value
 	case "vcpkg.triplet":
 		cfg.Vcpkg.Triplet = value
+	}
+	return nil
+}
+
+// applyTaskConanSetting stores a task's conan setting.
+func applyTaskConanSetting(cfg *config.Config, key, value string) error {
+	switch key {
 	case "conan.root":
 		cfg.Conan.Root = value
 	case "conan.profile":
 		cfg.Conan.Profile = value
-	default:
-		return fmt.Errorf("task cannot set %q", key)
 	}
 	return nil
 }

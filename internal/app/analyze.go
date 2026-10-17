@@ -17,6 +17,26 @@ func AnalyzeProject(root string, output io.Writer) error {
 		return err
 	}
 	fmt.Fprintf(output, "Analyzing source tree...\n\n")
+	writeLanguageSummary(output, project)
+	writeEntryPoints(output, root, project, project.MainSources())
+	testCount := 0
+	for _, info := range project.Sources {
+		testCount += len(info.Tests)
+	}
+	if testCount > 0 {
+		fmt.Fprintf(output, "\nTests\n  %d detected\n", testCount)
+	}
+	includeCount := 0
+	for _, dependencies := range project.Includes {
+		includeCount += len(dependencies)
+	}
+	fmt.Fprintf(output, "\nIncludes\n  %d local edges\n", includeCount)
+	return nil
+}
+
+// writeLanguageSummary prints each detected language with its source count,
+// followed by the total.
+func writeLanguageSummary(output io.Writer, project source.Project) {
 	fmt.Fprintf(output, "Sources\n")
 	languages := make([]string, 0, len(project.Languages))
 	for language := range project.Languages {
@@ -31,28 +51,19 @@ func AnalyzeProject(root string, output io.Writer) error {
 		fmt.Fprintf(output, "  %-12s %d\n", label, project.Languages[source.Language(language)])
 	}
 	fmt.Fprintf(output, "  %-12s %d\n", "total", len(project.Sources))
-	entrySources := project.MainSources()
-	if len(entrySources) > 0 {
-		fmt.Fprintf(output, "\nEntry points\n")
-		for _, path := range entrySources {
-			for _, entry := range project.Sources[path].EntryPoints {
-				fmt.Fprintf(output, "  %s\n    kind: %s\n    inferred target: %s\n", relativeProjectPath(root, path), entry.Kind, entry.InferredTarget)
-			}
+}
+
+// writeEntryPoints prints the entry points of the given sources, if any.
+func writeEntryPoints(output io.Writer, root string, project source.Project, entrySources []string) {
+	if len(entrySources) == 0 {
+		return
+	}
+	fmt.Fprintf(output, "\nEntry points\n")
+	for _, path := range entrySources {
+		for _, entry := range project.Sources[path].EntryPoints {
+			fmt.Fprintf(output, "  %s\n    kind: %s\n    inferred target: %s\n", relativeProjectPath(root, path), entry.Kind, entry.InferredTarget)
 		}
 	}
-	testCount := 0
-	for _, info := range project.Sources {
-		testCount += len(info.Tests)
-	}
-	if testCount > 0 {
-		fmt.Fprintf(output, "\nTests\n  %d detected\n", testCount)
-	}
-	includeCount := 0
-	for _, dependencies := range project.Includes {
-		includeCount += len(dependencies)
-	}
-	fmt.Fprintf(output, "\nIncludes\n  %d local edges\n", includeCount)
-	return nil
 }
 
 func relativeProjectPath(root, path string) string {
