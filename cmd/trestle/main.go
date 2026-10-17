@@ -70,89 +70,17 @@ func main() {
 func run(command string, args []string) (result error) {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	var flags runFlags
 	set := flag.NewFlagSet(command, flag.ContinueOnError)
 	set.SetOutput(os.Stderr)
-	directory := set.String("C", ".", "run from this directory")
-	var name, compiler, c, profile, output, vcpkgRoot, triplet, msvc, cudaRoot, cudaMode, cudaExecution, cudaDistribution, vulkanRoot, vulkanExecution, vulkanDistribution, setup, moduleScanner, compileFlags, cFlags, cxxFlags, linkFlags, buildProfile, mode, distribution, preset, savePreset, toolchainCache *string
-	var query string
-	var ports []string
-	var portsText string
-	var vcpkgTriplet string
-	var install bool
-	var refresh bool
-	var testJob, testGroup, testFile string
-	var releaseTargets string
-	var testAll bool
-	var force bool
-	var interactive, modulesEnabled, dashboard *bool
-	if command == "init" {
-		name = set.String("name", "", "project name")
-	} else {
-		switch command {
-		case "configure":
-			compiler = set.String("toolchain", "", "compiler name or path")
-			c = set.String("c", "", "C compiler name or path")
-			profile = set.String("profile", "", "build profile")
-			compileFlags = set.String("compile-flags", "", "comma-free compiler flags")
-			cFlags = set.String("c-flags", "", "C-only compiler flags")
-			cxxFlags = set.String("cxx-flags", "", "C++-only compiler flags")
-			linkFlags = set.String("link-flags", "", "linker flags")
-			mode = set.String("mode", "", "compiler execution mode: native or wsl")
-			distribution = set.String("wsl-distribution", "", "WSL distribution name")
-			preset = set.String("preset", "", "apply a compiler preset")
-			savePreset = set.String("save-preset", "", "save the resulting compiler configuration")
-			vcpkgRoot = set.String("vcpkg-root", "", "vcpkg installation root")
-			triplet = set.String("triplet", "", "vcpkg triplet")
-			msvc = set.String("msvc", "", "MSVC toolset version or range, such as 14.3~14.5")
-			cudaRoot = set.String("cuda", "", "CUDA version range such as 12.0~12.9, or a toolkit root")
-			cudaMode = set.String("cuda-mode", "", "whole or rdc")
-			cudaExecution = set.String("cuda-execution", "", "CUDA execution mode: native or wsl")
-			cudaDistribution = set.String("cuda-wsl-distribution", "", "WSL distribution containing CUDA")
-			vulkanRoot = set.String("vulkan", "", "Vulkan SDK root")
-			vulkanExecution = set.String("vulkan-execution", "", "Vulkan execution mode: native or wsl")
-			vulkanDistribution = set.String("vulkan-wsl-distribution", "", "WSL distribution containing Vulkan SDK tools")
-			interactive = set.Bool("interactive", false, "use the configuration wizard")
-			setup = set.String("setup", "", "vcvars64.bat or environment setup script")
-			moduleScanner = set.String("module-scanner", "", "clang-scan-deps executable")
-			modulesEnabled = set.Bool("modules", false, "enable C++ module scanning")
-		case "toolchain":
-			toolchainCache = set.String("cache-dir", "", "directory for the cached toolchain inventory")
-			set.Bool("refresh", false, "rescan installed toolchains and refresh the cache")
-		case "build":
-			dashboard = set.Bool("ui", false, "open the project console")
-			buildProfile = set.String("profile", "", "debug or release")
-			preset = set.String("preset", "", "apply a compiler preset")
-			set.BoolVar(&testAll, "all", false, "build every target")
-			set.BoolVar(&force, "force", false, "attempt unavailable targets anyway")
-		case "test":
-			set.StringVar(&testJob, "job", "", "run one test job")
-			set.StringVar(&testGroup, "group", "", "run one test group")
-			set.StringVar(&testFile, "file", "", "run the test job owning a source file")
-			set.BoolVar(&testAll, "all", false, "run all test jobs")
-		case "package":
-			output = set.String("output", "", "package output path")
-		case "release":
-			output = set.String("output", "", "release ZIP output path")
-			preset = set.String("optimization", "", "balanced, speed, size, or custom:<preset>")
-			set.StringVar(&releaseTargets, "targets", "", "comma-separated release targets")
-		case "vcpkg":
-			vcpkgRoot = set.String("root", "", "vcpkg root")
-			set.StringVar(&query, "search", "", "search ports")
-			set.BoolVar(&install, "install", false, "install ports")
-			set.StringVar(&portsText, "ports", "", "comma-separated ports")
-			set.StringVar(&vcpkgTriplet, "triplet", "", "vcpkg triplet")
-		case "export-cmake":
-			output = set.String("output", "CMakeLists.txt", "output path relative to the project")
-			set.BoolVar(&force, "force", false, "overwrite an existing CMakeLists.txt")
-		}
-	}
+	registerRunFlags(set, command, &flags)
 	if err := set.Parse(args); err != nil {
 		return err
 	}
 	if command == "init" {
-		return app.Init(filepath.Clean(*directory), *name)
+		return app.Init(filepath.Clean(flags.directory), flags.name)
 	}
-	if err := os.Chdir(*directory); err != nil {
+	if err := os.Chdir(flags.directory); err != nil {
 		return err
 	}
 	if command == "analyze" {
@@ -164,133 +92,280 @@ func run(command string, args []string) (result error) {
 			result = runlog.Failure(path, command, result)
 		}
 	}()
+	return executeCommand(ctx, command, path, set.Args(), &flags)
+}
+
+// runFlags collects every flag the subcommands can define. Keeping them in one
+// struct keeps the registration and dispatch code in sync and avoids a long list
+// of bare flag pointers.
+type runFlags struct {
+	directory          string
+	name               string
+	compiler           string
+	c                  string
+	profile            string
+	output             string
+	vcpkgRoot          string
+	triplet            string
+	msvc               string
+	cudaRoot           string
+	cudaMode           string
+	cudaExecution      string
+	cudaDistribution   string
+	vulkanRoot         string
+	vulkanExecution    string
+	vulkanDistribution string
+	setup              string
+	moduleScanner      string
+	compileFlags       string
+	cFlags             string
+	cxxFlags           string
+	linkFlags          string
+	buildProfile       string
+	mode               string
+	distribution       string
+	preset             string
+	savePreset         string
+	toolchainCache     string
+	query              string
+	portsText          string
+	vcpkgTriplet       string
+	testJob            string
+	testGroup          string
+	testFile           string
+	releaseTargets     string
+	install            bool
+	refresh            bool
+	testAll            bool
+	force              bool
+	interactive        bool
+	modulesEnabled     bool
+	dashboard          bool
+}
+
+// registerRunFlags defines the flags accepted by command, mirroring the help
+// text each subcommand advertises.
+func registerRunFlags(set *flag.FlagSet, command string, flags *runFlags) {
+	set.StringVar(&flags.directory, "C", ".", "run from this directory")
+	switch command {
+	case "init":
+		set.StringVar(&flags.name, "name", "", "project name")
+	case "configure":
+		set.StringVar(&flags.compiler, "toolchain", "", "compiler name or path")
+		set.StringVar(&flags.c, "c", "", "C compiler name or path")
+		set.StringVar(&flags.profile, "profile", "", "build profile")
+		set.StringVar(&flags.compileFlags, "compile-flags", "", "comma-free compiler flags")
+		set.StringVar(&flags.cFlags, "c-flags", "", "C-only compiler flags")
+		set.StringVar(&flags.cxxFlags, "cxx-flags", "", "C++-only compiler flags")
+		set.StringVar(&flags.linkFlags, "link-flags", "", "linker flags")
+		set.StringVar(&flags.mode, "mode", "", "compiler execution mode: native or wsl")
+		set.StringVar(&flags.distribution, "wsl-distribution", "", "WSL distribution name")
+		set.StringVar(&flags.preset, "preset", "", "apply a compiler preset")
+		set.StringVar(&flags.savePreset, "save-preset", "", "save the resulting compiler configuration")
+		set.StringVar(&flags.vcpkgRoot, "vcpkg-root", "", "vcpkg installation root")
+		set.StringVar(&flags.triplet, "triplet", "", "vcpkg triplet")
+		set.StringVar(&flags.msvc, "msvc", "", "MSVC toolset version or range, such as 14.3~14.5")
+		set.StringVar(&flags.cudaRoot, "cuda", "", "CUDA version range such as 12.0~12.9, or a toolkit root")
+		set.StringVar(&flags.cudaMode, "cuda-mode", "", "whole or rdc")
+		set.StringVar(&flags.cudaExecution, "cuda-execution", "", "CUDA execution mode: native or wsl")
+		set.StringVar(&flags.cudaDistribution, "cuda-wsl-distribution", "", "WSL distribution containing CUDA")
+		set.StringVar(&flags.vulkanRoot, "vulkan", "", "Vulkan SDK root")
+		set.StringVar(&flags.vulkanExecution, "vulkan-execution", "", "Vulkan execution mode: native or wsl")
+		set.StringVar(&flags.vulkanDistribution, "vulkan-wsl-distribution", "", "WSL distribution containing Vulkan SDK tools")
+		set.BoolVar(&flags.interactive, "interactive", false, "use the configuration wizard")
+		set.StringVar(&flags.setup, "setup", "", "vcvars64.bat or environment setup script")
+		set.StringVar(&flags.moduleScanner, "module-scanner", "", "clang-scan-deps executable")
+		set.BoolVar(&flags.modulesEnabled, "modules", false, "enable C++ module scanning")
+	case "toolchain":
+		set.StringVar(&flags.toolchainCache, "cache-dir", "", "directory for the cached toolchain inventory")
+		set.BoolVar(&flags.refresh, "refresh", false, "rescan installed toolchains and refresh the cache")
+	case "build":
+		set.BoolVar(&flags.dashboard, "ui", false, "open the project console")
+		set.StringVar(&flags.buildProfile, "profile", "", "debug or release")
+		set.StringVar(&flags.preset, "preset", "", "apply a compiler preset")
+		set.BoolVar(&flags.testAll, "all", false, "build every target")
+		set.BoolVar(&flags.force, "force", false, "attempt unavailable targets anyway")
+	case "test":
+		set.StringVar(&flags.testJob, "job", "", "run one test job")
+		set.StringVar(&flags.testGroup, "group", "", "run one test group")
+		set.StringVar(&flags.testFile, "file", "", "run the test job owning a source file")
+		set.BoolVar(&flags.testAll, "all", false, "run all test jobs")
+	case "package":
+		set.StringVar(&flags.output, "output", "", "package output path")
+	case "release":
+		set.StringVar(&flags.output, "output", "", "release ZIP output path")
+		set.StringVar(&flags.preset, "optimization", "", "balanced, speed, size, or custom:<preset>")
+		set.StringVar(&flags.releaseTargets, "targets", "", "comma-separated release targets")
+	case "vcpkg":
+		set.StringVar(&flags.vcpkgRoot, "root", "", "vcpkg root")
+		set.StringVar(&flags.query, "search", "", "search ports")
+		set.BoolVar(&flags.install, "install", false, "install ports")
+		set.StringVar(&flags.portsText, "ports", "", "comma-separated ports")
+		set.StringVar(&flags.vcpkgTriplet, "triplet", "", "vcpkg triplet")
+	case "export-cmake":
+		set.StringVar(&flags.output, "output", "CMakeLists.txt", "output path relative to the project")
+		set.BoolVar(&flags.force, "force", false, "overwrite an existing CMakeLists.txt")
+	}
+}
+
+// executeCommand dispatches a parsed subcommand to the app package. args holds
+// the positional arguments left after flag parsing.
+func executeCommand(ctx context.Context, command, path string, args []string, flags *runFlags) error {
 	switch command {
 	case "tui":
 		return tuimodel.RunDashboard(path, dashboardServices(path))
 	case "configure":
-		if *interactive {
-			return app.ConfigureInteractive(path, os.Stdin, os.Stdout)
-		}
-		if *preset != "" {
-			if err := app.ApplyCompilerPreset(path, *preset); err != nil {
-				return err
-			}
-		}
-		if *compileFlags != "" || *linkFlags != "" {
-			if err := app.SetFlags(path, *compileFlags, *linkFlags); err != nil {
-				return err
-			}
-		}
-		if err := app.ConfigureCompilerOptions(path, *mode, *distribution, *cFlags, *cxxFlags); err != nil {
-			return err
-		}
-		configuredCUDA := ""
-		if *cudaExecution == "" && *cudaDistribution == "" {
-			configuredCUDA = *cudaRoot
-		}
-		if err := app.Configure(app.ConfigureOptions{
-			Path:           path,
-			Compiler:       *compiler,
-			C:              *c,
-			Profile:        *profile,
-			VcpkgRoot:      *vcpkgRoot,
-			Triplet:        *triplet,
-			MSVC:           *msvc,
-			CUDAVersion:    configuredCUDA,
-			CUDAMode:       *cudaMode,
-			Setup:          *setup,
-			ModuleScanner:  *moduleScanner,
-			ModulesEnabled: *modulesEnabled,
-		}); err != nil {
-			return err
-		}
-		if *cudaExecution != "" || *cudaDistribution != "" {
-			if err := app.SetCUDAConnection(path, true, *cudaRoot, *cudaExecution, *cudaDistribution); err != nil {
-				return err
-			}
-		}
-		if *vulkanRoot != "" || *vulkanExecution != "" || *vulkanDistribution != "" {
-			if err := app.SetVulkanConnection(path, true, *vulkanRoot, *vulkanExecution, *vulkanDistribution); err != nil {
-				return err
-			}
-		}
-		if *savePreset != "" {
-			return app.SaveCompilerPreset(path, *savePreset)
-		}
-		return nil
+		return configureProject(path, flags)
 	case "build":
-		if *preset != "" {
-			if err := app.ApplyCompilerPreset(path, *preset); err != nil {
-				return err
-			}
-		}
-		if *buildProfile != "" {
-			if err := app.SetProfile(path, *buildProfile); err != nil {
-				return err
-			}
-		}
-		if *dashboard && term.IsTerminal(int(os.Stdin.Fd())) {
-			return tuimodel.RunDashboard(path, dashboardServices(path))
-		}
-		return app.BuildTargetsWithOptions(ctx, path, set.Args(), testAll, force, func(line string) { fmt.Println(line) })
+		return buildProject(ctx, path, args, flags)
 	case "test":
-		selection := app.TestSelection{Job: testJob, Group: testGroup, File: testFile, All: testAll || (testJob == "" && testGroup == "" && testFile == "")}
-		return app.RunTests(ctx, path, selection, func(line string) { fmt.Println(line) })
+		selection := app.TestSelection{
+			Job:   flags.testJob,
+			Group: flags.testGroup,
+			File:  flags.testFile,
+			All:   flags.testAll || (flags.testJob == "" && flags.testGroup == "" && flags.testFile == ""),
+		}
+		return app.RunTests(ctx, path, selection, progressPrinter)
 	case "import", "import-cmake":
-		if command == "import" {
-			if _, err := os.Stat("xmake.lua"); err == nil {
-				return app.ImportXmake(ctx, path, func(line string) { fmt.Println(line) })
-			}
-		}
-		result, err := app.ImportCMake(ctx, path, func(line string) { fmt.Println(line) })
-		if err == nil {
-			for _, warning := range result.Warnings {
-				fmt.Println("warning:", warning)
-			}
-		}
-		return err
+		return importProject(ctx, command, path)
 	case "import-xmake":
-		return app.ImportXmake(ctx, path, func(line string) { fmt.Println(line) })
+		return app.ImportXmake(ctx, path, progressPrinter)
 	case "export-cmake":
-		_, err := app.ExportCMake(ctx, path, *output, force, func(line string) { fmt.Println(line) })
+		_, err := app.ExportCMake(ctx, path, flags.output, flags.force, progressPrinter)
 		return err
 	case "package":
-		return app.PackageWithProgress(ctx, path, *output, func(line string) { fmt.Println(line) })
+		return app.PackageWithProgress(ctx, path, flags.output, progressPrinter)
 	case "release":
-		var targets []string
-		if releaseTargets != "" {
-			for _, name := range strings.Split(releaseTargets, ",") {
-				if name = strings.TrimSpace(name); name != "" {
-					targets = append(targets, name)
-				}
-			}
-		}
-		if err := app.ConfigureRelease(path, *preset, targets, *output); err != nil {
-			return err
-		}
-		return app.ReleaseWithProgress(ctx, path, func(line string) { fmt.Println(line) })
+		return releaseProject(ctx, path, flags)
 	case "vcpkg":
-		if portsText != "" {
-			for _, port := range strings.Split(portsText, ",") {
-				if port = strings.TrimSpace(port); port != "" {
-					ports = append(ports, port)
-				}
-			}
-		}
-		return app.Vcpkg(ctx, *vcpkgRoot, query, ports, vcpkgTriplet, install)
+		return app.Vcpkg(ctx, flags.vcpkgRoot, flags.query, splitCSV(flags.portsText), flags.vcpkgTriplet, flags.install)
 	case "toolchain":
-		return app.Toolchains(ctx, path, *toolchainCache, refresh)
+		return app.Toolchains(ctx, path, flags.toolchainCache, flags.refresh)
 	case "doctor":
-		return app.DoctorWithContext(ctx, path, func(line string) { fmt.Println(line) })
+		return app.DoctorWithContext(ctx, path, progressPrinter)
 	case "logs":
 		id := ""
-		if len(set.Args()) > 0 {
-			id = set.Args()[0]
+		if len(args) > 0 {
+			id = args[0]
 		}
 		return app.Logs(path, id, os.Stdout)
 	default:
 		return fmt.Errorf("unknown command %q", command)
 	}
+}
+
+// progressPrinter writes build progress lines to standard output.
+func progressPrinter(line string) { fmt.Println(line) }
+
+// splitCSV splits a comma-separated flag value into trimmed, non-empty items and
+// returns nil when nothing remains.
+func splitCSV(value string) []string {
+	var items []string
+	for _, item := range strings.Split(value, ",") {
+		if item = strings.TrimSpace(item); item != "" {
+			items = append(items, item)
+		}
+	}
+	return items
+}
+
+// configureProject applies the configure subcommand's flags to the project
+// configuration.
+func configureProject(path string, flags *runFlags) error {
+	if flags.interactive {
+		return app.ConfigureInteractive(path, os.Stdin, os.Stdout)
+	}
+	if flags.preset != "" {
+		if err := app.ApplyCompilerPreset(path, flags.preset); err != nil {
+			return err
+		}
+	}
+	if flags.compileFlags != "" || flags.linkFlags != "" {
+		if err := app.SetFlags(path, flags.compileFlags, flags.linkFlags); err != nil {
+			return err
+		}
+	}
+	if err := app.ConfigureCompilerOptions(path, flags.mode, flags.distribution, flags.cFlags, flags.cxxFlags); err != nil {
+		return err
+	}
+	configuredCUDA := ""
+	if flags.cudaExecution == "" && flags.cudaDistribution == "" {
+		configuredCUDA = flags.cudaRoot
+	}
+	if err := app.Configure(app.ConfigureOptions{
+		Path:           path,
+		Compiler:       flags.compiler,
+		C:              flags.c,
+		Profile:        flags.profile,
+		VcpkgRoot:      flags.vcpkgRoot,
+		Triplet:        flags.triplet,
+		MSVC:           flags.msvc,
+		CUDAVersion:    configuredCUDA,
+		CUDAMode:       flags.cudaMode,
+		Setup:          flags.setup,
+		ModuleScanner:  flags.moduleScanner,
+		ModulesEnabled: flags.modulesEnabled,
+	}); err != nil {
+		return err
+	}
+	if flags.cudaExecution != "" || flags.cudaDistribution != "" {
+		if err := app.SetCUDAConnection(path, true, flags.cudaRoot, flags.cudaExecution, flags.cudaDistribution); err != nil {
+			return err
+		}
+	}
+	if flags.vulkanRoot != "" || flags.vulkanExecution != "" || flags.vulkanDistribution != "" {
+		if err := app.SetVulkanConnection(path, true, flags.vulkanRoot, flags.vulkanExecution, flags.vulkanDistribution); err != nil {
+			return err
+		}
+	}
+	if flags.savePreset != "" {
+		return app.SaveCompilerPreset(path, flags.savePreset)
+	}
+	return nil
+}
+
+// buildProject applies the build subcommand's flags and then builds the selected
+// targets, opening the dashboard first when -ui was requested on a terminal.
+func buildProject(ctx context.Context, path string, args []string, flags *runFlags) error {
+	if flags.preset != "" {
+		if err := app.ApplyCompilerPreset(path, flags.preset); err != nil {
+			return err
+		}
+	}
+	if flags.buildProfile != "" {
+		if err := app.SetProfile(path, flags.buildProfile); err != nil {
+			return err
+		}
+	}
+	if flags.dashboard && term.IsTerminal(int(os.Stdin.Fd())) {
+		return tuimodel.RunDashboard(path, dashboardServices(path))
+	}
+	return app.BuildTargetsWithOptions(ctx, path, args, flags.testAll, flags.force, progressPrinter)
+}
+
+// importProject imports a CMake build directory, falling back to Xmake when the
+// plain import command finds an xmake.lua in the current directory.
+func importProject(ctx context.Context, command, path string) error {
+	if command == "import" {
+		if _, err := os.Stat("xmake.lua"); err == nil {
+			return app.ImportXmake(ctx, path, progressPrinter)
+		}
+	}
+	result, err := app.ImportCMake(ctx, path, progressPrinter)
+	if err == nil {
+		for _, warning := range result.Warnings {
+			fmt.Println("warning:", warning)
+		}
+	}
+	return err
+}
+
+// releaseProject configures and runs a release build.
+func releaseProject(ctx context.Context, path string, flags *runFlags) error {
+	if err := app.ConfigureRelease(path, flags.preset, splitCSV(flags.releaseTargets), flags.output); err != nil {
+		return err
+	}
+	return app.ReleaseWithProgress(ctx, path, progressPrinter)
 }
 
 func dashboardServices(path string) tuimodel.Services {
