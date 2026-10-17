@@ -242,11 +242,30 @@ func appendLegacyValue(result *target, section, value string) {
 	if value == "" || value == "none" {
 		return
 	}
+	if appendLegacyScalar(result, section, value) {
+		return
+	}
+	appendLegacyList(result, section, value)
+}
+
+// appendLegacyScalar records a single-valued legacy section and reports whether
+// the section was handled.
+func appendLegacyScalar(result *target, section, value string) bool {
 	switch section {
 	case "kind":
 		result.Kind = value
 	case "targetfile", "filename":
 		result.TargetFile = value
+	default:
+		return false
+	}
+	return true
+}
+
+// appendLegacyList records a list-valued legacy section, ignoring sections that
+// are not lists.
+func appendLegacyList(result *target, section, value string) {
+	switch section {
 	case "files", "sourcefiles":
 		result.Files = append(result.Files, value)
 	case "includedirs":
@@ -350,6 +369,32 @@ func runCommand(ctx context.Context, executable, root string, args ...string) ([
 }
 
 func introspect(ctx context.Context, executable, root string, progress func(string), run commandRunner) ([]target, error) {
+	targets, done, attemptErrors := introspectAggregate(ctx, executable, root, progress, run)
+	if done {
+		return targets, nil
+	}
+	names, attemptErrors := introspectTargetNames(ctx, executable, root, run, attemptErrors)
+	if len(names) == 0 {
+		return nil, fmt.Errorf("xmake target introspection failed; no targets were listed\n%s", strings.Join(attemptErrors, "\n"))
+	}
+	if progress != nil {
+		progress(fmt.Sprintf("Xmake target metadata: per-target compatibility protocol (%d targets)", len(names)))
+	}
+	result := make([]target, 0, len(names))
+	for _, name := range names {
+		imported, targetErrors := introspectTarget(ctx, executable, root, name, run)
+		if imported.Kind == "" {
+			return nil, fmt.Errorf("xmake target %q introspection failed\n%s", name, strings.Join(targetErrors, "\n"))
+		}
+		result = append(result, imported)
+	}
+	return result, nil
+}
+
+// introspectAggregate tries the aggregate JSON protocols. It reports the parsed
+// targets and whether one of the attempts succeeded, along with the errors from
+// any attempts that did not.
+func introspectAggregate(ctx context.Context, executable, root string, progress func(string), run commandRunner) ([]target, bool, []string) {
 	var attemptErrors []string
 	for _, args := range [][]string{
 		{"show", "-t", "target", "--format=json"},
@@ -361,7 +406,7 @@ func introspect(ctx context.Context, executable, root string, progress func(stri
 				if progress != nil {
 					progress("Xmake target metadata: aggregate JSON protocol")
 				}
-				return targets, nil
+				return targets, true, attemptErrors
 			} else if parseErr != nil {
 				attemptErrors = append(attemptErrors, formatAttempt(args, parseErr, out))
 			}
@@ -369,7 +414,12 @@ func introspect(ctx context.Context, executable, root string, progress func(stri
 			attemptErrors = append(attemptErrors, formatAttempt(args, err, out))
 		}
 	}
+	return nil, false, attemptErrors
+}
 
+// introspectTargetNames lists the project's target names, trying the JSON and
+// legacy listing protocols in turn and appending failures to attemptErrors.
+func introspectTargetNames(ctx context.Context, executable, root string, run commandRunner, attemptErrors []string) ([]string, []string) {
 	var names []string
 	for _, args := range [][]string{
 		{"show", "-l", "targets", "--format=json"},
@@ -387,56 +437,48 @@ func introspect(ctx context.Context, executable, root string, progress func(stri
 		}
 		attemptErrors = append(attemptErrors, formatAttempt(args, errors.New("no target names found"), out))
 	}
-	if len(names) == 0 {
-		return nil, fmt.Errorf("xmake target introspection failed; no targets were listed\n%s", strings.Join(attemptErrors, "\n"))
-	}
-	if progress != nil {
-		progress(fmt.Sprintf("Xmake target metadata: per-target compatibility protocol (%d targets)", len(names)))
-	}
+	return names, attemptErrors
+}
 
-	result := make([]target, 0, len(names))
-	for _, name := range names {
-		var imported target
-		var targetErrors []string
-		for _, args := range [][]string{
-			{"show", "-t", name, "--format=json"},
-			{"show", "-t", name, "--json"},
-			{"show", "-t", name},
-		} {
-			out, err := run(ctx, executable, root, args...)
-			if err != nil {
-				targetErrors = append(targetErrors, formatAttempt(args, err, out))
-				continue
-			}
-			isJSON := args[len(args)-1] == "--format=json" || args[len(args)-1] == "--json"
-			if isJSON {
-				parsed, parseErr := Parse(out)
-				if parseErr == nil && len(parsed) > 0 && parsed[0].Kind != "" {
-					imported = parsed[0]
-					if imported.Name == "" {
-						imported.Name = name
-					}
-					break
+// introspectTarget reads one named target through the per-target protocols,
+// returning the imported target and the errors from any attempts that failed.
+func introspectTarget(ctx context.Context, executable, root, name string, run commandRunner) (target, []string) {
+	var imported target
+	var targetErrors []string
+	for _, args := range [][]string{
+		{"show", "-t", name, "--format=json"},
+		{"show", "-t", name, "--json"},
+		{"show", "-t", name},
+	} {
+		out, err := run(ctx, executable, root, args...)
+		if err != nil {
+			targetErrors = append(targetErrors, formatAttempt(args, err, out))
+			continue
+		}
+		isJSON := args[len(args)-1] == "--format=json" || args[len(args)-1] == "--json"
+		if isJSON {
+			parsed, parseErr := Parse(out)
+			if parseErr == nil && len(parsed) > 0 && parsed[0].Kind != "" {
+				imported = parsed[0]
+				if imported.Name == "" {
+					imported.Name = name
 				}
-				if parseErr == nil {
-					parseErr = fmt.Errorf("target metadata did not identify a target kind")
-				}
-				targetErrors = append(targetErrors, formatAttempt(args, parseErr, out))
-				continue
-			}
-			parsed, parseErr := ParseLegacyTarget(name, out)
-			if parseErr == nil {
-				imported = parsed
 				break
 			}
+			if parseErr == nil {
+				parseErr = fmt.Errorf("target metadata did not identify a target kind")
+			}
 			targetErrors = append(targetErrors, formatAttempt(args, parseErr, out))
+			continue
 		}
-		if imported.Kind == "" {
-			return nil, fmt.Errorf("xmake target %q introspection failed\n%s", name, strings.Join(targetErrors, "\n"))
+		parsed, parseErr := ParseLegacyTarget(name, out)
+		if parseErr == nil {
+			imported = parsed
+			break
 		}
-		result = append(result, imported)
+		targetErrors = append(targetErrors, formatAttempt(args, parseErr, out))
 	}
-	return result, nil
+	return imported, targetErrors
 }
 
 func hasTargetKinds(targets []target) bool {
@@ -483,18 +525,9 @@ func Import(ctx context.Context, root, configPath string, progress func(string))
 	}
 	cfg.Targets = map[string]config.Target{}
 	for _, source := range targets {
-		kind := map[string]string{"binary": "executable", "executable": "executable", "static": "static", "shared": "shared", "object": "static"}[strings.ToLower(source.Kind)]
-		if kind == "" || source.Name == "" {
-			continue
+		if target, ok := importXmakeTarget(source); ok {
+			cfg.Targets[source.Name] = target
 		}
-		sources := append(append([]string{}, source.Files...), source.SourceFiles...)
-		compileOptions := append(append(append([]string{}, source.CFlags...), source.CXFlags...), source.CXXFlags...)
-		libraries := append(append([]string{}, source.Links...), source.SysLinks...)
-		t := config.Target{Type: kind, Sources: uniqueStable(sources), IncludeDirs: uniqueStable(source.IncludeDirs), Defines: uniqueStable(source.Defines), CompileOptions: uniqueStable(compileOptions), LinkOptions: uniqueStable(source.LDFlags), Libraries: uniqueStable(libraries)}
-		for _, dep := range uniqueStable(source.Deps) {
-			t.Dependencies = append(t.Dependencies, config.Dependency{Target: dep, Scope: "private"})
-		}
-		cfg.Targets[source.Name] = t
 	}
 	if len(cfg.Targets) == 0 {
 		return fmt.Errorf("xmake did not expose any buildable targets")
@@ -504,19 +537,38 @@ func Import(ctx context.Context, root, configPath string, progress func(string))
 		names = append(names, name)
 	}
 	sort.Strings(names)
-	cfg.Build.DefaultTargets = nil
-	for _, name := range names {
-		if cfg.Targets[name].Type == "executable" {
-			cfg.Build.DefaultTargets = []string{name}
-			break
-		}
-	}
-	if len(cfg.Build.DefaultTargets) == 0 {
-		cfg.Build.DefaultTargets = []string{names[0]}
-	}
+	cfg.Build.DefaultTargets = selectDefaultTarget(&cfg, names)
 	cfg.Package.Targets = append([]string{}, cfg.Build.DefaultTargets...)
 	if progress != nil {
 		progress(fmt.Sprintf("Imported %d Xmake targets; default target: %s", len(cfg.Targets), cfg.Build.DefaultTargets[0]))
 	}
 	return config.SaveExpected(configPath, cfg, expected)
+}
+
+// importXmakeTarget converts one introspected xmake target into a trestle
+// target, reporting whether it maps onto a supported kind.
+func importXmakeTarget(source target) (config.Target, bool) {
+	kind := map[string]string{"binary": "executable", "executable": "executable", "static": "static", "shared": "shared", "object": "static"}[strings.ToLower(source.Kind)]
+	if kind == "" || source.Name == "" {
+		return config.Target{}, false
+	}
+	sources := append(append([]string{}, source.Files...), source.SourceFiles...)
+	compileOptions := append(append(append([]string{}, source.CFlags...), source.CXFlags...), source.CXXFlags...)
+	libraries := append(append([]string{}, source.Links...), source.SysLinks...)
+	t := config.Target{Type: kind, Sources: uniqueStable(sources), IncludeDirs: uniqueStable(source.IncludeDirs), Defines: uniqueStable(source.Defines), CompileOptions: uniqueStable(compileOptions), LinkOptions: uniqueStable(source.LDFlags), Libraries: uniqueStable(libraries)}
+	for _, dep := range uniqueStable(source.Deps) {
+		t.Dependencies = append(t.Dependencies, config.Dependency{Target: dep, Scope: "private"})
+	}
+	return t, true
+}
+
+// selectDefaultTarget returns the first executable target in sorted order,
+// falling back to the first target overall. names must not be empty.
+func selectDefaultTarget(cfg *config.Config, names []string) []string {
+	for _, name := range names {
+		if cfg.Targets[name].Type == "executable" {
+			return []string{name}
+		}
+	}
+	return []string{names[0]}
 }
