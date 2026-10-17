@@ -197,7 +197,7 @@ Dependencies may use `private`, `public`, or `interface` scope. Supported target
 
 ### Conditional rules and explicit tasks
 
-Rules use a deliberately small, side-effect-free `when` expression: `&&`, `||`, `!`, comparisons, parentheses, `os`, `arch`, `mode`, and read-only `tool()`, `wsl()`, `wsl_tool()`, `package()`, `env()`, and `path()` queries. Rules run in TOML order and may select compilers, execution mode, flags, default targets, per-target `packages` dependencies, and `depends_on` target dependencies.
+Rules use a deliberately small, side-effect-free `when` expression: `&&`, `||`, `!`, comparisons, parentheses, `os`, `arch`, `mode`, and read-only `tool()`, `wsl()`, `wsl_tool()`, `pkg()`, `env()`, and `path()` queries. Rules run in TOML order and may select compilers, execution mode, flags, default targets, per-target `packages` dependencies, and `depends_on` target dependencies.
 
 ```toml
 [[rules]]
@@ -207,7 +207,7 @@ wsl_distribution = "Ubuntu"
 cxx = "clang++"
 
 [[rules]]
-when = 'mode == "wsl" && package("fmt")'
+when = 'mode == "wsl" && pkg("fmt")'
 target = "app"
 compile_flags = ["-Wall"]
 packages = ["fmt"]

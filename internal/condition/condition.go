@@ -171,7 +171,7 @@ func checkCall(node *ast.CallExpr) (string, error) {
 		return "", fmt.Errorf("condition function argument must be a string")
 	}
 	switch name.Name {
-	case "tool", "wsl", "package", "path":
+	case "tool", "wsl", "pkg", "path":
 		return kindBool, nil
 	case "env":
 		return kindString, nil
@@ -324,7 +324,7 @@ func evalCall(node *ast.CallExpr, facts Facts) (any, error) {
 			return facts.WSL(value), nil
 		}
 		return false, nil
-	case "package":
+	case "pkg":
 		if facts.Package != nil {
 			return facts.Package(value), nil
 		}

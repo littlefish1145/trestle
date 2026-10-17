@@ -41,6 +41,8 @@ func TestEvaluateTable(t *testing.T) {
 		{`!tool("missing")`, true},
 		{`wsl("Ubuntu")`, true},
 		{`path("/usr/bin/gcc")`, true},
+		{`pkg("fmt")`, true},
+		{`pkg("missing")`, false},
 		{`env("SDK") == "ready"`, true},
 		{`env("SDK") != "ready"`, false},
 		{`wsl_tool("Ubuntu", "clang++")`, true},
@@ -71,6 +73,7 @@ func TestEvaluateDefaultsMissingProbesToFalse(t *testing.T) {
 		`tool("clang")`,
 		`wsl("Ubuntu")`,
 		`path("/bin/gcc")`,
+		`pkg("fmt")`,
 		`wsl_tool("Ubuntu", "clang")`,
 	} {
 		got, err := Evaluate(expression, facts)
@@ -97,6 +100,7 @@ func TestValidateAccepts(t *testing.T) {
 		`!(tool("x"))`,
 		`env("SDK") == "ready"`,
 		`path("/bin/gcc") || wsl("Ubuntu")`,
+		`pkg("fmt")`,
 		`(true)`,
 	}
 	for _, expression := range valid {
@@ -120,6 +124,8 @@ func TestValidateRejects(t *testing.T) {
 		`os == 1`,
 		`!"a"`,
 		`before("x")`,
+		// "package" is a Go keyword, so the helper is exposed as pkg().
+		`package("fmt")`,
 	}
 	for _, expression := range invalid {
 		if err := Validate(expression); err == nil {
