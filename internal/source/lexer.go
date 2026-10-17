@@ -39,35 +39,19 @@ func (l *lexer) next() token {
 	for l.offset < len(l.data) {
 		char := l.data[l.offset]
 		if char == '\n' {
-			start := l.position()
-			l.advance()
-			result := token{Kind: tokenNewline, Text: "\n", Start: start, End: l.position(), FirstOnLine: true}
-			l.firstOnLine = true
-			l.leadingSpace = false
-			return result
+			return l.lexNewline()
 		}
-		if char == '\r' || char == ' ' || char == '\t' || char == '\v' || char == '\f' {
+		if isInlineSpace(char) {
 			l.leadingSpace = true
 			l.advance()
 			continue
 		}
 		if char == '/' && l.offset+1 < len(l.data) && l.data[l.offset+1] == '/' {
-			for l.offset < len(l.data) && l.data[l.offset] != '\n' {
-				l.advance()
-			}
+			l.skipLineComment()
 			continue
 		}
 		if char == '/' && l.offset+1 < len(l.data) && l.data[l.offset+1] == '*' {
-			l.advance()
-			l.advance()
-			for l.offset < len(l.data) {
-				if l.data[l.offset] == '*' && l.offset+1 < len(l.data) && l.data[l.offset+1] == '/' {
-					l.advance()
-					l.advance()
-					break
-				}
-				l.advance()
-			}
+			l.skipBlockComment()
 			continue
 		}
 		break
@@ -81,67 +65,124 @@ func (l *lexer) next() token {
 	l.firstOnLine = false
 	switch {
 	case isIdentifierStart(char):
-		begin := l.offset
-		for l.offset < len(l.data) && isIdentifierPart(l.data[l.offset]) {
-			l.advance()
-		}
-		return token{Kind: tokenIdentifier, Text: string(l.data[begin:l.offset]), Start: start, End: l.position(), FirstOnLine: firstOnLine}
+		return l.lexIdentifier(firstOnLine, start)
 	case char >= '0' && char <= '9':
-		begin := l.offset
-		for l.offset < len(l.data) && isNumberPart(l.data[l.offset]) {
-			l.advance()
-		}
-		return token{Kind: tokenNumber, Text: string(l.data[begin:l.offset]), Start: start, End: l.position(), FirstOnLine: firstOnLine}
+		return l.lexNumber(firstOnLine, start)
 	case char == '"' || char == '\'':
-		quote := char
-		l.advance()
-		var value strings.Builder
-		for l.offset < len(l.data) {
-			current := l.data[l.offset]
-			if current == quote {
-				l.advance()
-				break
-			}
-			if current == '\\' && l.offset+1 < len(l.data) {
-				l.advance()
-				escaped := l.data[l.offset]
-				l.advance()
-				switch escaped {
-				case 'n':
-					value.WriteByte('\n')
-				case 'r':
-					value.WriteByte('\r')
-				case 't':
-					value.WriteByte('\t')
-				case '\\':
-					value.WriteByte('\\')
-				case '"':
-					value.WriteByte('"')
-				case '\'':
-					value.WriteByte('\'')
-				default:
-					value.WriteByte(escaped)
-				}
-				continue
-			}
-			value.WriteByte(current)
-			l.advance()
-		}
-		return token{Kind: tokenString, Text: value.String(), Start: start, End: l.position(), FirstOnLine: firstOnLine}
+		return l.lexString(char, firstOnLine, start)
 	default:
-		if (char == '&' || char == '|' || char == '=' || char == '!' || char == '<' || char == '>') && l.offset+1 < len(l.data) && l.data[l.offset+1] == char {
+		return l.lexPunctuation(char, firstOnLine, start)
+	}
+}
+
+// lexNewline consumes a line feed and returns the newline token, resetting the
+// line-start bookkeeping for the line that follows.
+func (l *lexer) lexNewline() token {
+	start := l.position()
+	l.advance()
+	l.firstOnLine = true
+	l.leadingSpace = false
+	return token{Kind: tokenNewline, Text: "\n", Start: start, End: l.position(), FirstOnLine: true}
+}
+
+// skipLineComment consumes a "//" comment up to, but not including, the newline
+// that ends it, leaving that newline for next to tokenize.
+func (l *lexer) skipLineComment() {
+	for l.offset < len(l.data) && l.data[l.offset] != '\n' {
+		l.advance()
+	}
+}
+
+// skipBlockComment consumes a "/* ... */" comment, advancing past the closing
+// delimiter or to end of input when the comment is unterminated.
+func (l *lexer) skipBlockComment() {
+	l.advance()
+	l.advance()
+	for l.offset < len(l.data) {
+		if l.data[l.offset] == '*' && l.offset+1 < len(l.data) && l.data[l.offset+1] == '/' {
 			l.advance()
 			l.advance()
-			text := string([]byte{char, char})
-			return token{Kind: tokenPunctuation, Text: text, Start: start, End: l.position(), FirstOnLine: firstOnLine}
+			break
 		}
 		l.advance()
-		runeValue, _ := utf8.DecodeRune(l.data[start.Offset:])
-		if unicode.IsLetter(runeValue) {
-			return token{Kind: tokenIdentifier, Text: string(runeValue), Start: start, End: l.position(), FirstOnLine: firstOnLine}
-		}
-		return token{Kind: tokenPunctuation, Text: string(runeValue), Start: start, End: l.position(), FirstOnLine: firstOnLine}
 	}
+}
+
+// lexIdentifier consumes a run of identifier characters and returns the
+// identifier token spanning it.
+func (l *lexer) lexIdentifier(firstOnLine bool, start Position) token {
+	begin := l.offset
+	for l.offset < len(l.data) && isIdentifierPart(l.data[l.offset]) {
+		l.advance()
+	}
+	return token{Kind: tokenIdentifier, Text: string(l.data[begin:l.offset]), Start: start, End: l.position(), FirstOnLine: firstOnLine}
+}
+
+// lexNumber consumes a run of numeric characters and returns the number token
+// spanning it.
+func (l *lexer) lexNumber(firstOnLine bool, start Position) token {
+	begin := l.offset
+	for l.offset < len(l.data) && isNumberPart(l.data[l.offset]) {
+		l.advance()
+	}
+	return token{Kind: tokenNumber, Text: string(l.data[begin:l.offset]), Start: start, End: l.position(), FirstOnLine: firstOnLine}
+}
+
+// lexString consumes a quoted string, decoding the common backslash escapes, and
+// returns the string token whose Text is the unquoted value.
+func (l *lexer) lexString(quote byte, firstOnLine bool, start Position) token {
+	l.advance()
+	var value strings.Builder
+	for l.offset < len(l.data) {
+		current := l.data[l.offset]
+		if current == quote {
+			l.advance()
+			break
+		}
+		if current == '\\' && l.offset+1 < len(l.data) {
+			l.advance()
+			escaped := l.data[l.offset]
+			l.advance()
+			switch escaped {
+			case 'n':
+				value.WriteByte('\n')
+			case 'r':
+				value.WriteByte('\r')
+			case 't':
+				value.WriteByte('\t')
+			case '\\':
+				value.WriteByte('\\')
+			case '"':
+				value.WriteByte('"')
+			case '\'':
+				value.WriteByte('\'')
+			default:
+				value.WriteByte(escaped)
+			}
+			continue
+		}
+		value.WriteByte(current)
+		l.advance()
+	}
+	return token{Kind: tokenString, Text: value.String(), Start: start, End: l.position(), FirstOnLine: firstOnLine}
+}
+
+// lexPunctuation consumes a punctuation token: a recognised two-character
+// operator, or a single rune that is classified as an identifier when it is a
+// letter and as punctuation otherwise.
+func (l *lexer) lexPunctuation(char byte, firstOnLine bool, start Position) token {
+	if (char == '&' || char == '|' || char == '=' || char == '!' || char == '<' || char == '>') && l.offset+1 < len(l.data) && l.data[l.offset+1] == char {
+		l.advance()
+		l.advance()
+		text := string([]byte{char, char})
+		return token{Kind: tokenPunctuation, Text: text, Start: start, End: l.position(), FirstOnLine: firstOnLine}
+	}
+	l.advance()
+	runeValue, _ := utf8.DecodeRune(l.data[start.Offset:])
+	if unicode.IsLetter(runeValue) {
+		return token{Kind: tokenIdentifier, Text: string(runeValue), Start: start, End: l.position(), FirstOnLine: firstOnLine}
+	}
+	return token{Kind: tokenPunctuation, Text: string(runeValue), Start: start, End: l.position(), FirstOnLine: firstOnLine}
 }
 
 func (l *lexer) position() Position {
@@ -163,6 +204,12 @@ func (l *lexer) advance() {
 	l.column++
 }
 
+// isInlineSpace reports whether char is horizontal whitespace that separates
+// tokens without producing a token of its own.
+func isInlineSpace(char byte) bool {
+	return char == '\r' || char == ' ' || char == '\t' || char == '\v' || char == '\f'
+}
+
 func isIdentifierStart(char byte) bool {
 	return char == '_' || char >= 'a' && char <= 'z' || char >= 'A' && char <= 'Z' || char >= utf8.RuneSelf
 }
@@ -171,6 +218,14 @@ func isIdentifierPart(char byte) bool {
 	return isIdentifierStart(char) || char >= '0' && char <= '9'
 }
 
+// isNumberPart reports whether char may appear inside a numeric literal: a
+// digit, decimal point, sign, or hexadecimal digit.
 func isNumberPart(char byte) bool {
-	return char == '.' || char == '+' || char == '-' || char >= '0' && char <= '9' || char >= 'a' && char <= 'f' || char >= 'A' && char <= 'F' || char == 'x' || char == 'X'
+	return char == '.' || char == '+' || char == '-' || char >= '0' && char <= '9' || isHexDigit(char)
+}
+
+// isHexDigit reports whether char is a hexadecimal digit or the x/X base prefix
+// that introduces one.
+func isHexDigit(char byte) bool {
+	return char >= 'a' && char <= 'f' || char >= 'A' && char <= 'F' || char == 'x' || char == 'X'
 }
