@@ -193,6 +193,24 @@ func (model dashboardModel) packageCandidateLines(p palette, width int) []string
 	if !ok {
 		return emptyState(p, "No version selected", "Press esc to return to the package list.")
 	}
+	lines := candidateHeadingLines(p, width, pkg, model.packageRequested)
+	for index, candidate := range pkg.Candidates {
+		row := candidateLabel(candidate, model.packageRequested, width)
+		if candidate.Version == model.packageRequested {
+			lines = append(lines, model.selectableRowHighlighted(p, index, row))
+		} else {
+			lines = append(lines, model.selectableRow(p, index, row))
+		}
+		if index == model.cursor {
+			lines = append(lines, candidateDetailLines(p, candidate, model.packageRequested)...)
+		}
+	}
+	return lines
+}
+
+// candidateHeadingLines is the package name, description and pinned-version
+// banner shown above the version list.
+func candidateHeadingLines(p palette, width int, pkg deps.Package, requested string) []string {
 	lines := []string{
 		"",
 		p.title.Render("  "+pkg.Name) + "  " + p.faint.Render("choose a version and source"),
@@ -200,50 +218,56 @@ func (model dashboardModel) packageCandidateLines(p palette, width int) []string
 	if pkg.Description != "" {
 		lines = append(lines, p.faint.Render("  "+ansi.Truncate(pkg.Description, max(12, width-4), "…")))
 	}
-	if model.packageRequested != "" {
-		lines = append(lines, p.accent.Render("  requested "+model.packageRequested))
+	if requested != "" {
+		lines = append(lines, p.accent.Render("  requested "+requested))
 	}
-	lines = append(lines, "")
-	for index, candidate := range pkg.Candidates {
-		marker := "○"
-		switch {
-		case candidate.Installed:
-			marker = "✓"
-		case candidate.Version == model.packageRequested:
-			// ★ marks the release the user asked for with name:version, so it
-			// stands out from the rest of the history without moving the cursor.
-			marker = "★"
-		}
-		version := fallback(candidate.Version, "latest")
-		row := fmt.Sprintf("%s  %-16s %s", marker, version, providerTag(candidate))
-		row = ansi.Truncate(row, width-3, "…")
-		switch {
-		case candidate.Version == model.packageRequested:
-			lines = append(lines, model.selectableRowHighlighted(p, index, row))
-		default:
-			lines = append(lines, model.selectableRow(p, index, row))
-		}
-		if index == model.cursor {
-			var detail []string
-			if candidate.Version == model.packageRequested {
-				detail = append(detail, "requested")
-			}
-			if candidate.Updated != "" {
-				detail = append(detail, "updated "+candidate.Updated)
-			}
-			if candidate.License != "" {
-				detail = append(detail, "license "+candidate.License)
-			}
-			if candidate.PackageURL != "" {
-				detail = append(detail, "details "+candidate.PackageURL)
-			}
-			if len(detail) > 0 {
-				lines = append(lines, p.faint.Render("     "+strings.Join(detail, " · ")))
-			}
-			if candidate.Installed {
-				lines = append(lines, p.good.Render("     already available in the local cache"))
-			}
-		}
+	return append(lines, "")
+}
+
+// candidateMarker selects the row marker: a check when the version is already
+// installed, a star for the release the user requested, and a circle otherwise.
+func candidateMarker(candidate deps.Candidate, requested string) string {
+	switch {
+	case candidate.Installed:
+		return "✓"
+	case candidate.Version == requested:
+		// ★ marks the release the user asked for with name:version, so it
+		// stands out from the rest of the history without moving the cursor.
+		return "★"
+	}
+	return "○"
+}
+
+// candidateLabel is the marker, version and provider tag formatted for one
+// candidate, truncated to the available width.
+func candidateLabel(candidate deps.Candidate, requested string, width int) string {
+	version := fallback(candidate.Version, "latest")
+	row := fmt.Sprintf("%s  %-16s %s", candidateMarker(candidate, requested), version, providerTag(candidate))
+	return ansi.Truncate(row, width-3, "…")
+}
+
+// candidateDetailLines describes the candidate under the cursor: whether it was
+// requested, when it was updated, its license and URL, and cache availability.
+func candidateDetailLines(p palette, candidate deps.Candidate, requested string) []string {
+	var lines []string
+	var detail []string
+	if candidate.Version == requested {
+		detail = append(detail, "requested")
+	}
+	if candidate.Updated != "" {
+		detail = append(detail, "updated "+candidate.Updated)
+	}
+	if candidate.License != "" {
+		detail = append(detail, "license "+candidate.License)
+	}
+	if candidate.PackageURL != "" {
+		detail = append(detail, "details "+candidate.PackageURL)
+	}
+	if len(detail) > 0 {
+		lines = append(lines, p.faint.Render("     "+strings.Join(detail, " · ")))
+	}
+	if candidate.Installed {
+		lines = append(lines, p.good.Render("     already available in the local cache"))
 	}
 	return lines
 }

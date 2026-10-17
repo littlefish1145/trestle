@@ -802,13 +802,29 @@ func (model dashboardModel) selectedCompiler() (toolchain.Component, bool) {
 		return toolchain.Component{}, false
 	}
 	component := model.probe.Components[model.cursor]
-	base := strings.ToLower(filepath.Base(component.Path))
-	selectable := strings.Contains(base, "++") || strings.Contains(base, "clang-cl") || base == "cl" || base == "cl.exe" || component.Name == "MSVC"
-	if component.Family == "WSL" && component.Execution == "wsl" {
-		selectable = true
-	}
-	compiler := component.Ready && component.Path != "" && selectable && (component.Family == "Clang" || component.Family == "MSVC" || component.Family == "MinGW" || component.Family == "WSL")
+	compiler := component.Ready && component.Path != "" && selectableCompilerName(component) && selectableCompilerFamily(component.Family)
 	return component, compiler
+}
+
+// selectableCompilerName reports whether a component looks like a compiler the
+// console can activate: a C++ driver, clang-cl, or the MSVC toolchain, plus any
+// compiler reached through WSL.
+func selectableCompilerName(component toolchain.Component) bool {
+	base := strings.ToLower(filepath.Base(component.Path))
+	if strings.Contains(base, "++") || strings.Contains(base, "clang-cl") || base == "cl" || base == "cl.exe" || component.Name == "MSVC" {
+		return true
+	}
+	return component.Family == "WSL" && component.Execution == "wsl"
+}
+
+// selectableCompilerFamily reports whether a component's family is one the
+// console can make the active compiler.
+func selectableCompilerFamily(family string) bool {
+	switch family {
+	case "Clang", "MSVC", "MinGW", "WSL":
+		return true
+	}
+	return false
 }
 
 func (model dashboardModel) selectedComponent() (toolchain.Component, bool) {
@@ -976,48 +992,67 @@ func (model *dashboardModel) keepCursorVisible() {
 	}
 }
 
+// itemCounters maps each screen to the function that counts its selectable
+// rows, so itemCount stays a single lookup.
+var itemCounters = map[Route]func(dashboardModel) int{
+	TargetsRoute:      func(model dashboardModel) int { return len(model.config.Targets) },
+	TasksRoute:        func(model dashboardModel) int { return len(model.config.Tasks) },
+	DependenciesRoute: dashboardModel.dependencyCount,
+	ToolchainsRoute:   func(model dashboardModel) int { return len(model.probe.Components) },
+	PresetsRoute:      func(model dashboardModel) int { return len(model.config.CompilerPresets) },
+	PackagesRoute:     dashboardModel.packageItemCount,
+	TestsRoute:        dashboardModel.testItemCount,
+	BuildRoute:        func(model dashboardModel) int { return len(model.config.Targets) },
+	ReleaseRoute:      func(model dashboardModel) int { return len(model.optimizationNames()) },
+	SettingsRoute:     dashboardModel.settingsItemCount,
+}
+
 func (model dashboardModel) itemCount() int {
-	switch model.route {
-	case TargetsRoute:
-		return len(model.config.Targets)
-	case TasksRoute:
-		return len(model.config.Tasks)
-	case DependenciesRoute:
-		count := 0
-		for _, target := range model.config.Targets {
-			count += len(target.Dependencies)
-		}
-		return count
-	case ToolchainsRoute:
-		return len(model.probe.Components)
-	case PresetsRoute:
-		return len(model.config.CompilerPresets)
-	case PackagesRoute:
-		// The candidate level replaces the whole page, including the configured
-		// list, so only the version rows are selectable there.
-		if model.packageLevel == packageCandidatesLevel {
-			return model.packageRows()
-		}
-		return len(model.config.Packages) + model.packageRows()
-	case TestsRoute:
-		if model.testFileMode {
-			return len(model.testFiles())
-		}
-		return len(model.probe.Tests)
-	case BuildRoute:
-		return len(model.config.Targets)
-	case ReleaseRoute:
-		return len(model.optimizationNames())
-	case SettingsRoute:
-		if model.rulesView {
-			return 0
-		}
-		if model.settingsCategory == "" && model.settingsQuery == "" {
-			return len(model.settingsGroups())
-		}
-		return len(model.filteredSettings())
+	if count, ok := itemCounters[model.route]; ok {
+		return count(model)
 	}
 	return 0
+}
+
+// dependencyCount totals the dependency edges declared by every target.
+func (model dashboardModel) dependencyCount() int {
+	count := 0
+	for _, target := range model.config.Targets {
+		count += len(target.Dependencies)
+	}
+	return count
+}
+
+// packageItemCount counts selectable package rows: only the version list on the
+// candidate level, otherwise the configured packages plus the search results.
+func (model dashboardModel) packageItemCount() int {
+	// The candidate level replaces the whole page, including the configured
+	// list, so only the version rows are selectable there.
+	if model.packageLevel == packageCandidatesLevel {
+		return model.packageRows()
+	}
+	return len(model.config.Packages) + model.packageRows()
+}
+
+// testItemCount counts the rows the tests screen shows: files in file view,
+// jobs otherwise.
+func (model dashboardModel) testItemCount() int {
+	if model.testFileMode {
+		return len(model.testFiles())
+	}
+	return len(model.probe.Tests)
+}
+
+// settingsItemCount counts the rows the settings screen shows: the group menu,
+// or the filtered list, and nothing at all in the rules view.
+func (model dashboardModel) settingsItemCount() int {
+	if model.rulesView {
+		return 0
+	}
+	if model.settingsCategory == "" && model.settingsQuery == "" {
+		return len(model.settingsGroups())
+	}
+	return len(model.filteredSettings())
 }
 
 func (model dashboardModel) viewportHeight() int {
@@ -1212,71 +1247,63 @@ func (model dashboardModel) contentPanel(p palette, width, height int) string {
 	return lipgloss.NewStyle().Border(p.border).BorderForeground(lipgloss.Color(borderColor)).Padding(0, 1).Width(width - 4).Height(max(1, height-2)).Render(body)
 }
 
+// routeHeadings names each screen's panel title and subtitle.
+var routeHeadings = map[Route][2]string{
+	OverviewRoute:     {"Project overview", "live workspace snapshot"},
+	TargetsRoute:      {"Targets", "outputs and source sets"},
+	TasksRoute:        {"Tasks", "explicit commands and configuration edits"},
+	DependenciesRoute: {"Dependency graph", "target and package edges"},
+	ToolchainsRoute:   {"Development environment", "compiler, runtime and SDK components"},
+	PresetsRoute:      {"Compiler presets", "save and reuse complete compiler parameter sets"},
+	ImportRoute:       {"Project import", "CMake File API and version-compatible Xmake introspection"},
+	PackagesRoute:     {"Packages", "vcpkg and conan dependencies"},
+	TestsRoute:        {"Test suites", "jobs, groups and source-file selection"},
+	BuildRoute:        {"Build", "active execution profile"},
+	ReleaseRoute:      {"Release", "optimized target build and ZIP packaging"},
+	DoctorRoute:       {"Doctor", "actionable environment checks"},
+	SettingsRoute:     {"Settings", "resolved project configuration"},
+}
+
 func (model dashboardModel) routeHeading() (string, string) {
-	switch model.route {
-	case OverviewRoute:
-		return "Project overview", "live workspace snapshot"
-	case TargetsRoute:
-		return "Targets", "outputs and source sets"
-	case TasksRoute:
-		return "Tasks", "explicit commands and configuration edits"
-	case DependenciesRoute:
-		return "Dependency graph", "target and package edges"
-	case ToolchainsRoute:
-		return "Development environment", "compiler, runtime and SDK components"
-	case PresetsRoute:
-		return "Compiler presets", "save and reuse complete compiler parameter sets"
-	case ImportRoute:
-		return "Project import", "CMake File API and version-compatible Xmake introspection"
-	case PackagesRoute:
-		return "Packages", "vcpkg and conan dependencies"
-	case TestsRoute:
-		return "Test suites", "jobs, groups and source-file selection"
-	case BuildRoute:
-		return "Build", "active execution profile"
-	case ReleaseRoute:
-		return "Release", "optimized target build and ZIP packaging"
-	case DoctorRoute:
-		return "Doctor", "actionable environment checks"
-	case SettingsRoute:
-		return "Settings", "resolved project configuration"
+	if heading, ok := routeHeadings[model.route]; ok {
+		return heading[0], heading[1]
 	}
 	return string(model.route), ""
 }
 
+// contentRenderers maps each screen to the function that renders its body. Every
+// renderer takes the palette and the usable width; screens that ignore the width
+// discard it.
+var contentRenderers = map[Route]func(dashboardModel, palette, int) []string{
+	OverviewRoute:     dashboardModel.overviewLines,
+	TargetsRoute:      dashboardModel.targetLines,
+	TasksRoute:        dashboardModel.taskLines,
+	DependenciesRoute: dashboardModel.dependencyLines,
+	ToolchainsRoute:   dashboardModel.toolchainLines,
+	PresetsRoute:      dashboardModel.presetLines,
+	ImportRoute:       dashboardModel.importLines,
+	PackagesRoute:     dashboardModel.packageLines,
+	TestsRoute:        dashboardModel.testLines,
+	BuildRoute:        dashboardModel.buildLines,
+	ReleaseRoute:      dashboardModel.releaseLines,
+	DoctorRoute:       func(model dashboardModel, p palette, _ int) []string { return model.doctorLines(p) },
+	SettingsRoute:     dashboardModel.settingsLines,
+}
+
 func (model dashboardModel) contentLines(p palette, width int) []string {
 	if model.probing && model.probe.ProjectName == "" {
-		return []string{"", p.accent.Render(model.activityLabel()), p.muted.Render("Reading trestle.toml and probing local development tools…")}
+		return model.loadingLines(p)
 	}
-	switch model.route {
-	case OverviewRoute:
-		return model.overviewLines(p, width)
-	case TargetsRoute:
-		return model.targetLines(p, width)
-	case TasksRoute:
-		return model.taskLines(p, width)
-	case DependenciesRoute:
-		return model.dependencyLines(p, width)
-	case ToolchainsRoute:
-		return model.toolchainLines(p, width)
-	case PresetsRoute:
-		return model.presetLines(p, width)
-	case ImportRoute:
-		return model.importLines(p, width)
-	case PackagesRoute:
-		return model.packageLines(p, width)
-	case TestsRoute:
-		return model.testLines(p, width)
-	case BuildRoute:
-		return model.buildLines(p, width)
-	case ReleaseRoute:
-		return model.releaseLines(p, width)
-	case DoctorRoute:
-		return model.doctorLines(p)
-	case SettingsRoute:
-		return model.settingsLines(p, width)
+	if render, ok := contentRenderers[model.route]; ok {
+		return render(model, p, width)
 	}
 	return nil
+}
+
+// loadingLines is the placeholder shown until the opening probe reports a
+// project name.
+func (model dashboardModel) loadingLines(p palette) []string {
+	return []string{"", p.accent.Render(model.activityLabel()), p.muted.Render("Reading trestle.toml and probing local development tools…")}
 }
 
 func (model dashboardModel) overviewLines(p palette, width int) []string {
@@ -1331,30 +1358,46 @@ func (model dashboardModel) targetLines(p palette, width int) []string {
 	var lines []string
 	for index, name := range names {
 		target := model.config.Targets[name]
-		availability := "✓"
-		if status, ok := model.probe.Statuses[name]; ok && !status.Ready {
-			availability = "!"
-		}
-		defaultMark := " "
-		for _, item := range model.config.Build.DefaultTargets {
-			if item == name {
-				defaultMark = "★"
-			}
-		}
-		row := fmt.Sprintf("%s %s %-18s  %-12s  %3d sources", availability, defaultMark, name, target.Type, len(target.Sources))
+		row := fmt.Sprintf("%s %s %-18s  %-12s  %3d sources", model.targetAvailability(name), model.defaultTargetMark(name), name, target.Type, len(target.Sources))
 		lines = append(lines, model.selectableRow(p, index, ansi.Truncate(row, width-3, "…")))
 		if index == model.cursor && model.focus == focusContent {
-			output := target.OutputName
-			if output == "" {
-				output = name
-			}
-			lines = append(lines, p.faint.Render("     output "+output+" · "+fmt.Sprint(len(target.Dependencies))+" dependencies"))
-			for _, reason := range model.probe.Statuses[name].Reasons {
-				lines = appendWrappedLog(lines, p.warning, "! "+reason, width)
-			}
+			lines = append(lines, model.targetDetailLines(p, width, name, target)...)
 		}
 	}
 	return append(lines, "", p.faint.Render("enter build selected   f force selected   d make default   a build all"))
+}
+
+// targetAvailability marks a target row with a check, or a warning when the
+// policy probe reported it as not ready.
+func (model dashboardModel) targetAvailability(name string) string {
+	if status, ok := model.probe.Statuses[name]; ok && !status.Ready {
+		return "!"
+	}
+	return "✓"
+}
+
+// defaultTargetMark stars a target when it is one of the default build targets.
+func (model dashboardModel) defaultTargetMark(name string) string {
+	for _, item := range model.config.Build.DefaultTargets {
+		if item == name {
+			return "★"
+		}
+	}
+	return " "
+}
+
+// targetDetailLines describes the selected target: its output name, dependency
+// count, and every reason a policy check failed.
+func (model dashboardModel) targetDetailLines(p palette, width int, name string, target config.Target) []string {
+	output := target.OutputName
+	if output == "" {
+		output = name
+	}
+	lines := []string{p.faint.Render("     output " + output + " · " + fmt.Sprint(len(target.Dependencies)) + " dependencies")}
+	for _, reason := range model.probe.Statuses[name].Reasons {
+		lines = appendWrappedLog(lines, p.warning, "! "+reason, width)
+	}
+	return lines
 }
 
 func (model dashboardModel) taskLines(p palette, width int) []string {
@@ -1370,34 +1413,7 @@ func (model dashboardModel) taskLines(p palette, width int) []string {
 		}
 		lines = append(lines, model.selectableRow(p, index, ansi.Truncate(name+"  "+task.Description, width-3, "…")))
 		if index == model.cursor && model.focus == focusContent {
-			preview := model.pendingTaskPreview
-			if model.pendingTask != name {
-				preview = config.TaskPreview{}
-			}
-			if len(task.Command) > 0 {
-				lines = appendWrappedLog(lines, p.text, "command: "+fmt.Sprintf("%q", task.Command), width)
-			}
-			workingDir := fallback(preview.WorkingDir, fallback(task.WorkingDir, "project directory"))
-			lines = appendWrappedLog(lines, p.muted, "working directory: "+workingDir, width)
-			lines = appendWrappedLog(lines, p.muted, "timeout: "+fallback(task.Timeout, "none"), width)
-			keys := make([]string, 0, len(task.Set))
-			for key := range task.Set {
-				keys = append(keys, key)
-			}
-			sort.Strings(keys)
-			for _, key := range keys {
-				lines = appendWrappedLog(lines, p.muted, "set "+key+" = "+task.Set[key], width)
-			}
-			if model.pendingTask == name {
-				lines = append(lines, "", p.faint.Render(" CONFIGURATION CHANGES AFTER SUCCESS"))
-				if len(preview.Changes) == 0 {
-					lines = append(lines, p.muted.Render("  no configuration value changes"))
-				}
-				for _, change := range preview.Changes {
-					lines = appendWrappedLog(lines, p.text, change.Field+": "+fallback(change.Before, "(empty)")+" → "+fallback(change.After, "(empty)"), width)
-				}
-				lines = append(lines, p.faint.Render("  Files changed by the command itself are not rolled back."))
-			}
+			lines = append(lines, model.taskDetailLines(p, width, name, task)...)
 		}
 	}
 	if model.pendingTask != "" {
@@ -1406,6 +1422,51 @@ func (model dashboardModel) taskLines(p palette, width int) []string {
 		lines = append(lines, "", p.faint.Render("enter preview · esc / ctrl+c cancel a running task"))
 	}
 	return lines
+}
+
+// taskDetailLines describes the selected task: its command, working directory,
+// timeout, the values it sets, and the configuration changes it would commit.
+func (model dashboardModel) taskDetailLines(p palette, width int, name string, task config.Task) []string {
+	preview := model.pendingTaskPreview
+	if model.pendingTask != name {
+		preview = config.TaskPreview{}
+	}
+	var lines []string
+	if len(task.Command) > 0 {
+		lines = appendWrappedLog(lines, p.text, "command: "+fmt.Sprintf("%q", task.Command), width)
+	}
+	workingDir := fallback(preview.WorkingDir, fallback(task.WorkingDir, "project directory"))
+	lines = appendWrappedLog(lines, p.muted, "working directory: "+workingDir, width)
+	lines = appendWrappedLog(lines, p.muted, "timeout: "+fallback(task.Timeout, "none"), width)
+	for _, key := range sortedMapKeys(task.Set) {
+		lines = appendWrappedLog(lines, p.muted, "set "+key+" = "+task.Set[key], width)
+	}
+	if model.pendingTask == name {
+		lines = append(lines, taskChangeLines(p, width, preview)...)
+	}
+	return lines
+}
+
+// taskChangeLines lists the configuration values a confirmed task would change.
+func taskChangeLines(p palette, width int, preview config.TaskPreview) []string {
+	lines := []string{"", p.faint.Render(" CONFIGURATION CHANGES AFTER SUCCESS")}
+	if len(preview.Changes) == 0 {
+		lines = append(lines, p.muted.Render("  no configuration value changes"))
+	}
+	for _, change := range preview.Changes {
+		lines = appendWrappedLog(lines, p.text, change.Field+": "+fallback(change.Before, "(empty)")+" → "+fallback(change.After, "(empty)"), width)
+	}
+	return append(lines, p.faint.Render("  Files changed by the command itself are not rolled back."))
+}
+
+// sortedMapKeys returns the keys of a string map in sorted order.
+func sortedMapKeys(values map[string]string) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 func (model dashboardModel) dependencyLines(p palette, width int) []string {
@@ -1431,6 +1492,19 @@ func (model dashboardModel) dependencyLines(p palette, width int) []string {
 }
 
 func (model dashboardModel) toolchainLines(p palette, width int) []string {
+	lines := model.toolchainHeaderLines(p)
+	if len(model.probe.Components) == 0 {
+		lines = append(lines, p.warning.Render("!  No native development components detected"), p.faint.Render("   WSL mode may still use a compiler installed inside the selected distribution."))
+	}
+	for index, component := range model.probe.Components {
+		lines = append(lines, model.toolchainComponentLines(p, width, index, component)...)
+	}
+	return append(lines, "", p.faint.Render("enter connect native or WSL compiler/SDK   c CUDA   v Vulkan   x apply preset"))
+}
+
+// toolchainHeaderLines renders the active-toolchain summary block above the
+// detected components.
+func (model dashboardModel) toolchainHeaderLines(p palette) []string {
 	cudaState := "disabled"
 	if model.config.Toolchain.CUDA != "" {
 		cudaState = fallback(model.config.Toolchain.CUDAExecution, "native") + " · " + model.config.Toolchain.CUDA
@@ -1444,32 +1518,40 @@ func (model dashboardModel) toolchainLines(p palette, width int) []string {
 	if model.config.Toolchain.Mode == "wsl" {
 		execution = "WSL · " + fallback(model.config.Toolchain.WSLDistribution, "default distribution")
 	}
-	lines := []string{p.faint.Render(" ACTIVE TOOLCHAIN"), keyValue(p, "Execution", execution), keyValue(p, "Compiler", fallback(model.config.Toolchain.CXX, "auto")), keyValue(p, "Preset", preset), keyValue(p, "Environment", fallback(model.config.Toolchain.Setup, "inherited")), keyValue(p, "CUDA", cudaState), keyValue(p, "Vulkan", vulkanState), "", p.faint.Render(" DETECTED · ENTER CONNECTS A COMPILER OR SDK")}
-	if len(model.probe.Components) == 0 {
-		lines = append(lines, p.warning.Render("!  No native development components detected"), p.faint.Render("   WSL mode may still use a compiler installed inside the selected distribution."))
+	return []string{p.faint.Render(" ACTIVE TOOLCHAIN"), keyValue(p, "Execution", execution), keyValue(p, "Compiler", fallback(model.config.Toolchain.CXX, "auto")), keyValue(p, "Preset", preset), keyValue(p, "Environment", fallback(model.config.Toolchain.Setup, "inherited")), keyValue(p, "CUDA", cudaState), keyValue(p, "Vulkan", vulkanState), "", p.faint.Render(" DETECTED · ENTER CONNECTS A COMPILER OR SDK")}
+}
+
+// toolchainComponentLines renders one detected component row, plus the path and
+// WSL notice shown when it is selected.
+func (model dashboardModel) toolchainComponentLines(p palette, width, index int, component toolchain.Component) []string {
+	marker := p.good.Render("●")
+	if !component.Ready {
+		marker = p.faint.Render("○")
 	}
-	for index, component := range model.probe.Components {
-		marker := p.good.Render("●")
-		if !component.Ready {
-			marker = p.faint.Render("○")
-		}
-		version := component.Version
-		if version == "" {
-			version = component.Detail
-		}
-		version = compactLine(version)
-		row := marker + "  " + fmt.Sprintf("%-10s %-22s %s", component.Family, component.Name, version)
-		lines = append(lines, model.selectableRow(p, index, ansi.Truncate(row, width-2, "…")))
-		if index == model.cursor && component.Path != "" && model.focus == focusContent {
-			lines = append(lines, p.faint.Render("     "+ansi.Truncate(component.Path, max(10, width-6), "…")))
-			if component.Execution == "wsl" {
-				lines = append(lines, p.warning.Render(ansi.Truncate("     Notice: selecting this compiler runs build commands inside WSL "+component.Distribution, max(10, width-3), "…")))
-			}
-		} else if index == model.cursor && !component.Ready && component.Family == "WSL" && model.focus == focusContent {
-			lines = append(lines, p.warning.Render("     "+ansi.Truncate(compactLine(component.Detail), max(10, width-6), "…")))
-		}
+	version := component.Version
+	if version == "" {
+		version = component.Detail
 	}
-	return append(lines, "", p.faint.Render("enter connect native or WSL compiler/SDK   c CUDA   v Vulkan   x apply preset"))
+	version = compactLine(version)
+	row := marker + "  " + fmt.Sprintf("%-10s %-22s %s", component.Family, component.Name, version)
+	lines := []string{model.selectableRow(p, index, ansi.Truncate(row, width-2, "…"))}
+	return append(lines, model.toolchainComponentDetails(p, width, index, component)...)
+}
+
+// toolchainComponentDetails is the path and WSL notice shown under the selected
+// component row.
+func (model dashboardModel) toolchainComponentDetails(p palette, width, index int, component toolchain.Component) []string {
+	switch {
+	case index == model.cursor && component.Path != "" && model.focus == focusContent:
+		lines := []string{p.faint.Render("     " + ansi.Truncate(component.Path, max(10, width-6), "…"))}
+		if component.Execution == "wsl" {
+			lines = append(lines, p.warning.Render(ansi.Truncate("     Notice: selecting this compiler runs build commands inside WSL "+component.Distribution, max(10, width-3), "…")))
+		}
+		return lines
+	case index == model.cursor && !component.Ready && component.Family == "WSL" && model.focus == focusContent:
+		return []string{p.warning.Render("     " + ansi.Truncate(compactLine(component.Detail), max(10, width-6), "…"))}
+	}
+	return nil
 }
 
 func (model dashboardModel) presetLines(p palette, width int) []string {
@@ -1510,28 +1592,40 @@ func (model dashboardModel) testLines(p palette, width int) []string {
 		return emptyState(p, "No test jobs configured", "Add a target with type = \"test\", or import test executables and mark them as tests.")
 	}
 	mode := "JOB VIEW"
+	viewLines := model.testJobLines
 	if model.testFileMode {
 		mode = "FILE VIEW"
+		viewLines = model.testFileLines
 	}
 	lines := []string{p.faint.Render(" " + mode)}
-	if model.testFileMode {
-		for index, row := range model.testFiles() {
-			text := fmt.Sprintf("%-34s  job %-18s  group %s", filepath.Base(row.file), row.job.Name, row.job.Group)
-			lines = append(lines, model.selectableRow(p, index, ansi.Truncate(text, width-3, "…")))
-			if index == model.cursor && model.focus == focusContent {
-				lines = append(lines, p.faint.Render("     "+ansi.Truncate(row.file, max(12, width-6), "…")))
-			}
-		}
-	} else {
-		for index, job := range model.probe.Tests {
-			text := fmt.Sprintf("%-24s  group %-16s  %d files", job.Name, job.Group, len(job.Files))
-			lines = append(lines, model.selectableRow(p, index, ansi.Truncate(text, width-3, "…")))
-			if index == model.cursor && model.focus == focusContent && len(job.Files) > 0 {
-				lines = append(lines, p.faint.Render("     "+ansi.Truncate(strings.Join(job.Files, ", "), max(12, width-6), "…")))
-			}
+	lines = append(lines, viewLines(p, width)...)
+	return append(lines, "", p.faint.Render("enter run selected   g run group   a run all   f job/file view   m assign group"))
+}
+
+// testFileLines renders one row per test source file in file view.
+func (model dashboardModel) testFileLines(p palette, width int) []string {
+	var lines []string
+	for index, row := range model.testFiles() {
+		text := fmt.Sprintf("%-34s  job %-18s  group %s", filepath.Base(row.file), row.job.Name, row.job.Group)
+		lines = append(lines, model.selectableRow(p, index, ansi.Truncate(text, width-3, "…")))
+		if index == model.cursor && model.focus == focusContent {
+			lines = append(lines, p.faint.Render("     "+ansi.Truncate(row.file, max(12, width-6), "…")))
 		}
 	}
-	return append(lines, "", p.faint.Render("enter run selected   g run group   a run all   f job/file view   m assign group"))
+	return lines
+}
+
+// testJobLines renders one row per test job in job view.
+func (model dashboardModel) testJobLines(p palette, width int) []string {
+	var lines []string
+	for index, job := range model.probe.Tests {
+		text := fmt.Sprintf("%-24s  group %-16s  %d files", job.Name, job.Group, len(job.Files))
+		lines = append(lines, model.selectableRow(p, index, ansi.Truncate(text, width-3, "…")))
+		if index == model.cursor && model.focus == focusContent && len(job.Files) > 0 {
+			lines = append(lines, p.faint.Render("     "+ansi.Truncate(strings.Join(job.Files, ", "), max(12, width-6), "…")))
+		}
+	}
+	return lines
 }
 
 func (model dashboardModel) packageLines(p palette, width int) []string {
@@ -1540,57 +1634,85 @@ func (model dashboardModel) packageLines(p palette, width int) []string {
 		return append(lines, "", p.faint.Render(model.packageHint()))
 	}
 	names := sortedPackageNames(model.config.Packages)
+	lines := model.packageSearchHeader(p)
+	if len(names) == 0 {
+		lines = append(lines, p.muted.Render("No packages configured."))
+	} else {
+		lines = append(lines, p.faint.Render(" CONFIGURED"))
+		lines = append(lines, model.configuredPackageLines(p, width, names)...)
+	}
+	if len(model.packagePackages) > 0 {
+		lines = append(lines, "", p.faint.Render(fmt.Sprintf(" MATCHES · %d PACKAGES · ENTER TO CHOOSE A VERSION", len(model.packagePackages))))
+		lines = append(lines, model.searchedPackageLines(p, width, len(names))...)
+	}
+	return append(lines, "", p.faint.Render(model.packageHint()))
+}
+
+// packageSearchHeader is the online-index status line and the searching notice.
+func (model dashboardModel) packageSearchHeader(p palette) []string {
 	installer := "installer unavailable"
 	if model.probe.Vcpkg {
 		installer = "installer " + model.probe.VcpkgRoot
 	}
 	lines := []string{p.good.Render("● online index") + p.faint.Render("  vcpkg.io + conan.center · "+installer), ""}
 	if model.searching {
-		lines = append(lines, p.accent.Render("◌ Searching package indexes…")+p.faint.Render("  esc cancels, results appear in place"))
-		lines = append(lines, "")
+		lines = append(lines, p.accent.Render("◌ Searching package indexes…")+p.faint.Render("  esc cancels, results appear in place"), "")
 	}
-	if len(names) == 0 {
-		lines = append(lines, p.muted.Render("No packages configured."))
-	} else {
-		lines = append(lines, p.faint.Render(" CONFIGURED"))
-		for index, name := range names {
-			pkg := model.config.Packages[name]
-			version := pkg.Version
-			if version == "" {
-				version = "latest compatible"
-			}
-			featureText := ""
-			if len(pkg.Features) > 0 {
-				featureText = " [" + strings.Join(pkg.Features, ",") + "]"
-			}
-			detail := pkg.Triplet
-			if detail == "" {
-				detail = fallback(providerOf(model.config.Packages, name), "vcpkg")
-			}
-			lines = append(lines, model.selectableRow(p, index, ansi.Truncate(fmt.Sprintf("%-22s %-18s %s", name+featureText, version, detail), width-3, "…")))
+	return lines
+}
+
+// configuredPackageLines renders the rows for the packages pinned in the config.
+func (model dashboardModel) configuredPackageLines(p palette, width int, names []string) []string {
+	var lines []string
+	for index, name := range names {
+		pkg := model.config.Packages[name]
+		version := pkg.Version
+		if version == "" {
+			version = "latest compatible"
+		}
+		featureText := ""
+		if len(pkg.Features) > 0 {
+			featureText = " [" + strings.Join(pkg.Features, ",") + "]"
+		}
+		detail := pkg.Triplet
+		if detail == "" {
+			detail = fallback(providerOf(model.config.Packages, name), "vcpkg")
+		}
+		lines = append(lines, model.selectableRow(p, index, ansi.Truncate(fmt.Sprintf("%-22s %-18s %s", name+featureText, version, detail), width-3, "…")))
+	}
+	return lines
+}
+
+// searchedPackageLines renders the merged search results below the configured
+// list, offsetting row indices past it.
+func (model dashboardModel) searchedPackageLines(p palette, width, offset int) []string {
+	var lines []string
+	for index, pkg := range model.packagePackages {
+		marker := "○"
+		_, configured := model.config.Packages[pkg.Name]
+		if pkg.Installed || configured {
+			marker = "✓"
+		}
+		// A name offered by several providers shows them all, so the row
+		// makes clear the choice happens on the next level.
+		sources := providerSummary(pkg)
+		lines = append(lines, model.selectableRow(p, offset+index, ansi.Truncate(fmt.Sprintf("%s  %-24s %s", marker, pkg.Name, sources), width-3, "…")))
+		if offset+index == model.cursor && model.focus == focusContent {
+			lines = append(lines, model.searchedPackageDetailLines(p, width, pkg)...)
 		}
 	}
-	if len(model.packagePackages) > 0 {
-		lines = append(lines, "", p.faint.Render(fmt.Sprintf(" MATCHES · %d PACKAGES · ENTER TO CHOOSE A VERSION", len(model.packagePackages))))
-		for index, pkg := range model.packagePackages {
-			marker := "○"
-			_, configured := model.config.Packages[pkg.Name]
-			if pkg.Installed || configured {
-				marker = "✓"
-			}
-			// A name offered by several providers shows them all, so the row
-			// makes clear the choice happens on the next level.
-			sources := providerSummary(pkg)
-			lines = append(lines, model.selectableRow(p, len(names)+index, ansi.Truncate(fmt.Sprintf("%s  %-24s %s", marker, pkg.Name, sources), width-3, "…")))
-			if len(names)+index == model.cursor && model.focus == focusContent {
-				if pkg.Description != "" {
-					lines = append(lines, p.text.Render("     "+ansi.Truncate(pkg.Description, max(12, width-7), "…")))
-				}
-				lines = append(lines, p.faint.Render("     "+fmt.Sprintf("%d version%s · enter to pick one · esc to return", len(pkg.Candidates), plural(len(pkg.Candidates)))))
-			}
-		}
+	return lines
+}
+
+// searchedPackageDetailLines describes the selected search result: its
+// description and the number of versions the version picker offers.
+func (model dashboardModel) searchedPackageDetailLines(p palette, width int, pkg deps.Package) []string {
+	var lines []string
+	if pkg.Description != "" {
+		lines = append(lines, p.text.Render("     "+ansi.Truncate(pkg.Description, max(12, width-7), "…")))
 	}
-	return append(lines, "", p.faint.Render(model.packageHint()))
+	lines = append(lines, p.faint.Render("     "+fmt.Sprintf("%d version%s · enter to pick one · esc to return", len(pkg.Candidates), plural(len(pkg.Candidates)))))
+	return lines
 }
 
 // providerSummary lists the providers offering a package, so one merged row can
@@ -1620,27 +1742,37 @@ func plural(count int) string {
 }
 
 func (model dashboardModel) buildLines(p palette, width int) []string {
-	state := p.good.Render("Ready")
-	if model.mutating && model.operation == "Build" {
-		state = p.accent.Render(model.activityLabel())
-	} else if model.messageError && strings.HasPrefix(model.message, "Build failed") {
-		state = p.danger.Render("Failed")
+	lines := []string{"", "  " + model.buildStateLabel(p), "", p.faint.Render(" ACTIVE PROFILE"), keyValue(p, "Profile", fallback(model.config.Build.Profile, "debug")), keyValue(p, "Default targets", fallback(strings.Join(model.config.Build.DefaultTargets, ", "), "automatic")), keyValue(p, "Build directory", fallback(model.config.Build.BuildDir, "build/{profile}")), keyValue(p, "C++ standard", fallback(model.config.Build.CXXStandard, "compiler default")), keyValue(p, "Compiler", fallback(model.config.Toolchain.CXX, "auto-detect")), "", p.faint.Render(" TARGETS · ENTER BUILDS SELECTED")}
+	lines = append(lines, model.buildTargetLines(p, width)...)
+	lines = append(lines, "", p.faint.Render(" LAST RUN"), p.text.Render(model.lastRun))
+	return append(lines, "", p.muted.Render("enter selected · f force selected · b defaults · a all · r refresh"))
+}
+
+// buildStateLabel renders the build screen's state chip: running, failed or
+// ready.
+func (model dashboardModel) buildStateLabel(p palette) string {
+	switch {
+	case model.mutating && model.operation == "Build":
+		return p.accent.Render(model.activityLabel())
+	case model.messageError && strings.HasPrefix(model.message, "Build failed"):
+		return p.danger.Render("Failed")
 	}
-	lines := []string{"", "  " + state, "", p.faint.Render(" ACTIVE PROFILE"), keyValue(p, "Profile", fallback(model.config.Build.Profile, "debug")), keyValue(p, "Default targets", fallback(strings.Join(model.config.Build.DefaultTargets, ", "), "automatic")), keyValue(p, "Build directory", fallback(model.config.Build.BuildDir, "build/{profile}")), keyValue(p, "C++ standard", fallback(model.config.Build.CXXStandard, "compiler default")), keyValue(p, "Compiler", fallback(model.config.Toolchain.CXX, "auto-detect")), "", p.faint.Render(" TARGETS · ENTER BUILDS SELECTED")}
+	return p.good.Render("Ready")
+}
+
+// buildTargetLines renders the target rows and any failed-check reasons for the
+// selected one.
+func (model dashboardModel) buildTargetLines(p palette, width int) []string {
+	var lines []string
 	for index, name := range sortedTargetNames(model.config.Targets) {
-		availability := "✓"
-		if status, ok := model.probe.Statuses[name]; ok && !status.Ready {
-			availability = "!"
-		}
-		lines = append(lines, model.selectableRow(p, index, ansi.Truncate(availability+" "+name+"  "+model.config.Targets[name].Type, width-3, "…")))
+		lines = append(lines, model.selectableRow(p, index, ansi.Truncate(model.targetAvailability(name)+" "+name+"  "+model.config.Targets[name].Type, width-3, "…")))
 		if index == model.cursor && model.focus == focusContent {
 			for _, reason := range model.probe.Statuses[name].Reasons {
 				lines = appendWrappedLog(lines, p.warning, "! "+reason, width)
 			}
 		}
 	}
-	lines = append(lines, "", p.faint.Render(" LAST RUN"), p.text.Render(model.lastRun))
-	return append(lines, "", p.muted.Render("enter selected · f force selected · b defaults · a all · r refresh"))
+	return lines
 }
 
 func (model dashboardModel) releaseLines(p palette, width int) []string {
@@ -1816,79 +1948,63 @@ func (model dashboardModel) statusLine(p palette, width int) string {
 	return ansi.Truncate(line, width, "…")
 }
 
+// inputLabels names every input prompt kind for the status line.
+var inputLabels = map[string]string{
+	"search":          "Search packages",
+	"settings-search": "Search settings",
+	"log-search":      "Search complete output",
+	"package":         "Add package",
+	"install":         "Install package",
+	"features":        "Package features",
+	"remove":          "Remove package",
+	"version":         "Package version",
+	"flags":           "Compiler flags",
+	"c-flags":         "C flags",
+	"cxx-flags":       "C++ flags",
+	"link-flags":      "Link flags",
+	"apply-preset":    "Apply preset",
+	"save-preset":     "Save preset",
+	"setting":         "Project setting",
+	"release-output":  "ZIP output",
+	"release-targets": "Release targets",
+	"environment":     "Setup script",
+	"cuda":            "CUDA root",
+	"cuda-wsl":        "WSL CUDA root",
+	"test-group":      "Test group",
+}
+
 func (model dashboardModel) inputLabel() string {
-	switch model.inputKind {
-	case "search":
-		return "Search packages"
-	case "settings-search":
-		return "Search settings"
-	case "log-search":
-		return "Search complete output"
-	case "package":
-		return "Add package"
-	case "install":
-		return "Install package"
-	case "features":
-		return "Package features"
-	case "remove":
-		return "Remove package"
-	case "version":
-		return "Package version"
-	case "flags":
-		return "Compiler flags"
-	case "c-flags":
-		return "C flags"
-	case "cxx-flags":
-		return "C++ flags"
-	case "link-flags":
-		return "Link flags"
-	case "apply-preset":
-		return "Apply preset"
-	case "save-preset":
-		return "Save preset"
-	case "setting":
-		return "Project setting"
-	case "release-output":
-		return "ZIP output"
-	case "release-targets":
-		return "Release targets"
-	case "environment":
-		return "Setup script"
-	case "cuda":
-		return "CUDA root"
-	case "cuda-wsl":
-		return "WSL CUDA root"
-	case "test-group":
-		return "Test group"
+	if label, ok := inputLabels[model.inputKind]; ok {
+		return label
 	}
 	return "Input"
 }
 
-func (model dashboardModel) shortcutLine(p palette, width int) string {
-	contextKeys := "b build   r refresh   p profile"
-	switch model.route {
-	case ToolchainsRoute:
-		contextKeys = "↵ native or WSL compiler/SDK   c CUDA   v Vulkan   x apply preset"
-	case PresetsRoute:
-		contextKeys = "↵ apply   n save current   d delete"
-	case ImportRoute:
-		contextKeys = "↵ / i auto import CMake/Xmake   r refresh"
-	case PackagesRoute:
-		contextKeys = "/ web search   ↵ install   f features   a by name   n jump to results"
-	case TestsRoute:
-		contextKeys = "↵ selected   g group   a all   f files   m group"
-	case SettingsRoute:
-		contextKeys = "↵ category / edit   / search   Esc back   v rules"
-	case BuildRoute:
-		contextKeys = "↵ selected   f force   b default   a all"
-	case TasksRoute:
-		contextKeys = "↵ preview   y confirm   esc cancel running"
-	case ReleaseRoute:
-		contextKeys = "↵ optimization   r release ZIP   t targets   o output"
-	case TargetsRoute:
-		contextKeys = "↵ build selected   f force   d default   a all"
+// shortcutContexts is the route-specific key hint shown in the footer.
+var shortcutContexts = map[Route]string{
+	ToolchainsRoute: "↵ native or WSL compiler/SDK   c CUDA   v Vulkan   x apply preset",
+	PresetsRoute:    "↵ apply   n save current   d delete",
+	ImportRoute:     "↵ / i auto import CMake/Xmake   r refresh",
+	PackagesRoute:   "/ web search   ↵ install   f features   a by name   n jump to results",
+	TestsRoute:      "↵ selected   g group   a all   f files   m group",
+	SettingsRoute:   "↵ category / edit   / search   Esc back   v rules",
+	BuildRoute:      "↵ selected   f force   b default   a all",
+	TasksRoute:      "↵ preview   y confirm   esc cancel running",
+	ReleaseRoute:    "↵ optimization   r release ZIP   t targets   o output",
+	TargetsRoute:    "↵ build selected   f force   d default   a all",
+}
+
+// shortcutContext is the key hint line shown in the footer for the active route,
+// falling back to the global actions.
+func (model dashboardModel) shortcutContext() string {
+	if context, ok := shortcutContexts[model.route]; ok {
+		return context
 	}
-	left, right := p.faint.Render(" "+contextKeys), p.faint.Render("? help   wheel scroll   q quit ")
+	return "b build   r refresh   p profile"
+}
+
+func (model dashboardModel) shortcutLine(p palette, width int) string {
+	left, right := p.faint.Render(" "+model.shortcutContext()), p.faint.Render("? help   wheel scroll   q quit ")
 	return ansi.Truncate(left+strings.Repeat(" ", max(1, width-lipgloss.Width(left)-lipgloss.Width(right)))+right, width, "")
 }
 

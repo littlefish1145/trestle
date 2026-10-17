@@ -37,6 +37,19 @@ func (log *logView) refresh(width int) error {
 		return err
 	}
 	count := log.reader.Count()
+	log.resetLayout(width, count)
+	if err := log.extendRows(width, count); err != nil {
+		return err
+	}
+	log.count = count
+	log.size = stat.Size()
+	return nil
+}
+
+// resetLayout clears the cumulative row offsets when the render width changed or
+// the log shrank, since every recorded offset is then stale, and re-seeds the
+// first row when nothing is cached.
+func (log *logView) resetLayout(width, count int) {
 	if width != log.width || count < log.count {
 		log.rows = nil
 		log.count = 0
@@ -45,7 +58,11 @@ func (log *logView) refresh(width int) error {
 	if len(log.rows) == 0 {
 		log.rows = []int{0}
 	}
-	// Reindex the previous last line too, since it can still be receiving bytes.
+}
+
+// extendRows re-reads the log from the previous last line, which can still be
+// receiving bytes, and appends the cumulative visual-row offset of every line.
+func (log *logView) extendRows(width, count int) error {
 	start := max(0, log.count-1)
 	log.rows = log.rows[:start+1]
 	for index := start; index < count; index += 256 {
@@ -57,8 +74,6 @@ func (log *logView) refresh(width int) error {
 			log.rows = append(log.rows, log.rows[len(log.rows)-1]+len(wrapText(line, width)))
 		}
 	}
-	log.count = count
-	log.size = stat.Size()
 	return nil
 }
 
@@ -218,75 +233,90 @@ func (model dashboardModel) renderDashboard(p palette) string {
 	width, height := max(1, model.width), max(1, model.height)
 	mainHeight := model.mainHeight()
 	var main string
-	if model.help || model.details || model.history {
-		var title string
-		var lines []string
-		switch {
-		case model.help:
-			title = "Keyboard reference · ? / Esc close"
-			lines = wrapText("Tab / Shift+Tab: navigation, page, output\nF2: full output\nF3: complete error / item details\nF4: operation history\nF5: collapse or expand output\n↑↓ / j k: navigate focused panel\nPgUp/PgDn: page\nHome/End: first/last output (End resumes follow)\n/ in output: search · n next match\nb: build · r: refresh · p: profile\nEnter: selected action · 1…9 / 0: page\nEsc / Ctrl+C: cancel active operation\nq: stop operation and quit\nInputs: Enter save · Esc cancel · Ctrl+U clear\nTasks: Enter preview · y confirm · n cancel\nPackages: / search · Enter install · f features\nTargets: Enter build · f force · d default\nToolchains: Enter connect · c CUDA · v Vulkan\nTests: Enter selected · g group · a all\nSettings: Enter category / edit · / search all · Esc back · v rules", max(1, width-2))
-		case model.details:
-			title = "Complete details · F3 / Esc close"
-			lines = wrapText(model.detailText, max(1, width-2))
-		case model.history:
-			title = "Operation history · Enter view · F4 / Esc close"
-			for i, record := range model.runHistory {
-				marker := "  "
-				if i == model.historyCursor {
-					marker = "› "
-				}
-				lines = append(lines, wrapText(marker+record.Started.Local().Format("2006-01-02 15:04:05")+" "+record.Status+" "+record.Operation+"\n  "+record.ID, max(1, width-2))...)
-			}
-			if len(lines) == 0 {
-				lines = []string{"No saved operations yet."}
-			}
-		}
+	switch {
+	case model.help || model.details || model.history:
+		title, lines := model.overlayContent(p, width)
 		main = fittedPanel(p, title, sliceViewport(lines, model.overlayScroll, max(1, mainHeight-3)), width, mainHeight, true)
-	} else if model.fullLog {
+	case model.fullLog:
 		main = model.logPanel(p, width, mainHeight)
-	} else {
-		contentWidth := width
-		nav := ""
-		navWidth := 0
-		if width >= 96 {
-			navWidth = sidebarWidth(width)
-			contentWidth = width - navWidth - 1
-			nav = model.navigationPanel(p, navWidth, mainHeight)
-		}
-		title, subtitle := model.routeHeading()
-		pageHeight := mainHeight
-		showLog := true
-		if showLog && height >= 20 {
-			pageHeight = mainHeight - model.logHeight()
-		}
-		lines := model.contentLines(p, max(1, contentWidth-2))
-		var wrapped []string
-		for _, line := range lines {
-			wrapped = append(wrapped, wrapText(line, max(1, contentWidth-2))...)
-		}
-		page := fittedPanel(p, title+" · "+subtitle, sliceViewport(wrapped, model.scroll, max(1, pageHeight-3)), contentWidth, pageHeight, model.focus == focusContent)
-		if showLog && height < 20 {
-			if model.focus == focusLog {
-				page = model.logPanel(p, contentWidth, mainHeight)
-			}
-		} else if showLog {
-			page = lipgloss.JoinVertical(lipgloss.Left, page, model.logPanel(p, contentWidth, model.logHeight()))
-		}
-		if nav != "" {
-			main = lipgloss.JoinHorizontal(lipgloss.Top, nav, " ", page)
-		} else {
-			main = page
-		}
+	default:
+		main = model.workspaceMain(p, width, height, mainHeight)
 	}
 	header := strings.Split(model.header(p, width), "\n")[0]
-	navLine := ""
-	if width < 96 {
-		navLine = model.compactNavigation(p, width)
-	} else {
-		navLine = p.faint.Render("Tab focus · F2 output · F3 details · F4 history")
-	}
 	footer := model.focusShortcut(p, width)
-	return fitRows(strings.Split(header+"\n"+navLine+"\n"+main+"\n"+model.statusLine(p, width)+"\n"+footer, "\n"), width, height)
+	return fitRows(strings.Split(header+"\n"+model.navigationStrip(p, width)+"\n"+main+"\n"+model.statusLine(p, width)+"\n"+footer, "\n"), width, height)
+}
+
+// overlayContent builds the title and body lines for whichever full-screen
+// overlay is open: the keyboard reference, the complete details text, or the
+// operation history.
+func (model dashboardModel) overlayContent(p palette, width int) (string, []string) {
+	switch {
+	case model.help:
+		title := "Keyboard reference · ? / Esc close"
+		return title, wrapText("Tab / Shift+Tab: navigation, page, output\nF2: full output\nF3: complete error / item details\nF4: operation history\nF5: collapse or expand output\n↑↓ / j k: navigate focused panel\nPgUp/PgDn: page\nHome/End: first/last output (End resumes follow)\n/ in output: search · n next match\nb: build · r: refresh · p: profile\nEnter: selected action · 1…9 / 0: page\nEsc / Ctrl+C: cancel active operation\nq: stop operation and quit\nInputs: Enter save · Esc cancel · Ctrl+U clear\nTasks: Enter preview · y confirm · n cancel\nPackages: / search · Enter install · f features\nTargets: Enter build · f force · d default\nToolchains: Enter connect · c CUDA · v Vulkan\nTests: Enter selected · g group · a all\nSettings: Enter category / edit · / search all · Esc back · v rules", max(1, width-2))
+	case model.details:
+		return "Complete details · F3 / Esc close", wrapText(model.detailText, max(1, width-2))
+	case model.history:
+		var lines []string
+		for i, record := range model.runHistory {
+			marker := "  "
+			if i == model.historyCursor {
+				marker = "› "
+			}
+			lines = append(lines, wrapText(marker+record.Started.Local().Format("2006-01-02 15:04:05")+" "+record.Status+" "+record.Operation+"\n  "+record.ID, max(1, width-2))...)
+		}
+		if len(lines) == 0 {
+			lines = []string{"No saved operations yet."}
+		}
+		return "Operation history · Enter view · F4 / Esc close", lines
+	}
+	return "", nil
+}
+
+// workspaceMain renders the normal frame: the navigation sidebar, the active
+// screen's content, and, when there is room, the output panel beneath it.
+func (model dashboardModel) workspaceMain(p palette, width, height, mainHeight int) string {
+	contentWidth := width
+	nav := ""
+	navWidth := 0
+	if width >= 96 {
+		navWidth = sidebarWidth(width)
+		contentWidth = width - navWidth - 1
+		nav = model.navigationPanel(p, navWidth, mainHeight)
+	}
+	title, subtitle := model.routeHeading()
+	pageHeight := mainHeight
+	showLog := true
+	if showLog && height >= 20 {
+		pageHeight = mainHeight - model.logHeight()
+	}
+	lines := model.contentLines(p, max(1, contentWidth-2))
+	var wrapped []string
+	for _, line := range lines {
+		wrapped = append(wrapped, wrapText(line, max(1, contentWidth-2))...)
+	}
+	page := fittedPanel(p, title+" · "+subtitle, sliceViewport(wrapped, model.scroll, max(1, pageHeight-3)), contentWidth, pageHeight, model.focus == focusContent)
+	if showLog && height < 20 {
+		if model.focus == focusLog {
+			page = model.logPanel(p, contentWidth, mainHeight)
+		}
+	} else if showLog {
+		page = lipgloss.JoinVertical(lipgloss.Left, page, model.logPanel(p, contentWidth, model.logHeight()))
+	}
+	if nav != "" {
+		return lipgloss.JoinHorizontal(lipgloss.Top, nav, " ", page)
+	}
+	return page
+}
+
+// navigationStrip is the route strip on narrow terminals and the static key
+// hints on wide ones.
+func (model dashboardModel) navigationStrip(p palette, width int) string {
+	if width < 96 {
+		return model.compactNavigation(p, width)
+	}
+	return p.faint.Render("Tab focus · F2 output · F3 details · F4 history")
 }
 
 func (model dashboardModel) navigationPanel(p palette, width, height int) string {
@@ -315,26 +345,34 @@ func (model dashboardModel) focusShortcut(p palette, width int) string {
 func (model *dashboardModel) showDetails() {
 	model.saveOverlayPosition()
 	previous := model.detailText
-	model.detailText = model.message
-	if model.lastError != nil && model.messageError {
-		model.detailText = diag.Text(model.lastError)
-	} else if model.route == ToolchainsRoute {
-		if item, ok := model.selectedComponent(); ok {
-			model.detailText = fmt.Sprintf("%s\nPath: %s\nVersion: %s\nExecution: %s\nDistribution: %s\n%s", item.Name, item.Path, item.Version, item.Execution, item.Distribution, item.Detail)
-		}
-	} else if model.route == SettingsRoute {
-		rows := model.filteredSettings()
-		if model.cursor >= 0 && model.cursor < len(rows) && (model.settingsCategory != "" || model.settingsQuery != "") {
-			row := rows[model.cursor]
-			model.detailText = row.label + "\nKey: " + row.key + "\n\n" + fallback(row.value, "not set") + "\n\nEnter or e to edit; / to search all settings."
-		}
-	}
+	model.detailText = model.detailForContext()
 	model.details = true
 	model.help, model.history = false, false
 	model.overlayScroll = model.detailsScroll
 	if previous != model.detailText {
 		model.overlayScroll = 0
 	}
+}
+
+// detailForContext builds the complete-details text for the current selection:
+// the last error, the selected toolchain component, or the selected setting,
+// falling back to the current status message.
+func (model dashboardModel) detailForContext() string {
+	switch {
+	case model.lastError != nil && model.messageError:
+		return diag.Text(model.lastError)
+	case model.route == ToolchainsRoute:
+		if item, ok := model.selectedComponent(); ok {
+			return fmt.Sprintf("%s\nPath: %s\nVersion: %s\nExecution: %s\nDistribution: %s\n%s", item.Name, item.Path, item.Version, item.Execution, item.Distribution, item.Detail)
+		}
+	case model.route == SettingsRoute:
+		rows := model.filteredSettings()
+		if model.cursor >= 0 && model.cursor < len(rows) && (model.settingsCategory != "" || model.settingsQuery != "") {
+			row := rows[model.cursor]
+			return row.label + "\nKey: " + row.key + "\n\n" + fallback(row.value, "not set") + "\n\nEnter or e to edit; / to search all settings."
+		}
+	}
+	return model.message
 }
 
 func (model *dashboardModel) saveOverlayPosition() {
@@ -356,6 +394,26 @@ func (model dashboardModel) historyOffset(index int) int {
 }
 
 func (model dashboardModel) handlePanels(key string) (tea.Model, tea.Cmd, bool) {
+	if updated, cmd, handled := model.handleFunctionKey(key); handled {
+		return updated, cmd, true
+	}
+	if model.help || model.details || model.history {
+		return model.handleOverlayKey(key)
+	}
+	if key == "esc" && model.installCancel != nil {
+		model.installCancel()
+		model.setMessage("Cancelling installation…", false)
+		return model, nil, true
+	}
+	if model.focus != focusLog {
+		return model, nil, false
+	}
+	return model.handleLogKey(key)
+}
+
+// handleFunctionKey handles the F2 to F5 panel keys: output fullscreen, details,
+// history, and collapsing the output panel. It reports false for any other key.
+func (model dashboardModel) handleFunctionKey(key string) (tea.Model, tea.Cmd, bool) {
 	switch key {
 	case "f2":
 		model.fullLog = !model.fullLog
@@ -363,13 +421,11 @@ func (model dashboardModel) handlePanels(key string) (tea.Model, tea.Cmd, bool) 
 		if model.logFollow {
 			model.logScroll = model.maxLogScroll()
 		}
-		return model, nil, true
 	case "f5":
 		model.logsCollapsed = !model.logsCollapsed
 		if model.logFollow {
 			model.logScroll = model.maxLogScroll()
 		}
-		return model, nil, true
 	case "f3":
 		if model.details {
 			model.saveOverlayPosition()
@@ -377,7 +433,6 @@ func (model dashboardModel) handlePanels(key string) (tea.Model, tea.Cmd, bool) 
 		} else {
 			model.showDetails()
 		}
-		return model, nil, true
 	case "f4":
 		model.saveOverlayPosition()
 		model.history = !model.history
@@ -392,55 +447,88 @@ func (model dashboardModel) handlePanels(key string) (tea.Model, tea.Cmd, bool) 
 				model.historyCursor = min(model.historyCursor, max(0, len(records)-1))
 			}
 		}
-		return model, nil, true
-	}
-	if model.help || model.details || model.history {
-		switch key {
-		case "esc", "?", "q":
-			model.saveOverlayPosition()
-			model.help, model.details, model.history = false, false, false
-		case "up", "k":
-			if model.history {
-				model.historyCursor = max(0, model.historyCursor-1)
-				model.overlayScroll = model.historyOffset(model.historyCursor)
-			} else {
-				model.overlayScroll = max(0, model.overlayScroll-1)
-			}
-		case "down", "j":
-			if model.history {
-				model.historyCursor = min(max(0, len(model.runHistory)-1), model.historyCursor+1)
-				model.overlayScroll = model.historyOffset(model.historyCursor)
-			} else {
-				model.overlayScroll++
-			}
-		case "pgup":
-			model.overlayScroll = max(0, model.overlayScroll-max(1, model.mainHeight()-3))
-		case "pgdown":
-			model.overlayScroll += max(1, model.mainHeight()-3)
-		case "home":
-			model.overlayScroll = 0
-		case "enter":
-			if model.history && len(model.runHistory) > 0 {
-				record := model.runHistory[model.historyCursor]
-				model.diskLog = &logView{reader: runlog.Reader{Path: record.LogPath}}
-				model.history = false
-				model.fullLog = true
-				model.focus = focusLog
-				model.logFollow = false
-				model.logScroll = 0
-				model.setMessage(record.Status+" · "+record.Operation, false)
-			}
-		}
-		return model, nil, true
-	}
-	if key == "esc" && model.installCancel != nil {
-		model.installCancel()
-		model.setMessage("Cancelling installation…", false)
-		return model, nil, true
-	}
-	if model.focus != focusLog {
+	default:
 		return model, nil, false
 	}
+	return model, nil, true
+}
+
+// handleOverlayKey scrolls or dismisses the help, details or history overlay,
+// and opens the log a history entry points at. It always reports the key as
+// handled because an open overlay owns the keyboard.
+func (model dashboardModel) handleOverlayKey(key string) (tea.Model, tea.Cmd, bool) {
+	switch key {
+	case "esc", "?", "q":
+		model.saveOverlayPosition()
+		model.help, model.details, model.history = false, false, false
+	case "up", "k":
+		if model.history {
+			model.historyCursor = max(0, model.historyCursor-1)
+			model.overlayScroll = model.historyOffset(model.historyCursor)
+		} else {
+			model.overlayScroll = max(0, model.overlayScroll-1)
+		}
+	case "down", "j":
+		if model.history {
+			model.historyCursor = min(max(0, len(model.runHistory)-1), model.historyCursor+1)
+			model.overlayScroll = model.historyOffset(model.historyCursor)
+		} else {
+			model.overlayScroll++
+		}
+	case "pgup":
+		model.overlayScroll = max(0, model.overlayScroll-max(1, model.mainHeight()-3))
+	case "pgdown":
+		model.overlayScroll += max(1, model.mainHeight()-3)
+	case "home":
+		model.overlayScroll = 0
+	case "enter":
+		model.openHistoryLog()
+	}
+	return model, nil, true
+}
+
+// openHistoryLog loads the log the selected history entry points at and switches
+// the console to fullscreen output.
+func (model *dashboardModel) openHistoryLog() {
+	if !model.history || len(model.runHistory) == 0 {
+		return
+	}
+	record := model.runHistory[model.historyCursor]
+	model.diskLog = &logView{reader: runlog.Reader{Path: record.LogPath}}
+	model.history = false
+	model.fullLog = true
+	model.focus = focusLog
+	model.logFollow = false
+	model.logScroll = 0
+	model.setMessage(record.Status+" · "+record.Operation, false)
+}
+
+// handleLogKey handles navigation and search in the output panel while it holds
+// focus. It reports false for keys the panel does not consume.
+func (model dashboardModel) handleLogKey(key string) (tea.Model, tea.Cmd, bool) {
+	switch key {
+	case "/":
+		model.openInput("log-search", "Search complete output")
+		return model, nil, true
+	case "n":
+		model.findLog(true)
+		return model, nil, true
+	case "esc":
+		if !model.fullLog {
+			return model, nil, false
+		}
+		model.fullLog = false
+		return model, nil, true
+	}
+	if model.handleLogScrollKey(key) {
+		return model, nil, true
+	}
+	return model, nil, false
+}
+
+// handleLogScrollKey scrolls the output panel for the movement keys and reports
+// whether it consumed the key.
+func (model *dashboardModel) handleLogScrollKey(key string) bool {
 	switch key {
 	case "up", "k":
 		model.scrollLog(-1)
@@ -456,20 +544,10 @@ func (model dashboardModel) handlePanels(key string) (tea.Model, tea.Cmd, bool) 
 	case "end", "G":
 		model.logScroll = model.maxLogScroll()
 		model.logFollow = true
-	case "/":
-		model.openInput("log-search", "Search complete output")
-	case "n":
-		model.findLog(true)
-	case "esc":
-		if model.fullLog {
-			model.fullLog = false
-		} else {
-			return model, nil, false
-		}
 	default:
-		return model, nil, false
+		return false
 	}
-	return model, nil, true
+	return true
 }
 
 func (model *dashboardModel) findLog(next bool) {
