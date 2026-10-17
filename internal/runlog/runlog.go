@@ -166,35 +166,52 @@ func List(configPath string) ([]Record, error) {
 		if !entry.IsDir() {
 			continue
 		}
-		path := filepath.Join(root, entry.Name(), "record.json")
-		data, err := os.ReadFile(path)
-		if err != nil {
-			continue
+		if record, ok := readRecord(root, entry.Name()); ok {
+			records = append(records, record)
 		}
-		var record Record
-		if json.Unmarshal(data, &record) != nil {
-			continue
-		}
-		if record.Status == "running" {
-			lock, err := fsx.TryLock(context.Background(), filepath.Join(root, entry.Name(), "active"), "recover interrupted operation")
-			if err == nil {
-				// Reload under the lock: completion may have raced the first read.
-				data, readErr := os.ReadFile(path)
-				if readErr == nil && json.Unmarshal(data, &record) == nil && record.Status == "running" {
-					record.Status = "interrupted"
-					now := time.Now().UTC()
-					record.Finished = &now
-					record.Error = "Previous process stopped. Inspect the complete log, then retry; tasks require a fresh preview."
-					data, _ := json.MarshalIndent(record, "", "  ")
-					_ = fsx.AtomicWrite(path, data)
-				}
-				lock.Close()
-			}
-		}
-		records = append(records, record)
 	}
 	sort.Slice(records, func(i, j int) bool { return records[i].Started.After(records[j].Started) })
 	return records, nil
+}
+
+// readRecord loads one run directory's metadata, recovering an interrupted run
+// when its owning process has disappeared. ok is false when the directory holds
+// no readable record.
+func readRecord(root, name string) (Record, bool) {
+	path := filepath.Join(root, name, "record.json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return Record{}, false
+	}
+	var record Record
+	if json.Unmarshal(data, &record) != nil {
+		return Record{}, false
+	}
+	if record.Status == "running" {
+		recoverInterrupted(root, name, path, &record)
+	}
+	return record, true
+}
+
+// recoverInterrupted marks a still-running record as interrupted when its lock
+// can be reclaimed, reloading under the lock to avoid racing a completion.
+func recoverInterrupted(root, name, path string, record *Record) {
+	lock, err := fsx.TryLock(context.Background(), filepath.Join(root, name, "active"), "recover interrupted operation")
+	if err != nil {
+		return
+	}
+	defer lock.Close()
+	// Reload under the lock: completion may have raced the first read.
+	data, readErr := os.ReadFile(path)
+	if readErr != nil || json.Unmarshal(data, record) != nil || record.Status != "running" {
+		return
+	}
+	record.Status = "interrupted"
+	now := time.Now().UTC()
+	record.Finished = &now
+	record.Error = "Previous process stopped. Inspect the complete log, then retry; tasks require a fresh preview."
+	data, _ = json.MarshalIndent(record, "", "  ")
+	_ = fsx.AtomicWrite(path, data)
 }
 
 // Reader indexes byte offsets, keeping only the requested page in memory.
@@ -228,6 +245,17 @@ func (reader *Reader) Refresh() error {
 	if _, err := file.Seek(reader.indexed, io.SeekStart); err != nil {
 		return err
 	}
+	if err := reader.indexNewContent(file); err != nil {
+		return err
+	}
+	// An offset at EOF is a sentinel, not another empty line.
+	reader.trailing = reader.offsets[len(reader.offsets)-1] == reader.indexed
+	return nil
+}
+
+// indexNewContent scans the bytes after the current index, appending a line
+// offset for every newline it finds.
+func (reader *Reader) indexNewContent(file *os.File) error {
 	buffer := make([]byte, 64*1024)
 	for {
 		n, err := file.Read(buffer)
@@ -238,15 +266,12 @@ func (reader *Reader) Refresh() error {
 		}
 		reader.indexed += int64(n)
 		if err == io.EOF {
-			break
+			return nil
 		}
 		if err != nil {
 			return err
 		}
 	}
-	// An offset at EOF is a sentinel, not another empty line.
-	reader.trailing = reader.offsets[len(reader.offsets)-1] == reader.indexed
-	return nil
 }
 
 // Count returns the number of complete lines currently in the log.
@@ -278,7 +303,11 @@ func (reader *Reader) Page(start, count int) ([]string, error) {
 	if _, err := file.Seek(reader.offsets[start], io.SeekStart); err != nil {
 		return nil, err
 	}
-	buffer := bufio.NewReader(file)
+	return readLines(bufio.NewReader(file), count)
+}
+
+// readLines decodes and trims up to count lines from buffer.
+func readLines(buffer *bufio.Reader, count int) ([]string, error) {
 	var lines []string
 	for len(lines) < count {
 		line, err := buffer.ReadString('\n')
