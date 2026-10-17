@@ -32,25 +32,9 @@ func BuildGraph(scans []p1689.Document) (Graph, error) {
 	nodes := make([]Node, 0, len(scans))
 	for _, scan := range scans {
 		for _, rule := range scan.Rules {
-			tu := rule.PrimaryOutput
-			if tu == "" && len(rule.Outputs) > 0 {
-				tu = rule.Outputs[0]
-			}
-			if tu == "" {
-				return Graph{}, fmt.Errorf("E_MODULE_SCAN_FAILED: rule has no translation unit output")
-			}
-			tu = filepath.Clean(tu)
-			node := Node{TranslationUnit: tu}
-			for _, module := range rule.Provides {
-				key := module.Key()
-				if previous, ok := providers[key.String()]; ok && previous != tu {
-					return Graph{}, fmt.Errorf("E_MODULE_DUPLICATE_PROVIDER: module %q is provided by %s and %s", key.String(), previous, tu)
-				}
-				providers[key.String()] = tu
-				node.Provides = append(node.Provides, key)
-			}
-			for _, module := range rule.Requires {
-				node.Requires = append(node.Requires, module.Key())
+			node, err := nodeFromRule(rule, providers)
+			if err != nil {
+				return Graph{}, err
 			}
 			nodes = append(nodes, node)
 		}
@@ -59,20 +43,56 @@ func BuildGraph(scans []p1689.Document) (Graph, error) {
 	for _, node := range nodes {
 		byTU[node.TranslationUnit] = node
 	}
-	edges := make(map[string][]string)
-	for _, node := range nodes {
-		for _, requirement := range node.Requires {
-			provider, ok := providers[requirement.String()]
-			if !ok {
-				return Graph{}, fmt.Errorf("E_MODULE_MISSING_PROVIDER: %s requires %q but no provider exists", node.TranslationUnit, requirement.String())
-			}
-			edges[provider] = appendUnique(edges[provider], node.TranslationUnit)
-		}
+	edges, err := buildEdges(nodes, providers)
+	if err != nil {
+		return Graph{}, err
 	}
 	if cycle := findCycle(edges); len(cycle) > 0 {
 		return Graph{}, fmt.Errorf("E_MODULE_CYCLE: %s", strings.Join(cycle, " -> "))
 	}
 	return Graph{Nodes: nodes, Edges: edges}, nil
+}
+
+// nodeFromRule converts one p1689 rule into a graph node, registering the
+// modules it provides and rejecting a module that two translation units provide.
+func nodeFromRule(rule p1689.Rule, providers map[string]string) (Node, error) {
+	tu := rule.PrimaryOutput
+	if tu == "" && len(rule.Outputs) > 0 {
+		tu = rule.Outputs[0]
+	}
+	if tu == "" {
+		return Node{}, fmt.Errorf("E_MODULE_SCAN_FAILED: rule has no translation unit output")
+	}
+	tu = filepath.Clean(tu)
+	node := Node{TranslationUnit: tu}
+	for _, module := range rule.Provides {
+		key := module.Key()
+		if previous, ok := providers[key.String()]; ok && previous != tu {
+			return Node{}, fmt.Errorf("E_MODULE_DUPLICATE_PROVIDER: module %q is provided by %s and %s", key.String(), previous, tu)
+		}
+		providers[key.String()] = tu
+		node.Provides = append(node.Provides, key)
+	}
+	for _, module := range rule.Requires {
+		node.Requires = append(node.Requires, module.Key())
+	}
+	return node, nil
+}
+
+// buildEdges links each provider to the translation units that require it,
+// rejecting a requirement whose module has no provider.
+func buildEdges(nodes []Node, providers map[string]string) (map[string][]string, error) {
+	edges := make(map[string][]string)
+	for _, node := range nodes {
+		for _, requirement := range node.Requires {
+			provider, ok := providers[requirement.String()]
+			if !ok {
+				return nil, fmt.Errorf("E_MODULE_MISSING_PROVIDER: %s requires %q but no provider exists", node.TranslationUnit, requirement.String())
+			}
+			edges[provider] = appendUnique(edges[provider], node.TranslationUnit)
+		}
+	}
+	return edges, nil
 }
 
 func appendUnique(values []string, value string) []string {

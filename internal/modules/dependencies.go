@@ -4,7 +4,6 @@ import (
 	"context"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"trestle/internal/processx"
 )
@@ -28,29 +27,38 @@ func (scanner CommandScanner) compilerHeaderDeps(ctx context.Context, commandSou
 	seen := map[string]bool{}
 	complete := true
 	for _, path := range paths {
-		if scanner.DependencyMapper != nil && strings.HasPrefix(path, "/") {
-			path, err = scanner.DependencyMapper(ctx, path)
-			if err != nil {
-				return nil, false, false
-			}
-		} else if !filepath.IsAbs(path) {
-			path = filepath.Join(scanner.Directory, filepath.FromSlash(path))
+		local, ok := scanner.mapDependencyPath(ctx, path)
+		if !ok {
+			return nil, false, false
 		}
-		path = canonicalPath(path)
-		if path != localSource {
-			if _, err := os.Stat(path); err == nil {
-				seen[path] = true
-			} else {
-				complete = false
-			}
+		if local == localSource {
+			continue
+		}
+		if _, err := os.Stat(local); err == nil {
+			seen[local] = true
+		} else {
+			complete = false
 		}
 	}
-	result := make([]string, 0, len(seen))
-	for path := range seen {
-		result = append(result, path)
+	return sortedKeys(seen), true, complete
+}
+
+// mapDependencyPath translates one dependency path the compiler reported into a
+// local, canonical path: through the configured dependency mapper when the path
+// is absolute in the toolchain, and relative to the scan directory otherwise.
+// The boolean is false when the mapper fails, which abandons the probe.
+func (scanner CommandScanner) mapDependencyPath(ctx context.Context, path string) (string, bool) {
+	if scanner.DependencyMapper != nil && strings.HasPrefix(path, "/") {
+		mapped, err := scanner.DependencyMapper(ctx, path)
+		if err != nil {
+			return "", false
+		}
+		return canonicalPath(mapped), true
 	}
-	sort.Strings(result)
-	return result, true, complete
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(scanner.Directory, filepath.FromSlash(path))
+	}
+	return canonicalPath(path), true
 }
 
 // parseMakeDependencies reads the single target produced by -MT trestle.
@@ -62,6 +70,13 @@ func parseMakeDependencies(output string) ([]string, bool) {
 	if colon < 0 || strings.TrimSpace(output[:colon]) != "trestle" {
 		return nil, false
 	}
+	result := splitMakeDependencies(output[colon+1:])
+	return result, len(result) > 0
+}
+
+// splitMakeDependencies splits the prerequisite list of a make rule on
+// unescaped whitespace, honouring backslash escapes for spaces, tabs, and #.
+func splitMakeDependencies(input string) []string {
 	var result []string
 	var current strings.Builder
 	flush := func() {
@@ -70,7 +85,6 @@ func parseMakeDependencies(output string) ([]string, bool) {
 			current.Reset()
 		}
 	}
-	input := output[colon+1:]
 	for i := 0; i < len(input); i++ {
 		char := input[i]
 		if char == '\\' && i+1 < len(input) && (input[i+1] == ' ' || input[i+1] == '\t' || input[i+1] == '#') {
@@ -85,5 +99,5 @@ func parseMakeDependencies(output string) ([]string, bool) {
 		current.WriteByte(char)
 	}
 	flush()
-	return result, len(result) > 0
+	return result
 }

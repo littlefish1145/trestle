@@ -146,16 +146,31 @@ func (cache Cache) Update(ctx context.Context, source string, entry CacheEntry) 
 // Valid reports whether a cached entry still matches key and every tracked
 // header and missing dependency is unchanged.
 func (entry CacheEntry) Valid(key ScanKey) bool {
-	if !entry.Complete || entry.Result.Version != 1 || entry.Key != key || entry.ResultHash != HashDocument(entry.Result) {
-		return false
-	}
-	for _, dep := range entry.HeaderDeps {
+	return entry.keyMatches(key) && headersUnchanged(entry.HeaderDeps) && missingStillMissing(entry.MissingDeps)
+}
+
+// keyMatches reports whether the entry is marked complete and its stored key
+// and result hash still describe the requested scan.
+func (entry CacheEntry) keyMatches(key ScanKey) bool {
+	return entry.Complete && entry.Result.Version == 1 && entry.Key == key && entry.ResultHash == HashDocument(entry.Result)
+}
+
+// headersUnchanged reports whether every stamped header still has the recorded
+// modification time and content hash.
+func headersUnchanged(stamps []FileStamp) bool {
+	for _, dep := range stamps {
 		info, err := os.Stat(dep.Path)
 		if err != nil || info.ModTime().UnixNano() != dep.MTime || HashFile(dep.Path) != dep.Hash {
 			return false
 		}
 	}
-	for _, path := range entry.MissingDeps {
+	return true
+}
+
+// missingStillMissing reports whether every dependency recorded as missing is
+// still absent, so a newly generated header invalidates the entry.
+func missingStillMissing(paths []string) bool {
+	for _, path := range paths {
 		if _, err := os.Stat(path); err == nil || !os.IsNotExist(err) {
 			return false
 		}
