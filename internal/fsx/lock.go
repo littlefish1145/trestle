@@ -14,6 +14,9 @@ import (
 	"trestle/internal/diag"
 )
 
+// LockOwner records who holds a resource and what they are doing, so a
+// contending process can report the blocking operation instead of a bare
+// resource-busy message.
 type LockOwner struct {
 	Resource  string    `json:"resource"`
 	Operation string    `json:"operation"`
@@ -21,6 +24,8 @@ type LockOwner struct {
 	Started   time.Time `json:"started"`
 }
 
+// Lock is a held file lock. Close releases it exactly once, so callers can defer
+// Close without guarding against a double release.
 type Lock struct {
 	file       *os.File
 	once       sync.Once
@@ -56,6 +61,8 @@ func Canonical(path string) (string, error) {
 	}
 }
 
+// TryLock takes an exclusive lock on resource and returns E_RESOURCE_BUSY
+// immediately rather than waiting when another process already holds it.
 func TryLock(ctx context.Context, resource, operation string) (*Lock, error) {
 	return acquire(ctx, resource, operation, false)
 }
@@ -65,6 +72,8 @@ func TryReadLock(ctx context.Context, resource, operation string) (*Lock, error)
 	return acquire(ctx, resource, operation, true)
 }
 
+// WaitLock takes an exclusive lock on resource, polling until the current holder
+// releases it or ctx is cancelled.
 func WaitLock(ctx context.Context, resource, operation string) (*Lock, error) {
 	for {
 		lock, err := TryLock(ctx, resource, operation)
@@ -137,6 +146,8 @@ func acquire(ctx context.Context, resource, operation string, shared bool) (*Loc
 	return lock, nil
 }
 
+// Close releases the lock and removes any reader metadata it created. Calling
+// it more than once is safe.
 func (lock *Lock) Close() {
 	if lock != nil {
 		lock.once.Do(func() {

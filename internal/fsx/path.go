@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 )
 
+// HasGlob reports whether path contains glob metacharacters, letting callers
+// decide whether to expand it as a pattern.
 func HasGlob(path string) bool {
 	for _, char := range path {
 		if char == '*' || char == '?' || char == '[' {
@@ -14,6 +16,9 @@ func HasGlob(path string) bool {
 	return false
 }
 
+// ResolveSources expands any glob entries in paths and returns the resulting
+// files, deduplicated and cleaned. A plain path that does not exist is an
+// error.
 func ResolveSources(paths []string) ([]string, error) {
 	result := make([]string, 0, len(paths))
 	seen := map[string]bool{}
