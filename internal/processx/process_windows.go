@@ -7,7 +7,11 @@ import (
 	"time"
 )
 
+// Prepare is a no-op on Windows; the process tree is torn down by Terminate.
 func Prepare(_ *exec.Cmd) {}
+
+// Terminate kills the process and its children with taskkill, then falls back
+// to killing the root process directly.
 func Terminate(command *exec.Cmd) {
 	if command.Process == nil {
 		return

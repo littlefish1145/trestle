@@ -12,6 +12,8 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+// DecodeOutput converts captured process output to UTF-8, detecting UTF-16LE
+// written by wsl.exe and falling back to the active console code page.
 func DecodeOutput(data []byte) string {
 	if len(data) > 1 && (data[0] == 0xff && data[1] == 0xfe || data[1] == 0) {
 		if data[0] == 0xff && data[1] == 0xfe {

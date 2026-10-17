@@ -30,13 +30,21 @@ func (writer *syncWriter) Write(data []byte) (int, error) {
 	return writer.w.Write(data)
 }
 
+// WithOutput returns a context carrying the sink and per-chunk callback that
+// Capture and other process helpers write through.
 func WithOutput(ctx context.Context, writer io.Writer, notify func(string)) context.Context {
 	return context.WithValue(ctx, outputKey{}, output{writer, notify})
 }
+
+// Output returns the writer stored in ctx by WithOutput, or nil when none is
+// set.
 func Output(ctx context.Context) io.Writer {
 	value, _ := ctx.Value(outputKey{}).(output)
 	return value.writer
 }
+
+// Notify returns the per-chunk callback stored in ctx by WithOutput, or
+// fallback when the context carries no callback.
 func Notify(ctx context.Context, fallback func(string)) func(string) {
 	if value, ok := ctx.Value(outputKey{}).(output); ok {
 		if value.notify == nil {

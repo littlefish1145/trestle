@@ -1,3 +1,5 @@
+// Package processx runs child processes as cancellable trees and decodes their
+// output, including the mixed UTF-16 and UTF-8 text that Windows tools emit.
 package processx
 
 import (
