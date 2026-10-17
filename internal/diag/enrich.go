@@ -19,12 +19,31 @@ func Enrich(err error, stage Stage) *Error {
 	if err == nil {
 		return nil
 	}
+	if existing, ok := structuredError(err); ok {
+		return existing
+	}
+	message := err.Error()
+	code := errorCode(message)
+	e := New(code, stage, message, err)
+	e.Summary = strings.TrimPrefix(message, code+": ")
+	enrichHints(e, code, stage)
+	return e
+}
+
+// structuredError returns a copy of the structured *Error already carried by
+// err, so Enrich never aliases a caller's error value.
+func structuredError(err error) (*Error, bool) {
 	var existing *Error
 	if errors.As(err, &existing) {
 		copy := *existing
-		return &copy
+		return &copy, true
 	}
-	message := err.Error()
+	return nil, false
+}
+
+// errorCode reads the E_ code prefixed onto a legacy error message, falling
+// back to a generic code when the message carries none.
+func errorCode(message string) string {
 	code := "E_OPERATION_FAILED"
 	if start := strings.Index(message, "E_"); start >= 0 {
 		end := strings.IndexAny(message[start:], ": \n")
@@ -32,8 +51,12 @@ func Enrich(err error, stage Stage) *Error {
 			code = message[start : start+end]
 		}
 	}
-	e := New(code, stage, message, err)
-	e.Summary = strings.TrimPrefix(message, code+": ")
+	return code
+}
+
+// enrichHints attributes the diagnostic stage and a matching hint set from the
+// error code so legacy failures point callers at the right fix.
+func enrichHints(e *Error, code string, stage Stage) {
 	switch {
 	case strings.Contains(code, "CONFIG") || stage == StageConfig:
 		e.Stage = StageConfig
@@ -54,5 +77,4 @@ func Enrich(err error, stage Stage) *Error {
 	default:
 		e.Hints = []string{"Inspect the complete operation log, fix the first reported error, then retry the same command. Tasks require a fresh preview; files changed by task commands are not rolled back."}
 	}
-	return e
 }
