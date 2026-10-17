@@ -1,3 +1,7 @@
+// Package vcpkg integrates trestle with a local vcpkg checkout: searching
+// installed and available ports, resolving a port's usage requirements from
+// pkg-config, built-in adapters or install manifests, and installing ports into
+// a triplet.
 package vcpkg
 
 import (
@@ -17,6 +21,8 @@ import (
 	"trestle/internal/processx"
 )
 
+// Port is one package known to vcpkg, as returned by search or read from the
+// local port tree, with optional metadata such as its homepage and features.
 type Port struct {
 	Name         string
 	Version      string
@@ -31,12 +37,17 @@ type Port struct {
 	Dependencies []string
 }
 
+// Client runs a local vcpkg executable. Executable is the resolved binary, Root
+// is the checkout it belongs to, and Environment adds or overrides variables for
+// every command it runs.
 type Client struct {
 	Executable  string
 	Root        string
 	Environment map[string]string
 }
 
+// NewClient locates a vcpkg installation, preferring root, then VCPKG_ROOT, then
+// vcpkg on PATH. It returns an error when no executable can be found.
 func NewClient(root string) (Client, error) {
 	if root == "" {
 		root = os.Getenv("VCPKG_ROOT")
@@ -63,6 +74,8 @@ func NewClient(root string) (Client, error) {
 	return Client{Executable: executable, Root: root}, nil
 }
 
+// Search runs vcpkg search and returns the raw result lines, one port per line,
+// with header and feature-continuation rows removed.
 func (client Client) Search(ctx context.Context, query string) ([]string, error) {
 	command := processx.Command(ctx, client.Executable, "search", query)
 	output, err := command.CombinedOutput()
@@ -88,6 +101,8 @@ func parseSearchOutput(output string) []string {
 	return result
 }
 
+// SearchPorts runs a search and parses each result line into a Port, filling in
+// version, description and metadata from the local port manifest.
 func (client Client) SearchPorts(ctx context.Context, query string) ([]Port, error) {
 	lines, err := client.Search(ctx, query)
 	if err != nil {
@@ -140,6 +155,8 @@ func (client Client) enrichPort(port *Port) {
 	port.Dependencies = decodeNames(manifest.Dependencies)
 }
 
+// IsInstalled reports whether a port appears installed for any triplet, checking
+// both the install manifests and the installed share directories.
 func (client Client) IsInstalled(port string) bool {
 	manifests, _ := filepath.Glob(filepath.Join(client.Root, "installed", "vcpkg", "info", port+"_*.list"))
 	if len(manifests) > 0 {
@@ -154,6 +171,8 @@ func (client Client) IsInstalled(port string) bool {
 	return false
 }
 
+// Install installs ports into triplet, streaming vcpkg's output to the terminal.
+// An empty or "auto" triplet defers to vcpkg's own default.
 func (client Client) Install(ctx context.Context, ports []string, triplet string) error {
 	_, err := client.install(ctx, ports, triplet, true)
 	return err

@@ -8,6 +8,9 @@ import (
 	"strings"
 )
 
+// TripletRequest describes the target a vcpkg triplet must satisfy, so
+// RankTriplets can score the triplets installed under a vcpkg root. Empty OS and
+// Arch fields are filled from the host before scoring.
 type TripletRequest struct {
 	OS             string
 	Arch           string
@@ -18,12 +21,17 @@ type TripletRequest struct {
 	Available      []string
 }
 
+// TripletCandidate is one installed triplet together with the score it earned
+// and the human-readable reasons it matched.
 type TripletCandidate struct {
 	Name  string
 	Score int
 	Why   []string
 }
 
+// RankTriplets scores every installed triplet in request.Available against the
+// request and returns the matches ordered by descending score, breaking ties by
+// name.
 func RankTriplets(request TripletRequest) ([]TripletCandidate, error) {
 	available := append([]string{}, request.Available...)
 	sort.Strings(available)
@@ -92,6 +100,9 @@ func RankTriplets(request TripletRequest) ([]TripletCandidate, error) {
 	return result, nil
 }
 
+// SelectAutoTriplet chooses the single best triplet for a request. It fails when
+// nothing matches or when the top two are tied, so an ambiguous "auto" never
+// silently picks one.
 func SelectAutoTriplet(request TripletRequest) (string, error) {
 	candidates, err := RankTriplets(request)
 	if err != nil {
@@ -106,6 +117,8 @@ func SelectAutoTriplet(request TripletRequest) (string, error) {
 	return candidates[0].Name, nil
 }
 
+// AvailableTriplets lists the triplets already installed under a vcpkg root,
+// sorted by name and filtered to valid triplet names.
 func AvailableTriplets(root string) ([]string, error) {
 	entries, err := filepath.Glob(filepath.Join(root, "installed", "*"))
 	if err != nil {

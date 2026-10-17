@@ -14,8 +14,13 @@ import (
 	"time"
 )
 
+// OfficialIndexURL is the address of vcpkg's published port index, the default
+// source for WebRegistry lookups.
 const OfficialIndexURL = "https://vcpkg.io/output.json"
 
+// WebRegistry searches vcpkg's web index of ports. Results are cached in memory
+// and, when CachePath is set, on disk, so repeated searches avoid the network
+// while Refresh forces a fresh download.
 type WebRegistry struct {
 	IndexURL  string
 	Client    *http.Client

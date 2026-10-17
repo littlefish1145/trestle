@@ -11,8 +11,13 @@ import (
 	"trestle/internal/model"
 )
 
+// ResolutionMethod records where a package's usage requirements came from, so
+// the UI can explain how a package was resolved.
 type ResolutionMethod string
 
+// The resolution methods, from the richest metadata to a hand-written override:
+// pkg-config files, a built-in adapter, vcpkg's install manifest, or explicitly
+// configured manual paths.
 const (
 	ResolutionPkgConfig ResolutionMethod = "pkg-config"
 	ResolutionAdapter   ResolutionMethod = "adapter"
@@ -20,6 +25,8 @@ const (
 	ResolutionManual    ResolutionMethod = "manual"
 )
 
+// ResolvedPackage is a package whose usage requirements have been resolved,
+// tagged with the method that produced them and the triplet they belong to.
 type ResolvedPackage struct {
 	Name    string
 	Port    string
@@ -28,6 +35,10 @@ type ResolvedPackage struct {
 	Method  ResolutionMethod
 }
 
+// Resolver turns configured packages into resolved usage requirements by
+// consulting a vcpkg installation. Root may be empty when a package carries
+// complete manual metadata; Profile and the linkage fields select release or
+// debug paths and whether private dependencies are needed.
 type Resolver struct {
 	Root           string
 	Profile        string
@@ -35,6 +46,9 @@ type Resolver struct {
 	LibraryLinkage string
 }
 
+// Resolve finds the usage requirements for one configured package, trying
+// pkg-config, then a built-in adapter, then the installed manifest, and finally
+// any manual metadata on the package. It returns an error when none applies.
 func (resolver Resolver) Resolve(ctx context.Context, pkg config.Package) (ResolvedPackage, error) {
 	port := pkg.Port
 	if port == "" {
@@ -223,8 +237,12 @@ func manualUsage(pkg config.Package) model.Usage {
 	return usage
 }
 
+// PackageNameFromPath extracts a package name from a pkg-config file path by
+// dropping the directory and the .pc extension.
 func PackageNameFromPath(path string) string { return strings.TrimSuffix(filepath.Base(path), ".pc") }
 
+// InstalledMarker reports whether a triplet layout has a populated include
+// directory, which distinguishes an installed prefix from an empty one.
 func InstalledMarker(layout Layout) bool {
 	_, err := os.Stat(filepath.Join(layout.InstalledPrefix, "include"))
 	return err == nil

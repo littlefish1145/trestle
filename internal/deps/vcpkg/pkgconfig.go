@@ -8,6 +8,8 @@ import (
 	"strings"
 )
 
+// PcFile is the parsed content of a pkg-config .pc file, holding the include and
+// link flags as well as the public and private requirements it declares.
 type PcFile struct {
 	Name            string
 	Cflags          []string
@@ -17,6 +19,8 @@ type PcFile struct {
 	RequiresPrivate []string
 }
 
+// ParsePC reads and parses a .pc file, expanding ${variable} references. It fails
+// when a variable cannot be resolved rather than emitting a broken flag.
 func ParsePC(path string) (PcFile, error) {
 	file, err := os.Open(path)
 	if err != nil {
@@ -142,6 +146,8 @@ func splitRequires(value string) []string {
 	return result
 }
 
+// FindPC searches a layout's pkg-config directories for name.pc and returns the
+// first match, or an error when the package has no metadata there.
 func FindPC(layout Layout, name string) (string, error) {
 	for _, dir := range layout.PkgConfigDirs {
 		candidate := filepath.Join(dir, name+".pc")

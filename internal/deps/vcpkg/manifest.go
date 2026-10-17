@@ -17,6 +17,10 @@ func ResolveInstalledManifest(layout Layout, port string) (model.Usage, bool) {
 	return ResolveInstalledManifestForProfile(layout, port, "release")
 }
 
+// ResolveInstalledManifestForProfile reads the per-port file lists for a specific
+// profile, returning the libraries, headers and runtime files the port installed
+// and whether any manifest was found. It is the profile-aware form of
+// ResolveInstalledManifest.
 func ResolveInstalledManifestForProfile(layout Layout, port, profile string) (model.Usage, bool) {
 	infoDir := filepath.Join(layout.Root, "installed", "vcpkg", "info")
 	patterns := []string{
