@@ -106,13 +106,18 @@ trestle test --all              Run the complete test suite
 trestle import                  Select Xmake or CMake import automatically
 trestle import-xmake            Import an Xmake project
 trestle export-cmake            Reverse-export trestle.toml to CMakeLists.txt (experimental; -force overwrites)
+trestle package                 Build a release archive from the [package] settings
 trestle release                 Build and create a release ZIP
 trestle vcpkg --search QUERY    Search vcpkg ports
 trestle vcpkg --install --ports fmt,zlib
                                 Install vcpkg ports
 trestle toolchain               List detected toolchains
 trestle doctor                  Check the project environment
+trestle logs                    Show run logs
+trestle version                 Print version information
 ```
+
+See the [command-line reference](docs/cli.en.md) for every subcommand, option, and exit convention.
 
 Use a WSL compiler:
 
@@ -139,6 +144,13 @@ trestle configure -toolchain clang-cl -compile-flags "/W4 /utf-8" `
   -link-flags "/DEBUG" -save-preset dev
 trestle build -preset dev app
 ```
+
+## Documentation
+
+- [Command-line reference](docs/cli.en.md): every subcommand and option.
+- [`trestle.toml` reference](docs/configuration.en.md): the complete schema, defaults, condition expressions, and error codes.
+- [Build a C++ project with fmt from scratch](docs/tutorial.en.md): a full walkthrough for Windows, Linux, macOS, and WSL.
+- [Chinese documentation](README.md).
 
 ## Example `trestle.toml`
 
@@ -235,6 +247,7 @@ internal/toolchain/   Compilers, Visual Studio ABI, WSL, and CUDA
 internal/tui/         Terminal user interface
 scripts/release/      Alpha packages and PATH-aware installers
 .github/workflows/    Desktop Alpha build, release, and log archival
+docs/                 Tutorials, configuration, and command references
 testdata/             Test fixtures
 ```
 

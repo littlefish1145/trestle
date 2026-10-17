@@ -106,13 +106,18 @@ trestle test --all              运行全部测试
 trestle import                  自动选择 Xmake 或 CMake 导入
 trestle import-xmake            导入 Xmake
 trestle export-cmake            反向导出 trestle.toml 至 CMakeLists.txt（实验；-force 覆盖已存在文件）
+trestle package                 按 [package] 设置生成发布归档
 trestle release                 构建并生成 ZIP 发布包
 trestle vcpkg --search QUERY    搜索 vcpkg 包
 trestle vcpkg --install --ports fmt,zlib
                                 安装 vcpkg 包
 trestle toolchain               列出检测到的工具链
 trestle doctor                  检查项目环境
+trestle logs                    查看运行日志
+trestle version                 打印版本信息
 ```
+
+完整的命令、选项与退出约定见 [命令行参考](docs/cli.zh-CN.md)。
 
 使用 WSL 编译器：
 
@@ -139,6 +144,13 @@ trestle configure -toolchain clang-cl -compile-flags "/W4 /utf-8" `
   -link-flags "/DEBUG" -save-preset dev
 trestle build -preset dev app
 ```
+
+## 文档
+
+- [命令行参考](docs/cli.zh-CN.md)：全部子命令与选项。
+- [`trestle.toml` 配置参考](docs/configuration.zh-CN.md)：完整的 schema、默认值、条件表达式与错误代码。
+- [从零构建带 fmt 依赖的 C++ 项目](docs/tutorial.zh-CN.md)：Windows、Linux、macOS 与 WSL 的完整演练。
+- [English documentation](README_EN.md)。
 
 ## `trestle.toml` 示例
 
@@ -245,6 +257,7 @@ internal/toolchain/   编译器、VS ABI、WSL 与 CUDA
 internal/tui/         终端界面
 scripts/release/      Alpha 安装包及 PATH 安装脚本
 .github/workflows/    桌面端 Alpha 构建、发布与日志归档
+docs/                 教程、配置与命令参考
 testdata/             测试夹具
 ```
 
