@@ -211,26 +211,38 @@ func detect(ctx context.Context, requested, setup string) (Toolchain, error) {
 		return Toolchain{}, fmt.Errorf("toolchain is not configured")
 	}
 	if requested != "auto" {
-		path, err := exec.LookPath(requested)
-		if err != nil {
-			return Toolchain{}, fmt.Errorf("compiler %q was not found: %w", requested, err)
-		}
-		kind := kindFromBase(filepath.Base(path), requested)
-		version := commandVersion(ctx, path)
-		target := compilerTarget(ctx, path)
-		if target == "" {
-			target = runtime.GOARCH
-		}
-		candidate := Toolchain{Kind: kind, CC: compilerCC(kind, path), CXX: path, Archiver: findArchiver(kind, path), Linker: path, Version: version, Target: target, Setup: setup}
-		if kind == MSVC || targetUsesMSVCABI(target) {
-			configured, err := withMSVCEnvironment(ctx, candidate, setup)
-			if err != nil {
-				return Toolchain{}, err
-			}
-			candidate = configured
-		}
-		return candidate, nil
+		return detectRequested(ctx, requested, setup)
 	}
+	return detectAuto(ctx, setup)
+}
+
+// detectRequested resolves an explicitly named compiler or path into a
+// Toolchain, configuring the MSVC ABI environment when the compiler needs it.
+func detectRequested(ctx context.Context, requested, setup string) (Toolchain, error) {
+	path, err := exec.LookPath(requested)
+	if err != nil {
+		return Toolchain{}, fmt.Errorf("compiler %q was not found: %w", requested, err)
+	}
+	kind := kindFromBase(filepath.Base(path), requested)
+	version := commandVersion(ctx, path)
+	target := compilerTarget(ctx, path)
+	if target == "" {
+		target = runtime.GOARCH
+	}
+	candidate := Toolchain{Kind: kind, CC: compilerCC(kind, path), CXX: path, Archiver: findArchiver(kind, path), Linker: path, Version: version, Target: target, Setup: setup}
+	if kind == MSVC || targetUsesMSVCABI(target) {
+		configured, err := withMSVCEnvironment(ctx, candidate, setup)
+		if err != nil {
+			return Toolchain{}, err
+		}
+		candidate = configured
+	}
+	return candidate, nil
+}
+
+// detectAuto resolves the "auto" request by preferring an MSVC setup when one is
+// given, then collecting every compiler found on PATH and reporting the outcome.
+func detectAuto(ctx context.Context, setup string) (Toolchain, error) {
 	if setup != "" {
 		for _, preferred := range []string{"clang-cl", "cl"} {
 			if _, err := exec.LookPath(preferred); err == nil {
@@ -238,27 +250,9 @@ func detect(ctx context.Context, requested, setup string) (Toolchain, error) {
 			}
 		}
 	}
-	var candidates []Toolchain
-	if path, err := exec.LookPath("clang++"); err == nil {
-		target := compilerTarget(ctx, path)
-		candidate := Toolchain{Kind: Clang, CC: clangCC(path), CXX: path, Archiver: findArchiver(Clang, path), Linker: path, Version: commandVersion(ctx, path), Target: target}
-		if targetUsesMSVCABI(target) {
-			candidate, err = withMSVCEnvironment(ctx, candidate, setup)
-			if err != nil {
-				return Toolchain{}, err
-			}
-		}
-		candidates = append(candidates, candidate)
-	}
-	if path, err := exec.LookPath("g++"); err == nil {
-		candidates = append(candidates, Toolchain{Kind: GCC, CC: gccCC(path), CXX: path, Archiver: findArchiver(GCC, path), Linker: path, Version: commandVersion(ctx, path), Target: runtime.GOARCH})
-	}
-	if path, err := exec.LookPath("cl"); err == nil {
-		candidate, configureErr := withMSVCEnvironment(ctx, Toolchain{Kind: MSVC, CC: path, CXX: path, Archiver: findArchiver(MSVC, path), Linker: path, Version: commandVersion(ctx, path), Target: runtime.GOARCH}, setup)
-		if configureErr != nil {
-			return Toolchain{}, configureErr
-		}
-		candidates = append(candidates, candidate)
+	candidates, err := autoCandidates(ctx, setup)
+	if err != nil {
+		return Toolchain{}, err
 	}
 	if len(candidates) == 0 {
 		return Toolchain{}, fmt.Errorf("E_TOOLCHAIN_NOT_FOUND: no clang++, g++, or cl executable was found")
@@ -271,6 +265,34 @@ func detect(ctx context.Context, requested, setup string) (Toolchain, error) {
 		return Toolchain{}, fmt.Errorf("E_TOOLCHAIN_AMBIGUOUS: explicit toolchain = auto found %s; set cxx in trestle.toml", strings.Join(names, ", "))
 	}
 	return candidates[0], nil
+}
+
+// autoCandidates probes PATH for clang++, g++, and cl, returning one candidate
+// per compiler found and configuring the MSVC ABI environment where required.
+func autoCandidates(ctx context.Context, setup string) ([]Toolchain, error) {
+	var candidates []Toolchain
+	if path, err := exec.LookPath("clang++"); err == nil {
+		target := compilerTarget(ctx, path)
+		candidate := Toolchain{Kind: Clang, CC: clangCC(path), CXX: path, Archiver: findArchiver(Clang, path), Linker: path, Version: commandVersion(ctx, path), Target: target}
+		if targetUsesMSVCABI(target) {
+			candidate, err = withMSVCEnvironment(ctx, candidate, setup)
+			if err != nil {
+				return nil, err
+			}
+		}
+		candidates = append(candidates, candidate)
+	}
+	if path, err := exec.LookPath("g++"); err == nil {
+		candidates = append(candidates, Toolchain{Kind: GCC, CC: gccCC(path), CXX: path, Archiver: findArchiver(GCC, path), Linker: path, Version: commandVersion(ctx, path), Target: runtime.GOARCH})
+	}
+	if path, err := exec.LookPath("cl"); err == nil {
+		candidate, configureErr := withMSVCEnvironment(ctx, Toolchain{Kind: MSVC, CC: path, CXX: path, Archiver: findArchiver(MSVC, path), Linker: path, Version: commandVersion(ctx, path), Target: runtime.GOARCH}, setup)
+		if configureErr != nil {
+			return nil, configureErr
+		}
+		candidates = append(candidates, candidate)
+	}
+	return candidates, nil
 }
 
 // List returns the toolchain as a single-element slice, so callers that work
@@ -333,17 +355,41 @@ func kindFromBase(base, requested string) Kind {
 	base = strings.ToLower(base)
 	requested = strings.ToLower(requested)
 	switch {
-	case strings.Contains(base, "clang-cl") || strings.Contains(requested, "clang-cl"):
+	case isClangCLName(base, requested):
 		return MSVC
-	case strings.Contains(base, "clang") || strings.Contains(requested, "clang"):
+	case isClangName(base, requested):
 		return Clang
-	case strings.Contains(base, "g++") || strings.Contains(base, "gcc") || strings.Contains(base, "mingw") || strings.Contains(requested, "mingw"):
+	case isGCCName(base, requested):
 		return GCC
-	case base == "cl.exe" || base == "cl" || strings.Contains(requested, "msvc"):
+	case isMSVCName(base, requested):
 		return MSVC
 	default:
 		return Kind(base)
 	}
+}
+
+// isClangCLName reports whether the compiler base name or the requested spec
+// identifies the clang-cl driver, which drives the MSVC linker.
+func isClangCLName(base, requested string) bool {
+	return strings.Contains(base, "clang-cl") || strings.Contains(requested, "clang-cl")
+}
+
+// isClangName reports whether the compiler base name or the requested spec
+// identifies a clang-family compiler.
+func isClangName(base, requested string) bool {
+	return strings.Contains(base, "clang") || strings.Contains(requested, "clang")
+}
+
+// isGCCName reports whether the compiler base name or the requested spec
+// identifies a GCC, MinGW, or g++ compiler.
+func isGCCName(base, requested string) bool {
+	return strings.Contains(base, "g++") || strings.Contains(base, "gcc") || strings.Contains(base, "mingw") || strings.Contains(requested, "mingw")
+}
+
+// isMSVCName reports whether the compiler base name or the requested spec
+// identifies the MSVC cl compiler.
+func isMSVCName(base, requested string) bool {
+	return base == "cl.exe" || base == "cl" || strings.Contains(requested, "msvc")
 }
 
 func commandVersion(ctx context.Context, path string) string {

@@ -169,28 +169,43 @@ func versionComponent(parts []string, index int) int {
 // as "clang version 18.1.8" or "release 12.4, V12.4.131".
 func ExtractVersion(text string) (string, bool) {
 	for index := 0; index < len(text); index++ {
-		if text[index] < '0' || text[index] > '9' {
+		if !isASCIIDigit(text[index]) {
 			continue
 		}
-		end := index
-		for end < len(text) && text[end] >= '0' && text[end] <= '9' {
-			end++
-		}
-		components := 0
-		cursor := end
-		for cursor+1 < len(text) && text[cursor] == '.' && text[cursor+1] >= '0' && text[cursor+1] <= '9' {
-			cursor++
-			for cursor < len(text) && text[cursor] >= '0' && text[cursor] <= '9' {
-				cursor++
-			}
-			components++
-		}
+		end := scanDigits(text, index)
+		cursor, components := scanVersionTail(text, end)
 		if components > 0 {
 			return NormalizeVersion(text[index:cursor])
 		}
 		index = end - 1
 	}
 	return "", false
+}
+
+// isASCIIDigit reports whether b is one of the ASCII digits 0-9.
+func isASCIIDigit(b byte) bool { return b >= '0' && b <= '9' }
+
+// scanDigits returns the index just past the run of ASCII digits that starts at
+// index.
+func scanDigits(text string, index int) int {
+	for index < len(text) && isASCIIDigit(text[index]) {
+		index++
+	}
+	return index
+}
+
+// scanVersionTail extends a number at start past any dot-separated digit
+// components, returning the end of the version and how many components followed
+// the first one.
+func scanVersionTail(text string, start int) (int, int) {
+	cursor := start
+	components := 0
+	for cursor+1 < len(text) && text[cursor] == '.' && isASCIIDigit(text[cursor+1]) {
+		cursor++
+		cursor = scanDigits(text, cursor)
+		components++
+	}
+	return cursor, components
 }
 
 // LooksLikeVersion reports whether a spec is meant to be a version constraint

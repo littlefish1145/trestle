@@ -91,6 +91,12 @@ func ResolveCompiler(inventory Inventory, spec string) (string, error) {
 	if !wanted.Constrained() {
 		return trimmed, nil
 	}
+	return selectCompilerByRange(inventory, trimmed, wanted)
+}
+
+// selectCompilerByRange picks the newest ready installed compiler whose parsed
+// version satisfies wanted, reporting what is installed when none matches.
+func selectCompilerByRange(inventory Inventory, spec string, wanted Range) (string, error) {
 	candidates := make([]Component, 0, len(inventory.Compilers))
 	for _, component := range inventory.Compilers {
 		if !component.Ready {
@@ -102,7 +108,7 @@ func ResolveCompiler(inventory Inventory, spec string) (string, error) {
 	}
 	if len(candidates) == 0 {
 		return "", fmt.Errorf("E_TOOLCHAIN_NOT_FOUND: no installed compiler satisfies %q; installed compilers: %s. Widen [toolchain].cxx or install the required version",
-			trimmed, describeCompilers(inventory))
+			spec, describeCompilers(inventory))
 	}
 	sortComponentsByVersion(candidates)
 	return candidates[0].Path, nil

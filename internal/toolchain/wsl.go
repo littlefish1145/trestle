@@ -20,45 +20,68 @@ func DetectWSL(ctx context.Context, distribution, requested string) (Toolchain, 
 	if err != nil {
 		return Toolchain{}, err
 	}
-	var lookupErr error
-	find := func(names ...string) string {
-		resolved, err := WSLExecutable(ctx, distribution, names...)
-		lookupErr = err
-		return resolved
+	cxx, err := resolveWSLCompiler(ctx, distribution, requested)
+	if err != nil {
+		return Toolchain{}, err
 	}
-	cxx := strings.TrimSpace(requested)
-	if cxx == "" || cxx == "auto" {
-		cxx = find("clang++", "g++")
-	} else {
-		resolved, findErr := WSLExecutable(ctx, distribution, cxx)
-		if findErr != nil {
-			return Toolchain{}, fmt.Errorf("E_WSL_TOOLCHAIN_NOT_FOUND: compiler %q in distribution %q: %w", cxx, distribution, findErr)
-		}
-		cxx = resolved
-	}
-	if cxx == "" {
-		return Toolchain{}, fmt.Errorf("E_WSL_TOOLCHAIN_NOT_FOUND: no compiler in distribution %q: %w", distribution, lookupErr)
-	}
-	kind := GCC
-	if strings.Contains(strings.ToLower(pathpkg.Base(cxx)), "clang") {
-		kind = Clang
-	}
-	cc := find(map[Kind]string{Clang: "clang", GCC: "gcc"}[kind])
-	ar := find(map[Kind]string{Clang: "llvm-ar", GCC: "ar"}[kind])
+	kind := wslCompilerKind(cxx)
+	cc, _ := WSLExecutable(ctx, distribution, map[Kind]string{Clang: "clang", GCC: "gcc"}[kind])
+	ar, _ := WSLExecutable(ctx, distribution, map[Kind]string{Clang: "llvm-ar", GCC: "ar"}[kind])
 	if cc == "" || ar == "" {
 		return Toolchain{}, fmt.Errorf("E_WSL_TOOLCHAIN_INCOMPLETE: distribution %q compiler %s requires a matching C compiler and archiver (C=%q, ar=%q)", distribution, cxx, cc, ar)
 	}
-	versionArgs := append(append([]string{}, base...), "--exec", cxx, "--version")
-	version := "unknown"
-	if out, e := exec.CommandContext(ctx, wsl, versionArgs...).CombinedOutput(); e == nil {
-		version = strings.TrimSpace(strings.Split(string(out), "\n")[0])
-	}
-	target := "wsl"
-	args := append(append([]string{}, base...), "--exec", cxx, "-dumpmachine")
-	if out, err := exec.CommandContext(ctx, wsl, args...).Output(); err == nil {
-		target = strings.TrimSpace(string(out))
-	}
+	version := wslCompilerVersion(ctx, wsl, base, cxx)
+	target := wslCompilerTarget(ctx, wsl, base, cxx)
 	return Toolchain{Kind: kind, CC: cc, CXX: cxx, Archiver: ar, Linker: cxx, Version: version, Target: target, Runner: wsl, RunnerArgs: base}, nil
+}
+
+// resolveWSLCompiler resolves the requested compiler inside a distribution. An
+// empty or "auto" request probes clang++ then g++, reporting the probe error
+// when neither is installed.
+func resolveWSLCompiler(ctx context.Context, distribution, requested string) (string, error) {
+	cxx := strings.TrimSpace(requested)
+	if cxx == "" || cxx == "auto" {
+		resolved, findErr := WSLExecutable(ctx, distribution, "clang++", "g++")
+		if resolved == "" {
+			return "", fmt.Errorf("E_WSL_TOOLCHAIN_NOT_FOUND: no compiler in distribution %q: %w", distribution, findErr)
+		}
+		return resolved, nil
+	}
+	resolved, findErr := WSLExecutable(ctx, distribution, cxx)
+	if findErr != nil {
+		return "", fmt.Errorf("E_WSL_TOOLCHAIN_NOT_FOUND: compiler %q in distribution %q: %w", cxx, distribution, findErr)
+	}
+	return resolved, nil
+}
+
+// wslCompilerKind classifies a resolved WSL compiler path as Clang or GCC.
+func wslCompilerKind(compiler string) Kind {
+	if strings.Contains(strings.ToLower(pathpkg.Base(compiler)), "clang") {
+		return Clang
+	}
+	return GCC
+}
+
+// wslCompilerVersion returns the first line of a WSL compiler's --version
+// output, reporting "unknown" when the probe fails.
+func wslCompilerVersion(ctx context.Context, wsl string, base []string, compiler string) string {
+	args := append(append([]string{}, base...), "--exec", compiler, "--version")
+	out, err := exec.CommandContext(ctx, wsl, args...).CombinedOutput()
+	if err != nil {
+		return "unknown"
+	}
+	return strings.TrimSpace(strings.Split(string(out), "\n")[0])
+}
+
+// wslCompilerTarget reports the machine tuple a WSL compiler builds for,
+// defaulting to "wsl" when the probe does not answer.
+func wslCompilerTarget(ctx context.Context, wsl string, base []string, compiler string) string {
+	args := append(append([]string{}, base...), "--exec", compiler, "-dumpmachine")
+	out, err := exec.CommandContext(ctx, wsl, args...).Output()
+	if err != nil {
+		return "wsl"
+	}
+	return strings.TrimSpace(string(out))
 }
 
 // WSLRunner resolves wsl.exe and returns the arguments that select a

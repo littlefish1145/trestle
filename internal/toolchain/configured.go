@@ -35,23 +35,48 @@ func DetectConfigured(ctx context.Context, request Request) (Toolchain, error) {
 		return DetectWSL(ctx, request.WSLDistribution, request.CXX)
 	}
 	inventory := DiscoverInventory(ctx, request.CacheDir)
-	compiler, err := ResolveCompiler(inventory, request.CXX)
+	compiler, cCompiler, err := resolveConfiguredCompiler(inventory, request)
 	if err != nil {
 		return Toolchain{}, err
+	}
+	setup, compiler, cCompiler, err := configuredMSVCSetup(ctx, inventory, request, compiler, cCompiler)
+	if err != nil {
+		return Toolchain{}, err
+	}
+	detected, err := detectConfiguredToolchain(ctx, compiler, setup)
+	if err != nil {
+		return Toolchain{}, err
+	}
+	return applyConfiguredOverrides(detected, request), nil
+}
+
+// resolveConfiguredCompiler resolves the cxx and c specs against the inventory,
+// keeping the raw c value when it does not name a resolvable compiler.
+func resolveConfiguredCompiler(inventory Inventory, request Request) (string, string, error) {
+	compiler, err := ResolveCompiler(inventory, request.CXX)
+	if err != nil {
+		return "", "", err
 	}
 	cCompiler := request.C
 	if resolved, resolveErr := ResolveCompiler(inventory, request.C); resolveErr == nil {
 		cCompiler = resolved
 	}
+	return compiler, cCompiler, nil
+}
+
+// configuredMSVCSetup turns the request's msvc range into the Visual Studio
+// setup script, letting a constrained pin choose the compiler when nothing else
+// was requested. It returns the possibly-updated compiler and c compiler.
+func configuredMSVCSetup(ctx context.Context, inventory Inventory, request Request, compiler, cCompiler string) (string, string, string, error) {
 	pinnedRange, err := ParseRange(request.MSVC)
 	if err != nil {
-		return Toolchain{}, err
+		return "", "", "", err
 	}
 	setup := strings.TrimSpace(request.Setup)
 	install, installErr := ResolveMSVC(inventory, request.MSVC)
 	switch {
 	case installErr != nil && pinnedRange.Constrained():
-		return Toolchain{}, installErr
+		return "", "", "", installErr
 	case installErr == nil:
 		if setup == "" {
 			setup = install.Setup
@@ -69,21 +94,20 @@ func DetectConfigured(ctx context.Context, request Request) (Toolchain, error) {
 	if NeedsMSVCEnvironment(ctx, compiler) && setup == "" {
 		setup = ResolveMSVCSetup(ctx, setup, request.Archiver, request.Linker, cCompiler, compiler)
 	}
+	return setup, compiler, cCompiler, nil
+}
+
+// detectConfiguredToolchain runs the standard detector, using the
+// setup-aware path when a Visual Studio setup script was resolved.
+func detectConfiguredToolchain(ctx context.Context, compiler, setup string) (Toolchain, error) {
 	detector := NewDetector()
-	var detected Toolchain
-	if setup != "" {
-		if withSetup, ok := detector.(setupDetector); ok {
-			detected, err = withSetup.DetectWithSetup(ctx, compiler, setup)
-		} else {
-			detected, err = detector.Detect(ctx, compiler)
-		}
-	} else {
-		detected, err = detector.Detect(ctx, compiler)
+	if setup == "" {
+		return detector.Detect(ctx, compiler)
 	}
-	if err != nil {
-		return Toolchain{}, err
+	if withSetup, ok := detector.(setupDetector); ok {
+		return withSetup.DetectWithSetup(ctx, compiler, setup)
 	}
-	return applyConfiguredOverrides(detected, request), nil
+	return detector.Detect(ctx, compiler)
 }
 
 // acceptsMSVC reports whether an msvc toolset pin may choose the compiler. The
