@@ -1,3 +1,6 @@
+// Package main is the trestle command-line entry point. With no arguments it
+// opens the interactive project console; otherwise it dispatches the named
+// subcommand to the app package.
 package main
 
 import (
@@ -20,6 +23,8 @@ import (
 	tuimodel "trestle/internal/tui"
 )
 
+// Version metadata stamped with -ldflags at release time; the defaults identify a
+// development build.
 var (
 	version   = "dev"
 	commit    = "unknown"
