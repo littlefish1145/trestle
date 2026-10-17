@@ -47,6 +47,7 @@ func (p *CFamilyParser) Parse(request Request) (SourceInfo, error) {
 	}
 	info := SourceInfo{Path: filepath.Clean(request.Path), Language: language, Confidence: ConfidenceHigh, ContentHash: hash(data)}
 	tokens := lexAll(data)
+	defines := requestDefineSet(request.Defines)
 	frames := make([]conditionFrame, 0)
 	confidence := ConfidenceHigh
 	for index := 0; index < len(tokens); index++ {
@@ -62,18 +63,8 @@ func (p *CFamilyParser) Parse(request Request) (SourceInfo, error) {
 			line, after := readDirectiveLine(tokens, next)
 			switch directive {
 			case "if", "ifdef", "ifndef":
-				condition := Condition{Kind: ConditionTrue}
-				switch directive {
-				case "ifdef":
-					condition = identifierCondition(line, false)
-				case "ifndef":
-					condition = Condition{Kind: ConditionNot, Children: []Condition{identifierCondition(line, true)}}
-				default:
-					condition = parseCondition(line)
-				}
-				active, known := condition.Evaluate(requestDefineSet(request.Defines))
-				parentActive, parentKnown := directiveActive(frames)
-				frames = append(frames, conditionFrame{parentActive: parentActive, parentKnown: parentKnown, branches: []conditionBranch{{condition: condition, active: parentActive && active, known: parentKnown && known}}})
+				var known bool
+				frames, known = pushConditionalFrame(frames, buildDirectiveCondition(directive, line), defines)
 				if !known {
 					confidence = ConfidenceMedium
 				}
@@ -81,18 +72,8 @@ func (p *CFamilyParser) Parse(request Request) (SourceInfo, error) {
 				if len(frames) == 0 {
 					continue
 				}
-				frame := &frames[len(frames)-1]
-				knownBefore := false
-				for _, branch := range frame.branches {
-					knownBefore = knownBefore || branch.known
-				}
-				condition := parseCondition(line)
-				active, known := condition.Evaluate(requestDefineSet(request.Defines))
-				branch := conditionBranch{condition: condition, active: false, known: frame.parentKnown && known}
-				if !knownBefore {
-					branch.active = frame.parentActive && active
-				}
-				frame.branches = append(frame.branches, branch)
+				var known bool
+				frames, known = extendElifBranch(frames, line, defines)
 				if !known {
 					confidence = ConfidenceMedium
 				}
@@ -100,43 +81,20 @@ func (p *CFamilyParser) Parse(request Request) (SourceInfo, error) {
 				if len(frames) == 0 {
 					continue
 				}
-				frame := &frames[len(frames)-1]
-				knownBefore := false
-				taken := false
-				elseCondition := Condition{Kind: ConditionTrue}
-				for _, branch := range frame.branches {
-					knownBefore = knownBefore || branch.known
-					taken = taken || branch.active
-					if branch.condition.Kind != ConditionTrue {
-						elseCondition = Condition{Kind: ConditionOr, Children: []Condition{elseCondition, branch.condition}}
-					}
-				}
-				if len(elseCondition.Children) > 0 {
-					elseCondition = Condition{Kind: ConditionNot, Children: []Condition{elseCondition}}
-				}
-				frame.branches = append(frame.branches, conditionBranch{condition: elseCondition, active: frame.parentActive && !taken, known: frame.parentKnown && knownBefore})
+				frames = applyElseBranch(frames)
 			case "endif":
 				if len(frames) > 0 {
 					frames = frames[:len(frames)-1]
 				}
 			case "include", "include_next":
-				dependency, dynamic := parseInclude(line)
+				dependency, dynamic := includeDependency(current, line, frames, defines)
 				if dependency == nil {
 					break
 				}
-				dependency.Range = Range{Start: current.Start, End: line[len(line)-1].End}
-				dependency.Condition = currentCondition(frames)
-				if dependency.Condition.Kind != ConditionTrue {
-					if _, known := dependency.Condition.Evaluate(requestDefineSet(request.Defines)); !known {
-						dependency.Optional = true
-					}
-				}
+				info.Dependencies = append(info.Dependencies, *dependency)
 				if dynamic {
-					dependency.Kind = DynamicInclude
-					dependency.Name = ""
 					confidence = ConfidenceLow
 				}
-				info.Dependencies = append(info.Dependencies, *dependency)
 			}
 			index = after - 1
 			continue
@@ -149,6 +107,99 @@ func (p *CFamilyParser) Parse(request Request) (SourceInfo, error) {
 	}
 	info.Confidence = confidence
 	return info, nil
+}
+
+// buildDirectiveCondition builds the Condition a conditional directive tests:
+// ifdef probes for an identifier directly, ifndef negates that probe, and a
+// plain if parses the whole expression.
+func buildDirectiveCondition(directive string, line []token) Condition {
+	switch directive {
+	case "ifdef":
+		return identifierCondition(line, false)
+	case "ifndef":
+		return Condition{Kind: ConditionNot, Children: []Condition{identifierCondition(line, true)}}
+	default:
+		return parseCondition(line)
+	}
+}
+
+// pushConditionalFrame opens a conditional frame for an if/ifdef/ifndef
+// directive, combining the new branch's activity with the enclosing frames. The
+// returned bool reports whether the condition could be evaluated from defines.
+func pushConditionalFrame(frames []conditionFrame, condition Condition, defines map[string]bool) ([]conditionFrame, bool) {
+	active, known := condition.Evaluate(defines)
+	parentActive, parentKnown := directiveActive(frames)
+	frames = append(frames, conditionFrame{parentActive: parentActive, parentKnown: parentKnown, branches: []conditionBranch{{condition: condition, active: parentActive && active, known: parentKnown && known}}})
+	return frames, known
+}
+
+// extendElifBranch appends an elif branch to the innermost frame, activating it
+// only when no earlier branch was already known. The returned bool reports
+// whether the condition could be evaluated from defines.
+func extendElifBranch(frames []conditionFrame, line []token, defines map[string]bool) ([]conditionFrame, bool) {
+	frame := &frames[len(frames)-1]
+	knownBefore := anyBranchKnown(frame.branches)
+	condition := parseCondition(line)
+	active, known := condition.Evaluate(defines)
+	branch := conditionBranch{condition: condition, active: false, known: frame.parentKnown && known}
+	if !knownBefore {
+		branch.active = frame.parentActive && active
+	}
+	frame.branches = append(frame.branches, branch)
+	return frames, known
+}
+
+// applyElseBranch appends an else branch to the innermost frame, negating the
+// conditions already seen and activating it only when no branch was taken.
+func applyElseBranch(frames []conditionFrame) []conditionFrame {
+	frame := &frames[len(frames)-1]
+	knownBefore := anyBranchKnown(frame.branches)
+	taken := false
+	elseCondition := Condition{Kind: ConditionTrue}
+	for _, branch := range frame.branches {
+		taken = taken || branch.active
+		if branch.condition.Kind != ConditionTrue {
+			elseCondition = Condition{Kind: ConditionOr, Children: []Condition{elseCondition, branch.condition}}
+		}
+	}
+	if len(elseCondition.Children) > 0 {
+		elseCondition = Condition{Kind: ConditionNot, Children: []Condition{elseCondition}}
+	}
+	frame.branches = append(frame.branches, conditionBranch{condition: elseCondition, active: frame.parentActive && !taken, known: frame.parentKnown && knownBefore})
+	return frames
+}
+
+// anyBranchKnown reports whether any branch in the frame has a known condition.
+func anyBranchKnown(branches []conditionBranch) bool {
+	for _, branch := range branches {
+		if branch.known {
+			return true
+		}
+	}
+	return false
+}
+
+// includeDependency turns an include directive line into a dependency, stamping
+// its span, enclosing condition, optionality, and dynamic-include marker. It
+// returns nil when the line names no include, and a bool reporting whether the
+// include was dynamic.
+func includeDependency(current token, line []token, frames []conditionFrame, defines map[string]bool) (*SourceDependency, bool) {
+	dependency, dynamic := parseInclude(line)
+	if dependency == nil {
+		return nil, dynamic
+	}
+	dependency.Range = Range{Start: current.Start, End: line[len(line)-1].End}
+	dependency.Condition = currentCondition(frames)
+	if dependency.Condition.Kind != ConditionTrue {
+		if _, known := dependency.Condition.Evaluate(defines); !known {
+			dependency.Optional = true
+		}
+	}
+	if dynamic {
+		dependency.Kind = DynamicInclude
+		dependency.Name = ""
+	}
+	return dependency, dynamic
 }
 
 func lexAll(data []byte) []token {
@@ -383,30 +434,8 @@ func inspectCTokens(info *SourceInfo, tokens []token, index int) {
 	if current.Kind != tokenIdentifier {
 		return
 	}
-	if index+1 < len(tokens) && tokens[index+1].Text == "(" {
-		switch current.Text {
-		case "main", "WinMain", "wWinMain":
-			kind := "Executable"
-			if current.Text != "main" {
-				kind = "WindowsExecutable"
-			}
-			info.EntryPoints = append(info.EntryPoints, EntryPoint{Name: current.Text, Kind: kind, Range: Range{Start: current.Start, End: tokens[index+1].End}})
-		case "TEST", "TEST_CASE":
-			framework := "gtest"
-			if current.Text == "TEST_CASE" {
-				framework = "catch2/doctest"
-			}
-			if test, ok := parseMacroTest(tokens, index, framework); ok {
-				info.Tests = append(info.Tests, test)
-			}
-		}
-	}
-	if index > 0 && tokens[index-1].Kind == tokenIdentifier {
-		switch tokens[index-1].Text {
-		case "class", "struct", "namespace", "enum", "union", "module":
-			info.Symbols = append(info.Symbols, SymbolInfo{Name: current.Text, Kind: tokens[index-1].Text, Range: Range{Start: current.Start, End: current.End}})
-		}
-	}
+	inspectCTokenCall(info, tokens, index)
+	inspectSymbolDeclaration(info, tokens, index)
 	if current.Text == "import" {
 		inspectImport(info, tokens, index)
 	}
@@ -416,6 +445,50 @@ func inspectCTokens(info *SourceInfo, tokens []token, index int) {
 	if current.Text == "module" {
 		inspectModule(info, tokens, index)
 	}
+	inspectGenerated(info, current)
+}
+
+// inspectCTokenCall records an entry point or test macro when the identifier at
+// index names a known call target and is immediately followed by "(".
+func inspectCTokenCall(info *SourceInfo, tokens []token, index int) {
+	if index+1 >= len(tokens) || tokens[index+1].Text != "(" {
+		return
+	}
+	current := tokens[index]
+	switch current.Text {
+	case "main", "WinMain", "wWinMain":
+		kind := "Executable"
+		if current.Text != "main" {
+			kind = "WindowsExecutable"
+		}
+		info.EntryPoints = append(info.EntryPoints, EntryPoint{Name: current.Text, Kind: kind, Range: Range{Start: current.Start, End: tokens[index+1].End}})
+	case "TEST", "TEST_CASE":
+		framework := "gtest"
+		if current.Text == "TEST_CASE" {
+			framework = "catch2/doctest"
+		}
+		if test, ok := parseMacroTest(tokens, index, framework); ok {
+			info.Tests = append(info.Tests, test)
+		}
+	}
+}
+
+// inspectSymbolDeclaration records the identifier following a class, struct,
+// namespace, enum, union, or module keyword as a declared symbol.
+func inspectSymbolDeclaration(info *SourceInfo, tokens []token, index int) {
+	if index == 0 || tokens[index-1].Kind != tokenIdentifier {
+		return
+	}
+	switch tokens[index-1].Text {
+	case "class", "struct", "namespace", "enum", "union", "module":
+		current := tokens[index]
+		info.Symbols = append(info.Symbols, SymbolInfo{Name: current.Text, Kind: tokens[index-1].Text, Range: Range{Start: current.Start, End: current.End}})
+	}
+}
+
+// inspectGenerated records an identifier that mentions "generated", flagging the
+// source as machine-produced.
+func inspectGenerated(info *SourceInfo, current token) {
 	if strings.Contains(strings.ToLower(current.Text), "generated") {
 		info.Generated = append(info.Generated, GeneratedHint{Kind: "GeneratedHint", Target: current.Text, Range: Range{Start: current.Start, End: current.End}})
 	}
@@ -488,11 +561,18 @@ func inspectModule(info *SourceInfo, tokens []token, index int) {
 		return
 	}
 	if cursor == index+1 || tokens[index].Text == "module" {
-		info.Module.Provides = name
-		info.Module.IsInterface = strings.EqualFold(filepath.Ext(info.Path), ".ixx") || strings.EqualFold(filepath.Ext(info.Path), ".cppm")
-		info.Module.IsPartition = strings.Contains(name, ":")
+		recordModuleDefinition(info, name)
 	}
 	_ = next
+}
+
+// recordModuleDefinition records name as the module the file provides, flagging
+// the file as an interface unit when its extension says so and as a partition
+// when the name carries a partition separator.
+func recordModuleDefinition(info *SourceInfo, name string) {
+	info.Module.Provides = name
+	info.Module.IsInterface = strings.EqualFold(filepath.Ext(info.Path), ".ixx") || strings.EqualFold(filepath.Ext(info.Path), ".cppm")
+	info.Module.IsPartition = strings.Contains(name, ":")
 }
 
 func moduleName(tokens []token, index int) (string, int) {

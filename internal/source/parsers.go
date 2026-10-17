@@ -36,25 +36,39 @@ func (p *RustParser) Parse(request Request) (SourceInfo, error) {
 		if current.Kind != tokenIdentifier {
 			continue
 		}
-		if current.Text == "use" && index+1 < len(tokens) {
-			name, _ := moduleName(tokens, index+1)
-			if name != "" {
-				info.Dependencies = append(info.Dependencies, SourceDependency{Kind: Import, Name: name, Range: tokenRange(current)})
-			}
-		}
-		if current.Text == "test" && index >= 2 && tokens[index-2].Text == "#" && tokens[index-1].Text == "[" && index+1 < len(tokens) && tokens[index+1].Text == "]" {
-			cursor := index + 2
-			for cursor < len(tokens) && tokens[cursor].Kind == tokenNewline {
-				cursor++
-			}
-			if cursor+1 < len(tokens) && tokens[cursor].Text == "fn" && tokens[cursor+1].Kind == tokenIdentifier {
-				name := tokens[cursor+1].Text
-				info.Tests = append(info.Tests, TestInfo{Name: name, Framework: "rust", Range: tokenRange(current), Symbol: name})
-				info.Symbols = append(info.Symbols, SymbolInfo{Name: name, Kind: "function", Range: tokenRange(tokens[cursor+1])})
-			}
-		}
+		inspectRustUse(&info, tokens, index, current)
+		inspectRustTest(&info, tokens, index, current)
 	}
 	return info, nil
+}
+
+// inspectRustUse records a "use" path as a dependency.
+func inspectRustUse(info *SourceInfo, tokens []token, index int, current token) {
+	if current.Text != "use" || index+1 >= len(tokens) {
+		return
+	}
+	name, _ := moduleName(tokens, index+1)
+	if name != "" {
+		info.Dependencies = append(info.Dependencies, SourceDependency{Kind: Import, Name: name, Range: tokenRange(current)})
+	}
+}
+
+// inspectRustTest records the function following a "#[test]" attribute as both a
+// test and a symbol.
+func inspectRustTest(info *SourceInfo, tokens []token, index int, current token) {
+	if current.Text != "test" || index < 2 || tokens[index-2].Text != "#" || tokens[index-1].Text != "[" || index+1 >= len(tokens) || tokens[index+1].Text != "]" {
+		return
+	}
+	cursor := index + 2
+	for cursor < len(tokens) && tokens[cursor].Kind == tokenNewline {
+		cursor++
+	}
+	if cursor+1 >= len(tokens) || tokens[cursor].Text != "fn" || tokens[cursor+1].Kind != tokenIdentifier {
+		return
+	}
+	name := tokens[cursor+1].Text
+	info.Tests = append(info.Tests, TestInfo{Name: name, Framework: "rust", Range: tokenRange(current), Symbol: name})
+	info.Symbols = append(info.Symbols, SymbolInfo{Name: name, Kind: "function", Range: tokenRange(tokens[cursor+1])})
 }
 
 // Accepts reports whether path has a .go extension.
@@ -73,33 +87,7 @@ func (p *GoParser) Parse(request Request) (SourceInfo, error) {
 			continue
 		}
 		if current.Text == "import" {
-			cursor := index + 1
-			if cursor < len(tokens) && tokens[cursor].Text == "(" {
-				depth := 0
-				for cursor < len(tokens) {
-					if tokens[cursor].Text == "(" {
-						depth++
-					} else if tokens[cursor].Text == ")" {
-						depth--
-						if depth == 0 {
-							break
-						}
-					} else if tokens[cursor].Kind == tokenString {
-						info.Dependencies = append(info.Dependencies, SourceDependency{Kind: Import, Name: tokens[cursor].Text, Range: tokenRange(tokens[cursor])})
-					}
-					cursor++
-				}
-			} else {
-				for cursor < len(tokens) {
-					if tokens[cursor].Kind == tokenNewline {
-						break
-					}
-					if tokens[cursor].Kind == tokenString {
-						info.Dependencies = append(info.Dependencies, SourceDependency{Kind: Import, Name: tokens[cursor].Text, Range: tokenRange(tokens[cursor])})
-					}
-					cursor++
-				}
-			}
+			inspectGoImport(&info, tokens, index)
 		}
 		if strings.HasPrefix(current.Text, "Test") && index+1 < len(tokens) && tokens[index+1].Text == "(" {
 			info.Tests = append(info.Tests, TestInfo{Name: current.Text, Framework: "go", Range: tokenRange(current), Symbol: current.Text})
@@ -107,6 +95,46 @@ func (p *GoParser) Parse(request Request) (SourceInfo, error) {
 		}
 	}
 	return info, nil
+}
+
+// inspectGoImport appends the import paths named by a Go import statement,
+// handling both the parenthesized group form and a single-path form.
+func inspectGoImport(info *SourceInfo, tokens []token, index int) {
+	cursor := index + 1
+	if cursor < len(tokens) && tokens[cursor].Text == "(" {
+		inspectGoImportGroup(info, tokens, cursor)
+		return
+	}
+	for cursor < len(tokens) && tokens[cursor].Kind != tokenNewline {
+		if tokens[cursor].Kind == tokenString {
+			appendImportPath(info, tokens[cursor])
+		}
+		cursor++
+	}
+}
+
+// inspectGoImportGroup appends every string import found inside a parenthesized
+// import group, stopping at the matching close parenthesis.
+func inspectGoImportGroup(info *SourceInfo, tokens []token, cursor int) {
+	depth := 0
+	for cursor < len(tokens) {
+		if tokens[cursor].Text == "(" {
+			depth++
+		} else if tokens[cursor].Text == ")" {
+			depth--
+			if depth == 0 {
+				break
+			}
+		} else if tokens[cursor].Kind == tokenString {
+			appendImportPath(info, tokens[cursor])
+		}
+		cursor++
+	}
+}
+
+// appendImportPath records a quoted import path as a dependency.
+func appendImportPath(info *SourceInfo, current token) {
+	info.Dependencies = append(info.Dependencies, SourceDependency{Kind: Import, Name: current.Text, Range: tokenRange(current)})
 }
 
 // Accepts reports whether path is a Python .py or .pyw file.
@@ -125,18 +153,31 @@ func (p *PythonParser) Parse(request Request) (SourceInfo, error) {
 		if current.Kind != tokenIdentifier {
 			continue
 		}
-		if (current.Text == "import" || current.Text == "from") && index+1 < len(tokens) && tokens[index+1].Kind == tokenIdentifier {
-			name, _ := moduleName(tokens, index+1)
-			if name != "" {
-				info.Dependencies = append(info.Dependencies, SourceDependency{Kind: RuntimeImport, Name: name, Range: tokenRange(current)})
-			}
-		}
-		if (strings.HasPrefix(current.Text, "test_") || current.Text == "test") && index+1 < len(tokens) && tokens[index+1].Text == "(" {
-			info.Tests = append(info.Tests, TestInfo{Name: current.Text, Framework: "pytest", Range: tokenRange(current), Symbol: current.Text})
-			info.Symbols = append(info.Symbols, SymbolInfo{Name: current.Text, Kind: "function", Range: tokenRange(current)})
-		}
+		inspectPythonImport(&info, tokens, index, current)
+		inspectPythonTest(&info, tokens, index, current)
 	}
 	return info, nil
+}
+
+// inspectPythonImport records an "import" or "from" module path as a runtime
+// dependency.
+func inspectPythonImport(info *SourceInfo, tokens []token, index int, current token) {
+	if (current.Text != "import" && current.Text != "from") || index+1 >= len(tokens) || tokens[index+1].Kind != tokenIdentifier {
+		return
+	}
+	name, _ := moduleName(tokens, index+1)
+	if name != "" {
+		info.Dependencies = append(info.Dependencies, SourceDependency{Kind: RuntimeImport, Name: name, Range: tokenRange(current)})
+	}
+}
+
+// inspectPythonTest records a test_ function as both a test and a symbol.
+func inspectPythonTest(info *SourceInfo, tokens []token, index int, current token) {
+	if (!strings.HasPrefix(current.Text, "test_") && current.Text != "test") || index+1 >= len(tokens) || tokens[index+1].Text != "(" {
+		return
+	}
+	info.Tests = append(info.Tests, TestInfo{Name: current.Text, Framework: "pytest", Range: tokenRange(current), Symbol: current.Text})
+	info.Symbols = append(info.Symbols, SymbolInfo{Name: current.Text, Kind: "function", Range: tokenRange(current)})
 }
 
 // Accepts reports whether path is a JavaScript or TypeScript source.
@@ -160,22 +201,43 @@ func (p *JavaScriptParser) Parse(request Request) (SourceInfo, error) {
 		if current.Kind != tokenIdentifier {
 			continue
 		}
-		if current.Text == "import" || current.Text == "from" {
-			for cursor := index + 1; cursor < len(tokens) && tokens[cursor].Kind != tokenNewline; cursor++ {
-				if tokens[cursor].Kind == tokenString {
-					info.Dependencies = append(info.Dependencies, SourceDependency{Kind: Import, Name: strings.Trim(tokens[cursor].Text, "./"), Range: tokenRange(tokens[cursor])})
-					break
-				}
-			}
-		}
-		if current.Text == "require" && index+2 < len(tokens) && tokens[index+1].Text == "(" && tokens[index+2].Kind == tokenString {
-			info.Dependencies = append(info.Dependencies, SourceDependency{Kind: RuntimeImport, Name: strings.Trim(tokens[index+2].Text, "./"), Range: tokenRange(tokens[index+2])})
-		}
-		if (current.Text == "test" || current.Text == "it") && index+2 < len(tokens) && tokens[index+1].Text == "(" && tokens[index+2].Kind == tokenString {
-			info.Tests = append(info.Tests, TestInfo{Name: tokens[index+2].Text, Framework: "javascript", Range: tokenRange(current)})
-		}
+		inspectJavaScriptImport(&info, tokens, index, current)
+		inspectJavaScriptRequire(&info, tokens, index, current)
+		inspectJavaScriptTest(&info, tokens, index, current)
 	}
 	return info, nil
+}
+
+// inspectJavaScriptImport records the first string of an "import" or "from"
+// clause as a dependency, trimming leading path punctuation.
+func inspectJavaScriptImport(info *SourceInfo, tokens []token, index int, current token) {
+	if current.Text != "import" && current.Text != "from" {
+		return
+	}
+	for cursor := index + 1; cursor < len(tokens) && tokens[cursor].Kind != tokenNewline; cursor++ {
+		if tokens[cursor].Kind == tokenString {
+			info.Dependencies = append(info.Dependencies, SourceDependency{Kind: Import, Name: strings.Trim(tokens[cursor].Text, "./"), Range: tokenRange(tokens[cursor])})
+			break
+		}
+	}
+}
+
+// inspectJavaScriptRequire records the string argument of a "require" call as a
+// runtime dependency.
+func inspectJavaScriptRequire(info *SourceInfo, tokens []token, index int, current token) {
+	if current.Text != "require" || index+2 >= len(tokens) || tokens[index+1].Text != "(" || tokens[index+2].Kind != tokenString {
+		return
+	}
+	info.Dependencies = append(info.Dependencies, SourceDependency{Kind: RuntimeImport, Name: strings.Trim(tokens[index+2].Text, "./"), Range: tokenRange(tokens[index+2])})
+}
+
+// inspectJavaScriptTest records the string label of a "test" or "it" call as a
+// test.
+func inspectJavaScriptTest(info *SourceInfo, tokens []token, index int, current token) {
+	if (current.Text != "test" && current.Text != "it") || index+2 >= len(tokens) || tokens[index+1].Text != "(" || tokens[index+2].Kind != tokenString {
+		return
+	}
+	info.Tests = append(info.Tests, TestInfo{Name: tokens[index+2].Text, Framework: "javascript", Range: tokenRange(current)})
 }
 
 func parseGeneric(request Request, language Language) (SourceInfo, []token, error) {

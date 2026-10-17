@@ -38,63 +38,51 @@ func isCompilationUnit(path string) bool {
 	}
 }
 
+// languageByExtension maps a lowercased file extension to the language that
+// extension holds. Extensions absent from the map report the empty Language.
+var languageByExtension = map[string]Language{
+	".c":    LanguageC,
+	".h":    LanguageHeader,
+	".hh":   LanguageHeader,
+	".hpp":  LanguageHeader,
+	".hxx":  LanguageHeader,
+	".inl":  LanguageHeader,
+	".ipp":  LanguageHeader,
+	".cc":   LanguageCXX,
+	".cpp":  LanguageCXX,
+	".cxx":  LanguageCXX,
+	".c++":  LanguageCXX,
+	".ixx":  LanguageCXX,
+	".cppm": LanguageCXX,
+	".cu":   LanguageCUDA,
+	".m":    LanguageObjectiveC,
+	".rs":   LanguageRust,
+	".go":   LanguageGo,
+	".py":   LanguagePython,
+	".pyw":  LanguagePython,
+	".js":   LanguageJavaScript,
+	".jsx":  LanguageJavaScript,
+	".mjs":  LanguageJavaScript,
+	".cjs":  LanguageJavaScript,
+	".ts":   LanguageTypeScript,
+	".tsx":  LanguageTypeScript,
+	".mts":  LanguageTypeScript,
+	".cts":  LanguageTypeScript,
+}
+
+// languageFor maps a path's extension to the language it holds, or "" when the
+// extension is not recognized.
 func languageFor(path string) Language {
-	switch strings.ToLower(filepath.Ext(path)) {
-	case ".c":
-		return LanguageC
-	case ".h", ".hh", ".hpp", ".hxx", ".inl", ".ipp":
-		return LanguageHeader
-	case ".cc", ".cpp", ".cxx", ".c++", ".ixx", ".cppm":
-		return LanguageCXX
-	case ".cu":
-		return LanguageCUDA
-	case ".m":
-		return LanguageObjectiveC
-	case ".rs":
-		return LanguageRust
-	case ".go":
-		return LanguageGo
-	case ".py", ".pyw":
-		return LanguagePython
-	case ".js", ".jsx", ".mjs", ".cjs":
-		return LanguageJavaScript
-	case ".ts", ".tsx", ".mts", ".cts":
-		return LanguageTypeScript
-	default:
-		return ""
-	}
+	return languageByExtension[strings.ToLower(filepath.Ext(path))]
 }
 
 func (p *Project) resolveIncludes(defines map[string]bool) {
-	paths := make([]string, 0, len(p.Sources))
-	for path := range p.Sources {
-		paths = append(paths, path)
-	}
-	sort.Strings(paths)
-	for _, path := range paths {
+	for _, path := range sortedSourcePaths(p.Sources) {
 		info := p.Sources[path]
 		for index := range info.Dependencies {
 			dependency := &info.Dependencies[index]
-			if dependency.Kind != LocalInclude {
-				continue
-			}
-			resolved := p.resolveInclude(path, dependency.Name)
-			if resolved != "" {
-				dependency.Resolved = resolved
-				p.Includes[path] = appendUnique(p.Includes[path], resolved)
-				p.Consumers[resolved] = appendUnique(p.Consumers[resolved], path)
-				if included, exists := p.Sources[resolved]; exists && included.Language == LanguageHeader {
-					consumerLanguage := info.Language
-					if consumerLanguage == LanguageHeader {
-						consumerLanguage = info.InferredLanguage
-					}
-					if included.InferredLanguage == "" {
-						included.InferredLanguage = consumerLanguage
-					} else if included.InferredLanguage != consumerLanguage && (included.InferredLanguage == LanguageCXX || consumerLanguage == LanguageCXX) {
-						included.InferredLanguage = LanguageCXX
-					}
-					p.Sources[resolved] = included
-				}
+			if dependency.Kind == LocalInclude {
+				p.resolveDependencyInclude(path, info, dependency)
 			}
 			active, _ := dependency.Condition.Evaluate(defines)
 			if !active {
@@ -103,6 +91,53 @@ func (p *Project) resolveIncludes(defines map[string]bool) {
 		}
 		p.Sources[path] = info
 	}
+}
+
+// sortedSourcePaths returns the project's source paths in lexical order so
+// include resolution is deterministic.
+func sortedSourcePaths(sources map[string]SourceInfo) []string {
+	paths := make([]string, 0, len(sources))
+	for path := range sources {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+	return paths
+}
+
+// resolveDependencyInclude resolves a local include against the project, then
+// records the include and consumer edges and propagates the consumer's language
+// onto the resolved header.
+func (p *Project) resolveDependencyInclude(source string, info SourceInfo, dependency *SourceDependency) {
+	resolved := p.resolveInclude(source, dependency.Name)
+	if resolved == "" {
+		return
+	}
+	dependency.Resolved = resolved
+	p.Includes[source] = appendUnique(p.Includes[source], resolved)
+	p.Consumers[resolved] = appendUnique(p.Consumers[resolved], source)
+	included, exists := p.Sources[resolved]
+	if !exists || included.Language != LanguageHeader {
+		return
+	}
+	consumerLanguage := info.Language
+	if consumerLanguage == LanguageHeader {
+		consumerLanguage = info.InferredLanguage
+	}
+	included.InferredLanguage = inferIncludedLanguage(included.InferredLanguage, consumerLanguage)
+	p.Sources[resolved] = included
+}
+
+// inferIncludedLanguage returns the inferred language for an included header:
+// the consumer's language when the header has none yet, C++ when the two
+// disagree across the C/C++ boundary, and otherwise the header's own value.
+func inferIncludedLanguage(included, consumerLanguage Language) Language {
+	if included == "" {
+		return consumerLanguage
+	}
+	if included != consumerLanguage && (included == LanguageCXX || consumerLanguage == LanguageCXX) {
+		return LanguageCXX
+	}
+	return included
 }
 
 func (p *Project) inferEntryTargets() {
@@ -172,29 +207,44 @@ func isTargetName(value string) bool {
 func (p Project) resolveInclude(source, name string) string {
 	cleanName := filepath.Clean(filepath.FromSlash(name))
 	if filepath.IsAbs(cleanName) {
-		if isFile(cleanName) {
-			return filepath.Clean(cleanName)
-		}
-		return ""
+		return cleanExistingFile(cleanName)
 	}
 	candidates := []string{filepath.Join(filepath.Dir(source), cleanName), filepath.Join(p.Root, cleanName), filepath.Join(p.Root, "include", cleanName)}
 	for _, candidate := range candidates {
-		if isFile(candidate) {
-			return filepath.Clean(candidate)
+		if resolved := cleanExistingFile(candidate); resolved != "" {
+			return resolved
 		}
 	}
 	if runtime.GOOS == "windows" {
-		for _, directory := range []string{filepath.Dir(source), p.Root, filepath.Join(p.Root, "include")} {
-			entries, err := os.ReadDir(directory)
-			if err != nil {
+		directories := []string{filepath.Dir(source), p.Root, filepath.Join(p.Root, "include")}
+		return findCaseInsensitiveInclude(directories, cleanName)
+	}
+	return ""
+}
+
+// cleanExistingFile returns the cleaned path when it names an existing file, and
+// "" otherwise.
+func cleanExistingFile(path string) string {
+	if isFile(path) {
+		return filepath.Clean(path)
+	}
+	return ""
+}
+
+// findCaseInsensitiveInclude returns the existing file under one of the
+// directories whose name matches cleanName ignoring case, which Windows headers
+// require, or "" when none matches.
+func findCaseInsensitiveInclude(directories []string, cleanName string) string {
+	for _, directory := range directories {
+		entries, err := os.ReadDir(directory)
+		if err != nil {
+			continue
+		}
+		for _, entry := range entries {
+			if entry.IsDir() || !strings.EqualFold(filepath.Clean(filepath.Join(directory, entry.Name())), filepath.Clean(filepath.Join(directory, cleanName))) {
 				continue
 			}
-			for _, entry := range entries {
-				if entry.IsDir() || !strings.EqualFold(filepath.Clean(filepath.Join(directory, entry.Name())), filepath.Clean(filepath.Join(directory, cleanName))) {
-					continue
-				}
-				return filepath.Join(directory, entry.Name())
-			}
+			return filepath.Join(directory, entry.Name())
 		}
 	}
 	return ""
