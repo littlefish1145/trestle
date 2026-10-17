@@ -1,3 +1,5 @@
+// Package diag defines Trestle's structured error type along with the rendering
+// and enrichment helpers that turn raw failures into actionable diagnostics.
 package diag
 
 import (
@@ -7,8 +9,11 @@ import (
 	"strings"
 )
 
+// Stage names the pipeline phase an error belongs to, so diagnostics can point
+// at the right subsystem.
 type Stage string
 
+// The pipeline stages an error can be attributed to.
 const (
 	StageConfig     Stage = "config"
 	StageToolchain  Stage = "toolchain"
@@ -18,6 +23,8 @@ const (
 	StageBuild      Stage = "build"
 )
 
+// Error is a structured diagnostic. Fields are filled in as the error
+// propagates, and Render prints whichever are set.
 type Error struct {
 	Code    string
 	Stage   Stage
@@ -29,6 +36,8 @@ type Error struct {
 	Cause   error
 }
 
+// Error renders the code and summary as the single-line form required by the
+// error interface, falling back to the cause when no summary was set.
 func (e *Error) Error() string {
 	message := e.Summary
 	if message == "" && e.Cause != nil {
@@ -40,12 +49,16 @@ func (e *Error) Error() string {
 	return message
 }
 
+// Unwrap exposes the underlying cause so errors.Is and errors.As can reach it.
 func (e *Error) Unwrap() error { return e.Cause }
 
+// New builds a structured error from a code, stage, summary and cause.
 func New(code string, stage Stage, summary string, cause error) *Error {
 	return &Error{Code: code, Stage: stage, Summary: summary, Cause: cause}
 }
 
+// Render writes a human-readable diagnostic block to writer. A nil error emits
+// nothing, and a plain error is printed on a single line.
 func Render(writer io.Writer, err error) {
 	if err == nil {
 		return

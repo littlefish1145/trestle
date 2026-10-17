@@ -6,6 +6,8 @@ import (
 	"strings"
 )
 
+// Text renders an error to a string with no trailing newline, for callers that
+// manage their own spacing.
 func Text(err error) string {
 	var buffer bytes.Buffer
 	Render(&buffer, err)
