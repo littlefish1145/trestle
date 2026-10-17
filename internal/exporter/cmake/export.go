@@ -16,12 +16,17 @@ import (
 	"trestle/internal/fsx"
 )
 
+// Options configures a CMake export. Root is the project directory that source
+// globs resolve against.
 type Options struct {
 	// Root is the project directory that source globs resolve against.
 	// It defaults to the directory of the loaded configuration.
 	Root string
 }
 
+// Result is the generated CMakeLists.txt content plus the number of exported
+// targets and any warnings about content that could only be preserved as
+// comments.
 type Result struct {
 	Content  string
 	Targets  int
