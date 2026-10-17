@@ -22,6 +22,8 @@ import (
 	"trestle/internal/processx"
 )
 
+// Record is the persisted metadata of one operation run: what ran, when, its
+// status, and where the full log lives.
 type Record struct {
 	ID          string     `json:"id"`
 	Operation   string     `json:"operation"`
@@ -33,6 +35,8 @@ type Record struct {
 	Error       string     `json:"error,omitempty"`
 }
 
+// Run is one live operation: its record, the log file being written, and the
+// lock that marks it active.
 type Run struct {
 	Record Record
 	path   string
@@ -42,6 +46,8 @@ type Run struct {
 	err    error
 }
 
+// Start begins a new operation run, creating its log directory and active lock
+// under the project's .trestle/runs directory.
 func Start(configPath, operation string) (*Run, error) {
 	root, err := filepath.Abs(filepath.Join(filepath.Dir(configPath), ".trestle", "runs"))
 	if err != nil {
@@ -88,6 +94,8 @@ func (run *Run) save() error {
 	return fsx.AtomicWrite(run.path, append(data, '\n'))
 }
 
+// Write appends data to the run log, flushing it to disk and recording the
+// first write error for Finish to report.
 func (run *Run) Write(data []byte) (int, error) {
 	run.mu.Lock()
 	defer run.mu.Unlock()
@@ -104,8 +112,11 @@ func (run *Run) Write(data []byte) (int, error) {
 	return n, err
 }
 
+// Err returns the first write error the run encountered, if any.
 func (run *Run) Err() error { run.mu.Lock(); defer run.mu.Unlock(); return run.err }
 
+// Finish closes the run's log, records its terminal status derived from result,
+// and releases the active lock.
 func (run *Run) Finish(result error) error {
 	run.mu.Lock()
 	defer run.mu.Unlock()
@@ -139,6 +150,8 @@ func (run *Run) Finish(result error) error {
 	return errors.Join(run.err, run.save())
 }
 
+// List returns every recorded run for the project, newest first, marking runs
+// whose owning process has disappeared as interrupted.
 func List(configPath string) ([]Record, error) {
 	root := filepath.Join(filepath.Dir(configPath), ".trestle", "runs")
 	entries, err := os.ReadDir(root)
@@ -192,6 +205,8 @@ type Reader struct {
 	trailing bool
 }
 
+// Refresh rereads the log file and rebuilds the byte-offset index of its lines,
+// reusing prior work when the file has only grown.
 func (reader *Reader) Refresh() error {
 	file, err := os.Open(reader.Path)
 	if err != nil {
@@ -234,6 +249,7 @@ func (reader *Reader) Refresh() error {
 	return nil
 }
 
+// Count returns the number of complete lines currently in the log.
 func (reader *Reader) Count() int {
 	count := len(reader.offsets)
 	if reader.trailing {
@@ -241,6 +257,9 @@ func (reader *Reader) Count() int {
 	}
 	return count
 }
+
+// Page returns up to count lines starting at the zero-based line index start,
+// refreshing the index from the file first.
 func (reader *Reader) Page(start, count int) ([]string, error) {
 	if err := reader.Refresh(); err != nil {
 		return nil, err
@@ -276,6 +295,8 @@ func (reader *Reader) Page(start, count int) ([]string, error) {
 	return lines, nil
 }
 
+// LogError wraps a log-writing failure as a structured diagnostic that points
+// at the affected log path.
 func LogError(path string, cause error) error {
 	e := diag.New("E_LOG_WRITE", diag.StageBuild, "cannot save complete operation log", cause)
 	e.LogPath = path
@@ -283,6 +304,8 @@ func LogError(path string, cause error) error {
 	return e
 }
 
+// Find returns the index of the first line at or after start containing query
+// case-insensitively, or -1 when there is no match.
 func (reader *Reader) Find(query string, start int) (int, error) {
 	if err := reader.Refresh(); err != nil {
 		return -1, err
