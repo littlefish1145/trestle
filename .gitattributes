@@ -1,0 +1,9 @@
+# Normalize text files when staging so diffs stay stable across platforms.
+* text=auto
+
+# Go tooling (gofmt) is line-ending sensitive: always use LF for Go sources
+# so checkouts are identical on Windows, macOS and Linux.
+*.go text eol=lf
+
+# Binary assets must never be treated as text.
+*.png binary

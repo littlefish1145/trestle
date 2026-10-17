@@ -215,9 +215,17 @@ func journalServices(journal *callJournal) Services {
 		}
 	}
 	return Services{
-		Build:             C("Build", 2),
-		BuildTargets:      func(ctx context.Context, targets []string, all bool, progress func(string)) error { journal.hit("BuildTargets"); progress("progress targets"); return ctx.Err() },
-		BuildTargetsForce: func(ctx context.Context, targets []string, all bool, progress func(string)) error { journal.hit("BuildTargetsForce"); progress("progress force"); return ctx.Err() },
+		Build: C("Build", 2),
+		BuildTargets: func(ctx context.Context, targets []string, all bool, progress func(string)) error {
+			journal.hit("BuildTargets")
+			progress("progress targets")
+			return ctx.Err()
+		},
+		BuildTargetsForce: func(ctx context.Context, targets []string, all bool, progress func(string)) error {
+			journal.hit("BuildTargetsForce")
+			progress("progress force")
+			return ctx.Err()
+		},
 		AssessTargets: func(context.Context) (config.Config, map[string]policy.Status, policy.Report, error) {
 			journal.hit("AssessTargets")
 			return config.Default("demo"), map[string]policy.Status{"app": {}}, policy.Report{}, nil
@@ -231,14 +239,14 @@ func journalServices(journal *callJournal) Services {
 			progress("progress task")
 			return ctx.Err()
 		},
-		AddPackage:        V("AddPackage"),
+		AddPackage: V("AddPackage"),
 		InstallPackage: func(ctx context.Context, name string, progress func(string)) error {
 			journal.hit("InstallPackage:" + name)
 			progress("progress install")
 			return ctx.Err()
 		},
-		SetProfile:        V("SetProfile"),
-		SetCompileFlags:   V("SetCompileFlags"),
+		SetProfile:      V("SetProfile"),
+		SetCompileFlags: V("SetCompileFlags"),
 		SearchPackages: func(context.Context, string) ([]deps.PackageEntry, error) {
 			journal.hit("SearchPackages")
 			return []deps.PackageEntry{{Name: "fmt", Version: "11.2.0", Provider: "vcpkg", Source: "current"}}, nil
@@ -252,7 +260,11 @@ func journalServices(journal *callJournal) Services {
 		SetCUDAConnection: func(enabled bool, root, execution, dist string) error { journal.hit("SetCUDAConnection"); return nil },
 		SetVulkan:         func(enabled bool, root, execution, dist string) error { journal.hit("SetVulkan"); return nil },
 		SetTestGroup:      func(name, value string) error { journal.hit("SetTestGroup"); return nil },
-		RunTests:          func(ctx context.Context, selection TestSelection, progress func(string)) error { journal.hit("RunTests"); progress("progress tests"); return ctx.Err() },
+		RunTests: func(ctx context.Context, selection TestSelection, progress func(string)) error {
+			journal.hit("RunTests")
+			progress("progress tests")
+			return ctx.Err()
+		},
 		ImportCMake:       C("ImportCMake", 1),
 		ImportXmake:       C("ImportXmake", 1),
 		SetLanguageFlags:  func(language, value string) error { journal.hit("SetLanguageFlags:" + language); return nil },
@@ -261,9 +273,12 @@ func journalServices(journal *callJournal) Services {
 		SetDefaultTargets: func(targets []string) error { journal.hit("SetDefaultTargets"); return nil },
 		SetProjectSetting: func(key, value string) error { journal.hit("SetProjectSetting:" + key); return nil },
 		DeletePreset:      V("DeletePreset"),
-		ConfigureRelease:  func(optimization string, targets []string, output string) error { journal.hit("ConfigureRelease"); return nil },
-		Release:           C("Release", 1),
-		Doctor:            C("Doctor", 1),
+		ConfigureRelease: func(optimization string, targets []string, output string) error {
+			journal.hit("ConfigureRelease")
+			return nil
+		},
+		Release: C("Release", 1),
+		Doctor:  C("Doctor", 1),
 	}
 }
 
