@@ -264,21 +264,7 @@ func (p *Probe) checkPath(path string, directory bool) error {
 
 func (p *Probe) probePath(mode, distribution, path string, directory bool) error {
 	if mode == "wsl" && strings.HasPrefix(path, "/") {
-		ctx, cancel := context.WithTimeout(p.ctx, 4*time.Second)
-		defer cancel()
-		wsl, base, err := toolchain.WSLRunner(distribution)
-		if err != nil {
-			return err
-		}
-		check := "-f"
-		if directory {
-			check = "-d"
-		}
-		args := append(append([]string{}, base...), "--exec", "sh", "-lc", `test "$1" "$2"`, "trestle", check, path)
-		if err := exec.CommandContext(ctx, wsl, args...).Run(); err != nil {
-			return err
-		}
-		return nil
+		return p.probeWSLPath(distribution, path, directory)
 	}
 	if !filepath.IsAbs(path) {
 		path = filepath.Join(p.root, path)
@@ -292,6 +278,26 @@ func (p *Probe) probePath(mode, distribution, path string, directory bool) error
 	}
 	if !directory && !info.Mode().IsRegular() {
 		return fmt.Errorf("not a regular file")
+	}
+	return nil
+}
+
+// probeWSLPath checks for a file or directory on the Linux side of a WSL
+// distribution, where the path can only be tested through a shell inside it.
+func (p *Probe) probeWSLPath(distribution, path string, directory bool) error {
+	ctx, cancel := context.WithTimeout(p.ctx, 4*time.Second)
+	defer cancel()
+	wsl, base, err := toolchain.WSLRunner(distribution)
+	if err != nil {
+		return err
+	}
+	check := "-f"
+	if directory {
+		check = "-d"
+	}
+	args := append(append([]string{}, base...), "--exec", "sh", "-lc", `test "$1" "$2"`, "trestle", check, path)
+	if err := exec.CommandContext(ctx, wsl, args...).Run(); err != nil {
+		return err
 	}
 	return nil
 }
@@ -489,8 +495,34 @@ func ApplyAt(ctx context.Context, source config.Config, root string) (config.Con
 // ApplyWithReportAt resolves rules and returns a detailed report of matched
 // rules and changes alongside the resulting configuration.
 func ApplyWithReportAt(ctx context.Context, source config.Config, root string) (config.Config, Report, error) {
-	cfg := source
+	cfg := cloneConfigForRules(source)
 	report := Report{}
+	p := NewProbeAt(ctx, cfg, root)
+	for index, rule := range source.Rules {
+		result := RuleResult{Index: index + 1, When: rule.When, Target: rule.Target}
+		match, err := condition.Evaluate(rule.When, p.facts(cfg.Toolchain.Mode, cfg.Toolchain.WSLDistribution))
+		if err != nil {
+			return cfg, report, fmt.Errorf("rule %d: %w", index+1, err)
+		}
+		result.Matched = match
+		if match {
+			before := ruleValues(cfg)
+			applyRule(&cfg, rule)
+			result.Changes = diffRuleValues(before, ruleValues(cfg))
+		}
+		report.Rules = append(report.Rules, result)
+	}
+	if err := config.Validate(cfg); err != nil {
+		return cfg, report, fmt.Errorf("resolved rules: %w", err)
+	}
+	report.Changes = diffRuleValues(ruleValues(source), ruleValues(cfg))
+	return cfg, report, nil
+}
+
+// cloneConfigForRules copies the slices a rule can append to, so applying rules
+// never mutates the caller's configuration.
+func cloneConfigForRules(source config.Config) config.Config {
+	cfg := source
 	cfg.Targets = make(map[string]config.Target, len(source.Targets))
 	for name, target := range source.Targets {
 		target.Dependencies = append([]config.Dependency(nil), target.Dependencies...)
@@ -504,80 +536,73 @@ func ApplyWithReportAt(ctx context.Context, source config.Config, root string) (
 	cfg.Build.CFlags = append([]string(nil), source.Build.CFlags...)
 	cfg.Build.CXXFlags = append([]string(nil), source.Build.CXXFlags...)
 	cfg.Build.LinkFlags = append([]string(nil), source.Build.LinkFlags...)
-	p := NewProbeAt(ctx, cfg, root)
-	for index, rule := range source.Rules {
-		result := RuleResult{Index: index + 1, When: rule.When, Target: rule.Target}
-		match, err := condition.Evaluate(rule.When, p.facts(cfg.Toolchain.Mode, cfg.Toolchain.WSLDistribution))
-		if err != nil {
-			return cfg, report, fmt.Errorf("rule %d: %w", index+1, err)
-		}
-		result.Matched = match
-		if !match {
-			report.Rules = append(report.Rules, result)
-			continue
-		}
-		before := ruleValues(cfg)
-		if rule.C != "" {
-			cfg.Toolchain.C = rule.C
-		}
-		if rule.CXX != "" {
-			cfg.Toolchain.CXX = rule.CXX
-		}
-		if rule.Mode != "" {
-			cfg.Toolchain.Mode = rule.Mode
-		}
-		if rule.WSL != "" {
-			cfg.Toolchain.WSLDistribution = rule.WSL
-		}
-		if rule.Target == "" {
-			cfg.Build.CompileFlags = append(cfg.Build.CompileFlags, rule.CompileFlags...)
-			cfg.Build.CFlags = append(cfg.Build.CFlags, rule.CFlags...)
-			cfg.Build.CXXFlags = append(cfg.Build.CXXFlags, rule.CXXFlags...)
-			cfg.Build.LinkFlags = append(cfg.Build.LinkFlags, rule.LinkFlags...)
-		}
-		if rule.Target != "" {
-			target := cfg.Targets[rule.Target]
-			target.CompileOptions = append(target.CompileOptions, rule.CompileFlags...)
-			target.CFlags = append(target.CFlags, rule.CFlags...)
-			target.CXXFlags = append(target.CXXFlags, rule.CXXFlags...)
-			target.LinkOptions = append(target.LinkOptions, rule.LinkFlags...)
-			for _, name := range rule.Packages {
-				found := false
-				for _, dep := range target.Dependencies {
-					if dep.Package == name {
-						found = true
-						break
-					}
-				}
-				if !found {
-					target.Dependencies = append(target.Dependencies, config.Dependency{Package: name, Scope: "private"})
-				}
-			}
-			for _, name := range rule.DependsOn {
-				found := false
-				for _, dep := range target.Dependencies {
-					if dep.Target == name {
-						found = true
-						break
-					}
-				}
-				if !found {
-					target.Dependencies = append(target.Dependencies, config.Dependency{Target: name, Scope: "private"})
-				}
-			}
-			cfg.Targets[rule.Target] = target
-		}
-		if len(rule.Targets) > 0 {
-			cfg.Build.DefaultTargets = append([]string(nil), rule.Targets...)
-		}
-		result.Changes = diffRuleValues(before, ruleValues(cfg))
-		report.Rules = append(report.Rules, result)
+	return cfg
+}
+
+// applyRule mutates cfg with one matched rule's compiler, mode and flag
+// overrides, plus its target-scoped flags, packages and dependencies.
+func applyRule(cfg *config.Config, rule config.Rule) {
+	if rule.C != "" {
+		cfg.Toolchain.C = rule.C
 	}
-	if err := config.Validate(cfg); err != nil {
-		return cfg, report, fmt.Errorf("resolved rules: %w", err)
+	if rule.CXX != "" {
+		cfg.Toolchain.CXX = rule.CXX
 	}
-	report.Changes = diffRuleValues(ruleValues(source), ruleValues(cfg))
-	return cfg, report, nil
+	if rule.Mode != "" {
+		cfg.Toolchain.Mode = rule.Mode
+	}
+	if rule.WSL != "" {
+		cfg.Toolchain.WSLDistribution = rule.WSL
+	}
+	if rule.Target == "" {
+		cfg.Build.CompileFlags = append(cfg.Build.CompileFlags, rule.CompileFlags...)
+		cfg.Build.CFlags = append(cfg.Build.CFlags, rule.CFlags...)
+		cfg.Build.CXXFlags = append(cfg.Build.CXXFlags, rule.CXXFlags...)
+		cfg.Build.LinkFlags = append(cfg.Build.LinkFlags, rule.LinkFlags...)
+	}
+	if rule.Target != "" {
+		target := cfg.Targets[rule.Target]
+		target.CompileOptions = append(target.CompileOptions, rule.CompileFlags...)
+		target.CFlags = append(target.CFlags, rule.CFlags...)
+		target.CXXFlags = append(target.CXXFlags, rule.CXXFlags...)
+		target.LinkOptions = append(target.LinkOptions, rule.LinkFlags...)
+		for _, name := range rule.Packages {
+			if !hasPackageDependency(target.Dependencies, name) {
+				target.Dependencies = append(target.Dependencies, config.Dependency{Package: name, Scope: "private"})
+			}
+		}
+		for _, name := range rule.DependsOn {
+			if !hasTargetDependency(target.Dependencies, name) {
+				target.Dependencies = append(target.Dependencies, config.Dependency{Target: name, Scope: "private"})
+			}
+		}
+		cfg.Targets[rule.Target] = target
+	}
+	if len(rule.Targets) > 0 {
+		cfg.Build.DefaultTargets = append([]string(nil), rule.Targets...)
+	}
+}
+
+// hasPackageDependency reports whether dependencies already contains a package
+// dependency on name, keeping rule application idempotent.
+func hasPackageDependency(dependencies []config.Dependency, name string) bool {
+	for _, dep := range dependencies {
+		if dep.Package == name {
+			return true
+		}
+	}
+	return false
+}
+
+// hasTargetDependency reports whether dependencies already contains a target
+// dependency on name, keeping rule application idempotent.
+func hasTargetDependency(dependencies []config.Dependency, name string) bool {
+	for _, dep := range dependencies {
+		if dep.Target == name {
+			return true
+		}
+	}
+	return false
 }
 
 func ruleValues(cfg config.Config) map[string]string {
@@ -648,135 +673,11 @@ func AssessAt(ctx context.Context, cfg config.Config, root string) map[string]St
 func AssessWithToolchainAt(ctx context.Context, cfg config.Config, root string) (map[string]Status, toolchain.Toolchain, error) {
 	p := NewProbeAt(ctx, cfg, root)
 	_, ninjaErr := exec.LookPath("ninja")
-	results := map[string]Status{}
-	var visit func(string) Status
-	visiting := map[string]bool{}
-	visit = func(name string) Status {
-		if status, ok := results[name]; ok {
-			return status
-		}
-		if visiting[name] {
-			return Status{Ready: false, Reasons: []string{"target dependency cycle"}}
-		}
-		visiting[name] = true
-		target := cfg.Targets[name]
-		var reasons []string
-		sources, sourceReasons := p.resolveSources(target.Sources)
-		reasons = append(reasons, sourceReasons...)
-		if target.Type != "shader" {
-			for _, path := range append(append([]string{}, target.IncludeDirs...), target.PrivateIncludeDirs...) {
-				if err := p.checkPath(path, true); err != nil {
-					reasons = append(reasons, fmt.Sprintf("include directory is unavailable: %s (%v)", path, err))
-				}
-			}
-			for _, path := range target.LibraryDirs {
-				if err := p.checkPath(path, true); err != nil {
-					reasons = append(reasons, fmt.Sprintf("library directory is unavailable: %s (%v)", path, err))
-				}
-			}
-		}
-		needsC, needsCUDA := false, false
-		if target.Type != "shader" {
-			for _, source := range sources {
-				switch strings.ToLower(filepath.Ext(source)) {
-				case ".c":
-					needsC = true
-				case ".cu":
-					needsCUDA = true
-				}
-			}
-		}
-		if ninjaErr != nil {
-			reasons = append(reasons, "host Ninja executable is unavailable")
-		}
-		mode, distribution := cfg.Toolchain.Mode, cfg.Toolchain.WSLDistribution
-		match, err := condition.Evaluate(target.When, p.facts(mode, distribution))
-		if err != nil {
-			reasons = append(reasons, err.Error())
-		} else if !match {
-			reasons = append(reasons, "condition not met: "+target.When)
-		}
-		if target.RequiresWSL != "" && !p.hasWSL(target.RequiresWSL) {
-			reasons = append(reasons, "WSL distribution unavailable: "+target.RequiresWSL)
-		}
-		if target.RequiresWSL != "" && (mode != "wsl" || target.RequiresWSL != distribution) {
-			reasons = append(reasons, "requires WSL toolchain in "+target.RequiresWSL)
-		}
-		if mode == "wsl" && !p.hasWSL(distribution) {
-			reasons = append(reasons, "configured WSL distribution unavailable: "+fallback(distribution, "default"))
-		}
-		var tc toolchain.Toolchain
-		var tcErr error
-		needsResolvedToolchain := target.Type != "shader" || cfg.Toolchain.CUDA != "" || cfg.Toolchain.CUDARoot != "" || cfg.Build.Modules
-		if needsResolvedToolchain {
-			tc, tcErr = p.resolveToolchain()
-			if tcErr != nil {
-				reasons = append(reasons, "configured toolchain unavailable: "+tcErr.Error())
-			}
-		}
-		cCompiler := tc.CC
-		if cCompiler == "" {
-			cCompiler = tc.CXX
-		}
-		if needsC && tcErr == nil && !p.tool(mode, distribution, cCompiler) {
-			reasons = append(reasons, "C compiler unavailable: "+fallback(cCompiler, "no C compiler resolved from the selected toolchain"))
-		}
-		if target.Type == "static" && tcErr == nil && !p.tool(mode, distribution, tc.Archiver) {
-			reasons = append(reasons, "static target archiver unavailable: "+fallback(tc.Archiver, "no archiver resolved from the selected toolchain"))
-		}
-		linker := tc.Linker
-		if linker == "" {
-			linker = tc.CXX
-		}
-		if (target.Type == "shared" || target.Type == "executable" || target.Type == "test") && tcErr == nil && !p.tool(mode, distribution, linker) {
-			reasons = append(reasons, "target linker unavailable: "+fallback(linker, "no linker resolved from the selected toolchain"))
-		}
-		cudaConfigured := cfg.Toolchain.CUDA != "" || cfg.Toolchain.CUDARoot != ""
-		if needsCUDA && !cudaConfigured {
-			reasons = append(reasons, "CUDA source requires [toolchain].cuda to pin a CUDA version range such as 12.0~12.9")
-		}
-		if cudaConfigured && tcErr == nil {
-			if err := p.checkCUDA(tc); err != nil {
-				reasons = append(reasons, "CUDA toolchain unavailable: "+err.Error())
-			}
-		}
-		if target.Type == "shader" {
-			if err := p.checkVulkan(target); err != nil {
-				reasons = append(reasons, "Vulkan shader toolchain unavailable: "+err.Error())
-			}
-		}
-		if cfg.Build.Modules {
-			if tcErr == nil && tc.Kind != toolchain.Clang {
-				reasons = append(reasons, "C++ modules require Clang; selected toolchain is "+string(tc.Kind))
-			}
-			if err := p.checkModuleScanner(); err != nil {
-				reasons = append(reasons, "module scanner unavailable: "+err.Error())
-			}
-		}
-		for _, name := range target.RequiresTools {
-			if !p.tool(mode, distribution, name) {
-				reasons = append(reasons, "missing "+mode+" tool: "+name)
-			}
-		}
-		for _, dep := range target.Dependencies {
-			if dep.Package != "" && !p.hasPackage(dep.Package) {
-				reasons = append(reasons, "package unavailable: "+dep.Package+": "+p.packageErrors[dep.Package])
-			}
-			if dep.Target != "" {
-				for _, reason := range visit(dep.Target).Reasons {
-					reasons = append(reasons, "dependency "+dep.Target+": "+reason)
-				}
-			}
-		}
-		status := Status{Ready: len(reasons) == 0, Reasons: reasons}
-		results[name] = status
-		delete(visiting, name)
-		return status
-	}
+	a := &assessor{probe: p, cfg: cfg, ninjaErr: ninjaErr, results: map[string]Status{}, visiting: map[string]bool{}}
 	for name := range cfg.Targets {
-		visit(name)
+		a.visit(name)
 	}
-	return results, p.toolchainResult, p.toolchainError
+	return a.results, p.toolchainResult, p.toolchainError
 }
 
 func fallback(value, replacement string) string {
