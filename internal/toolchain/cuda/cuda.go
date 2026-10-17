@@ -1,3 +1,5 @@
+// Package cuda detects an NVIDIA CUDA toolkit and builds the nvcc command lines
+// needed to compile and device-link kernels, paired with a host C++ toolchain.
 package cuda
 
 import (
@@ -13,13 +15,17 @@ import (
 	"trestle/internal/toolchain"
 )
 
+// CompileMode selects how nvcc treats device code across translation units.
 type CompileMode uint8
 
+// The nvcc compilation strategies: one whole-program pass, or per-file separate
+// compilation followed by a device link.
 const (
 	WholeProgram CompileMode = iota
 	SeparateCompilation
 )
 
+// Capabilities reports which CUDA features are usable for a toolchain.
 type Capabilities struct {
 	NVCC                bool
 	HostPairing         bool
@@ -27,16 +33,20 @@ type Capabilities struct {
 	SeparateCompilation bool
 }
 
+// Toolkit is a CUDA installation root together with the version it provides.
 type Toolkit struct {
 	Root    string
 	Version string
 }
 
+// NVCC is a located nvcc executable and the version banner it reports.
 type NVCC struct {
 	Path    string
 	Version string
 }
 
+// Toolchain pairs an nvcc installation with the host C++ toolchain it compiles
+// against, plus the target architectures and compilation mode in effect.
 type Toolchain struct {
 	NVCC          NVCC
 	Host          toolchain.Toolchain
@@ -45,10 +55,15 @@ type Toolchain struct {
 	Mode          CompileMode
 }
 
+// Detect discovers the CUDA toolkit under root, or under the CUDA_PATH and
+// CUDA_HOME environment variables when root is empty, and pairs it with an
+// auto-detected host compiler.
 func Detect(ctx context.Context, root string) (Toolchain, error) {
 	return detect(ctx, root, nil)
 }
 
+// DetectWithHost is Detect with an explicit host toolchain instead of an
+// auto-detected one.
 func DetectWithHost(ctx context.Context, root string, host toolchain.Toolchain) (Toolchain, error) {
 	return detect(ctx, root, &host)
 }
@@ -133,6 +148,8 @@ func firstLine(value string) string {
 	return strings.TrimSpace(lines[0])
 }
 
+// Capabilities probes the toolchain to report which CUDA features are
+// available, including whether nvcc accepts the host compiler.
 func (tc Toolchain) Capabilities(ctx context.Context) Capabilities {
 	result := Capabilities{NVCC: tc.NVCC.Path != "", WholeProgram: tc.Mode == WholeProgram, SeparateCompilation: tc.Mode == SeparateCompilation}
 	if err := ProbeHost(ctx, tc); err == nil {
@@ -141,6 +158,8 @@ func (tc Toolchain) Capabilities(ctx context.Context) Capabilities {
 	return result
 }
 
+// Compile builds the nvcc argument vector that compiles one CUDA source file
+// for the toolchain's target architectures.
 func (tc Toolchain) Compile(spec toolchain.CompileSpec) (string, []string, error) {
 	args := []string{"-ccbin", tc.Host.CXX, "-x", "cu"}
 	if spec.CXXStandard != "" {
@@ -173,6 +192,8 @@ func includeArgs(includes []string) []string {
 	return result
 }
 
+// DeviceLink builds the nvcc -dlink argument vector that links separately
+// compiled device code into a single object.
 func (tc Toolchain) DeviceLink(objects []string, output string) (string, []string, error) {
 	args := []string{"-ccbin", tc.Host.CXX, "-dlink"}
 	args = append(args, objects...)
@@ -181,10 +202,14 @@ func (tc Toolchain) DeviceLink(objects []string, output string) (string, []strin
 	return exe, args, nil
 }
 
+// HostLink links the given objects with the host toolchain, producing a shared
+// library when shared is set.
 func (tc Toolchain) HostLink(objects []string, output string, shared bool) (string, []string, error) {
 	return tc.Host.Link(toolchain.LinkSpec{Inputs: objects, Output: output, Shared: shared})
 }
 
+// ProbeHost compiles a tiny kernel with nvcc -ccbin to verify that the host
+// compiler is usable with the toolkit, returning an error otherwise.
 func ProbeHost(ctx context.Context, tc Toolchain) error {
 	dir, err := os.MkdirTemp("", "trestle-cuda-probe-")
 	if err != nil {
