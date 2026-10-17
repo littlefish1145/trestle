@@ -1,3 +1,5 @@
+// Package vulkan locates a Vulkan SDK and builds the shader compiler command
+// lines used to translate GLSL sources into SPIR-V.
 package vulkan
 
 import (
@@ -13,8 +15,10 @@ import (
 	"trestle/internal/toolchain"
 )
 
+// Stage is a Vulkan shader stage, spelled as the glslang stage suffix.
 type Stage string
 
+// The shader stages trestle can compile, named by their glslang suffixes.
 const (
 	Vertex         Stage = "vert"
 	Fragment       Stage = "frag"
@@ -24,6 +28,8 @@ const (
 	TessEvaluation Stage = "tese"
 )
 
+// SDK is a discovered Vulkan installation: its root, version, include and
+// library directories, and the shader tools found within it.
 type SDK struct {
 	Root        string
 	Version     string
@@ -35,6 +41,7 @@ type SDK struct {
 	RunnerArgs  []string
 }
 
+// Detect locates the Vulkan SDK named by the VULKAN_SDK environment variable.
 func Detect() (SDK, error) {
 	root := os.Getenv("VULKAN_SDK")
 	if root == "" {
@@ -43,6 +50,7 @@ func Detect() (SDK, error) {
 	return DetectRoot(root)
 }
 
+// DetectRoot locates a Vulkan SDK at an explicit root directory.
 func DetectRoot(root string) (SDK, error) {
 	root = strings.TrimSpace(root)
 	if root == "" {
@@ -98,6 +106,8 @@ func DetectWSL(ctx context.Context, distribution, root string) (SDK, error) {
 	return sdk, nil
 }
 
+// WithWSLDirectory returns a copy of the SDK that runs its tools from directory
+// inside the WSL distribution.
 func WithWSLDirectory(sdk SDK, directory string) SDK {
 	if sdk.Runner == "" || strings.TrimSpace(directory) == "" {
 		return sdk
@@ -141,6 +151,7 @@ func findTool(root, name string) string {
 	return ""
 }
 
+// ShaderSpec describes one shader to compile into a SPIR-V module.
 type ShaderSpec struct {
 	Source     string
 	Output     string
@@ -152,6 +163,7 @@ type ShaderSpec struct {
 	Tool       string
 }
 
+// ShaderCommand is a resolved program and argument vector ready to execute.
 type ShaderCommand struct {
 	Exe  string
 	Args []string
@@ -161,6 +173,8 @@ func toolBase(value string) string {
 	return path.Base(filepath.ToSlash(value))
 }
 
+// Compile builds the shader-compiler command for spec, preferring glslc and
+// falling back to glslangValidator.
 func (sdk SDK) Compile(spec ShaderSpec) (ShaderCommand, error) {
 	tool := spec.Tool
 	if tool == "" {
@@ -206,6 +220,8 @@ func (sdk SDK) Compile(spec ShaderSpec) (ShaderCommand, error) {
 	return ShaderCommand{Exe: exe, Args: args}, nil
 }
 
+// Link returns the command that links the given shader modules into a single
+// module named name.
 func (sdk SDK) Link(name string, inputs []string) (string, error) {
 	if name == "" {
 		return "", fmt.Errorf("shader link name is required")
