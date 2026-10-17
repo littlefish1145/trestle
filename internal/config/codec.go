@@ -132,12 +132,27 @@ func Snapshot(path string) (string, error) {
 	return Fingerprint(data), nil
 }
 
+// normalize fills in every omitted setting and rewrites project-local paths
+// relative to root, so a decoded configuration is complete before validation.
 func (c *Config) normalize(root string) error {
 	absoluteRoot, err := filepath.Abs(root)
 	if err != nil {
 		return err
 	}
-	root = absoluteRoot
+	normalizePath := relativePathNormalizer(absoluteRoot)
+	c.applyDefaults()
+	c.repairWSLToolchain()
+	c.normalizeRootPaths(normalizePath)
+	c.normalizeTargets(normalizePath)
+	c.normalizePackages()
+	c.selectDefaultTargets()
+	c.applyPackagingDefaults(normalizePath)
+	return nil
+}
+
+// applyDefaults fills empty scalar settings and nil collections with the values
+// a fresh configuration uses.
+func (c *Config) applyDefaults() {
 	if c.Build.Profile == "" {
 		c.Build.Profile = "debug"
 	}
@@ -158,12 +173,6 @@ func (c *Config) normalize(root string) error {
 	}
 	if c.Toolchain.Mode == "" {
 		c.Toolchain.Mode = "native"
-	}
-	// Heal configurations created by the old TUI mode toggle. A Windows
-	// compiler cannot be executed inside WSL; WSL compilers use Linux paths.
-	if c.Toolchain.Mode == "wsl" && (filepath.VolumeName(c.Toolchain.CXX) != "" || strings.Contains(c.Toolchain.CXX, `\`)) {
-		c.Toolchain.Mode = "native"
-		c.Toolchain.WSLDistribution = ""
 	}
 	if c.Toolchain.MSVC == "" {
 		c.Toolchain.MSVC = "auto"
@@ -198,12 +207,35 @@ func (c *Config) normalize(root string) error {
 	if c.CompilerPresets == nil {
 		c.CompilerPresets = map[string]CompilerPreset{}
 	}
-	normalize := func(value string) string {
+	if c.Conan.Profile == "" {
+		c.Conan.Profile = "default"
+	}
+}
+
+// repairWSLToolchain heals configurations created by the old TUI mode toggle. A
+// Windows compiler cannot be executed inside WSL; WSL compilers use Linux paths.
+func (c *Config) repairWSLToolchain() {
+	if c.Toolchain.Mode == "wsl" && (filepath.VolumeName(c.Toolchain.CXX) != "" || strings.Contains(c.Toolchain.CXX, `\`)) {
+		c.Toolchain.Mode = "native"
+		c.Toolchain.WSLDistribution = ""
+	}
+}
+
+// relativePathNormalizer returns a function that cleans a path, joining
+// project-local values onto root while leaving absolute and empty values
+// untouched.
+func relativePathNormalizer(root string) func(string) string {
+	return func(value string) string {
 		if value == "" || filepath.IsAbs(value) {
 			return filepath.Clean(value)
 		}
 		return filepath.Clean(filepath.Join(root, value))
 	}
+}
+
+// normalizeRootPaths rewrites the build-related directories that live directly
+// on the configuration's top-level sections.
+func (c *Config) normalizeRootPaths(normalize func(string) string) {
 	c.Build.BuildDir = normalize(c.Build.BuildDir)
 	if c.Build.CompileCommands != "" {
 		c.Build.CompileCommands = normalize(c.Build.CompileCommands)
@@ -221,9 +253,11 @@ func (c *Config) normalize(root string) error {
 	if c.Conan.BuildRoot != "" {
 		c.Conan.BuildRoot = normalize(c.Conan.BuildRoot)
 	}
-	if c.Conan.Profile == "" {
-		c.Conan.Profile = "default"
-	}
+}
+
+// normalizeTargets cleans each target's path lists and defaults its dependency
+// scopes and output name.
+func (c *Config) normalizeTargets(normalize func(string) string) {
 	for name, target := range c.Targets {
 		target.Sources = cleanPaths(target.Sources)
 		target.IncludeDirs = cleanPaths(target.IncludeDirs)
@@ -243,6 +277,11 @@ func (c *Config) normalize(root string) error {
 		}
 		c.Targets[name] = target
 	}
+}
+
+// normalizePackages cleans each package's path lists and defaults its port name
+// to its configuration key.
+func (c *Config) normalizePackages() {
 	for name, pkg := range c.Packages {
 		pkg.IncludeDirs = cleanPaths(pkg.IncludeDirs)
 		pkg.LibraryDirs = cleanPaths(pkg.LibraryDirs)
@@ -252,29 +291,39 @@ func (c *Config) normalize(root string) error {
 		}
 		c.Packages[name] = pkg
 	}
-	if len(c.Build.DefaultTargets) == 0 && len(c.Targets) > 0 {
-		for _, candidate := range []string{c.Project.Name, "app"} {
-			if _, ok := c.Targets[candidate]; ok {
-				c.Build.DefaultTargets = []string{candidate}
-				break
-			}
-		}
-		if len(c.Build.DefaultTargets) == 0 {
-			names := make([]string, 0, len(c.Targets))
-			for name, target := range c.Targets {
-				if target.Type == "executable" {
-					names = append(names, name)
-				}
-			}
-			if len(names) == 0 {
-				for name := range c.Targets {
-					names = append(names, name)
-				}
-			}
-			sort.Strings(names)
-			c.Build.DefaultTargets = []string{names[0]}
+}
+
+// selectDefaultTargets chooses the targets built when none are configured,
+// preferring the project name, then "app", then the sorted executable targets,
+// then whichever target sorts first.
+func (c *Config) selectDefaultTargets() {
+	if len(c.Build.DefaultTargets) != 0 || len(c.Targets) == 0 {
+		return
+	}
+	for _, candidate := range []string{c.Project.Name, "app"} {
+		if _, ok := c.Targets[candidate]; ok {
+			c.Build.DefaultTargets = []string{candidate}
+			return
 		}
 	}
+	names := make([]string, 0, len(c.Targets))
+	for name, target := range c.Targets {
+		if target.Type == "executable" {
+			names = append(names, name)
+		}
+	}
+	if len(names) == 0 {
+		for name := range c.Targets {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	c.Build.DefaultTargets = []string{names[0]}
+}
+
+// applyPackagingDefaults fills the package output defaults and rewrites the
+// package output directory relative to the project root.
+func (c *Config) applyPackagingDefaults(normalize func(string) string) {
 	if c.Package.Format == "" {
 		c.Package.Format = "zip"
 	}
@@ -288,7 +337,6 @@ func (c *Config) normalize(root string) error {
 		c.Package.Targets = append([]string{}, c.Build.DefaultTargets...)
 	}
 	c.Package.Output = normalize(c.Package.Output)
-	return nil
 }
 
 func cleanPaths(paths []string) []string {
@@ -340,10 +388,7 @@ func SaveExpected(path string, cfg Config, expected string) error {
 		return err
 	}
 	if expected != "" && current != expected {
-		e := diag.New("E_CONFIG_CONFLICT", diag.StageConfig, "configuration changed before saving", nil)
-		e.Detail = path
-		e.Hints = []string{"Refresh the project, review the latest settings, and apply your change again. The current file was preserved."}
-		return e
+		return configChanged(path)
 	}
 	copyCfg := cfg
 	if err := copyCfg.normalize(root); err != nil {
@@ -352,8 +397,46 @@ func SaveExpected(path string, cfg Config, expected string) error {
 	if err := Validate(copyCfg); err != nil {
 		return err
 	}
-	// Store project-local paths relative to the file, so init -C relative-dir
-	// and moving a checkout do not introduce duplicated directory prefixes.
+	if err := copyCfg.makePathsRelative(root); err != nil {
+		return err
+	}
+	data, err := encodeTOML(copyCfg)
+	if err != nil {
+		return err
+	}
+	if current != "missing" {
+		original, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		if err := backupLegacySchema(path, original); err != nil {
+			return err
+		}
+		// Editors do not take our lock: detect edits made during encoding/backup.
+		latest, err := Snapshot(path)
+		if err != nil {
+			return err
+		}
+		if latest != current {
+			return fmt.Errorf("E_CONFIG_CONFLICT: %s changed while saving; refresh and retry", path)
+		}
+	}
+	return fsx.AtomicWrite(path, data)
+}
+
+// configChanged builds the diagnostic raised when the file on disk no longer
+// matches the version the caller loaded.
+func configChanged(path string) error {
+	e := diag.New("E_CONFIG_CONFLICT", diag.StageConfig, "configuration changed before saving", nil)
+	e.Detail = path
+	e.Hints = []string{"Refresh the project, review the latest settings, and apply your change again. The current file was preserved."}
+	return e
+}
+
+// makePathsRelative stores project-local paths relative to root, so init -C
+// relative-dir and moving a checkout do not introduce duplicated directory
+// prefixes.
+func (c *Config) makePathsRelative(root string) error {
 	absoluteRoot, err := filepath.Abs(root)
 	if err != nil {
 		return err
@@ -368,56 +451,51 @@ func SaveExpected(path string, cfg Config, expected string) error {
 		}
 		return value
 	}
-	copyCfg.Build.BuildDir = local(copyCfg.Build.BuildDir)
-	copyCfg.Build.CompileCommands = local(copyCfg.Build.CompileCommands)
-	copyCfg.Vcpkg.Root = local(copyCfg.Vcpkg.Root)
-	copyCfg.Conan.Root = local(copyCfg.Conan.Root)
-	copyCfg.Conan.BuildRoot = local(copyCfg.Conan.BuildRoot)
-	copyCfg.Package.Output = local(copyCfg.Package.Output)
-	copyCfg.Toolchain.CacheDir = local(copyCfg.Toolchain.CacheDir)
-	if copyCfg.Toolchain.CUDARoot != "" && !toolchain.IsLocalPath(copyCfg.Toolchain.CUDARoot) {
-		copyCfg.Toolchain.CUDARoot = local(copyCfg.Toolchain.CUDARoot)
+	c.Build.BuildDir = local(c.Build.BuildDir)
+	c.Build.CompileCommands = local(c.Build.CompileCommands)
+	c.Vcpkg.Root = local(c.Vcpkg.Root)
+	c.Conan.Root = local(c.Conan.Root)
+	c.Conan.BuildRoot = local(c.Conan.BuildRoot)
+	c.Package.Output = local(c.Package.Output)
+	c.Toolchain.CacheDir = local(c.Toolchain.CacheDir)
+	if c.Toolchain.CUDARoot != "" && !toolchain.IsLocalPath(c.Toolchain.CUDARoot) {
+		c.Toolchain.CUDARoot = local(c.Toolchain.CUDARoot)
 	}
+	return nil
+}
+
+// encodeTOML renders cfg with the canonical two-space indentation.
+func encodeTOML(cfg Config) ([]byte, error) {
 	var buffer bytes.Buffer
 	encoder := toml.NewEncoder(&buffer)
 	encoder.Indent = "  "
-	if err := encoder.Encode(copyCfg); err != nil {
+	if err := encoder.Encode(cfg); err != nil {
+		return nil, err
+	}
+	return buffer.Bytes(), nil
+}
+
+// backupLegacySchema preserves an unmodified pre-migration original beside the
+// configuration, unless an identical backup already exists.
+func backupLegacySchema(path string, original []byte) error {
+	var version struct {
+		Version int `toml:"schema_version"`
+	}
+	if _, err := toml.Decode(string(original), &version); err != nil {
 		return err
 	}
-	if current != "missing" {
-		original, err := os.ReadFile(path)
-		if err != nil {
-			return err
-		}
-		var version struct {
-			Version int `toml:"schema_version"`
-		}
-		if _, err := toml.Decode(string(original), &version); err != nil {
-			return err
-		}
-		if version.Version < CurrentSchemaVersion {
-			backup := fmt.Sprintf("%s.schema-v%d.%s.bak", path, version.Version, Fingerprint(original)[:12])
-			if _, err := os.Stat(backup); os.IsNotExist(err) {
-				if err := fsx.AtomicWrite(backup, original); err != nil {
-					return err
-				}
-			} else if err != nil {
-				return err
-			} else {
-				data, err := os.ReadFile(backup)
-				if err != nil || !bytes.Equal(data, original) {
-					return fmt.Errorf("E_CONFIG_BACKUP: cannot preserve original configuration at %s: %v", backup, err)
-				}
-			}
-		}
-		// Editors do not take our lock: detect edits made during encoding/backup.
-		latest, err := Snapshot(path)
-		if err != nil {
-			return err
-		}
-		if latest != current {
-			return fmt.Errorf("E_CONFIG_CONFLICT: %s changed while saving; refresh and retry", path)
-		}
+	if version.Version >= CurrentSchemaVersion {
+		return nil
 	}
-	return fsx.AtomicWrite(path, buffer.Bytes())
+	backup := fmt.Sprintf("%s.schema-v%d.%s.bak", path, version.Version, Fingerprint(original)[:12])
+	if _, err := os.Stat(backup); os.IsNotExist(err) {
+		return fsx.AtomicWrite(backup, original)
+	} else if err != nil {
+		return err
+	}
+	data, err := os.ReadFile(backup)
+	if err != nil || !bytes.Equal(data, original) {
+		return fmt.Errorf("E_CONFIG_BACKUP: cannot preserve original configuration at %s: %v", backup, err)
+	}
+	return nil
 }
