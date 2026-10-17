@@ -1,3 +1,6 @@
+// Package policy evaluates a project's conditional rules and target
+// readiness. It resolves [[rules]] against the local machine and reports which
+// targets can currently build, caching repeated filesystem and toolchain probes.
 package policy
 
 import (
@@ -21,17 +24,23 @@ import (
 	"trestle/internal/toolchain/cuda"
 )
 
+// Status is the readiness verdict for one target, with the reasons it is not
+// ready.
 type Status struct {
 	Ready   bool
 	Reasons []string
 }
 
+// Change records a single resolved-rule difference, used to show what a
+// conditional rule altered.
 type Change struct {
 	Field  string
 	Before string
 	After  string
 }
 
+// RuleResult reports how one [[rules]] entry resolved: whether its condition
+// matched and what it changed.
 type RuleResult struct {
 	Index   int
 	When    string
@@ -40,6 +49,9 @@ type RuleResult struct {
 	Changes []Change
 }
 
+// Report is the full outcome of applying rules: per-rule results, the total
+// set of changes, and the resolved toolchain or the error that prevented
+// resolving it.
 type Report struct {
 	Rules          []RuleResult
 	Changes        []Change
@@ -47,6 +59,8 @@ type Report struct {
 	ToolchainError string
 }
 
+// Probe caches filesystem and toolchain checks so rule evaluation and
+// readiness assessment share one consistent, no-repeat view of the machine.
 type Probe struct {
 	ctx              context.Context
 	cfg              config.Config
@@ -66,10 +80,12 @@ type Probe struct {
 	toolchainError   error
 }
 
+// NewProbe returns a probe for cfg rooted at the current directory.
 func NewProbe(ctx context.Context, cfg config.Config) *Probe {
 	return NewProbeAt(ctx, cfg, ".")
 }
 
+// NewProbeAt returns a probe for cfg whose relative paths resolve against root.
 func NewProbeAt(ctx context.Context, cfg config.Config, root string) *Probe {
 	if root == "" {
 		root = "."
@@ -463,11 +479,15 @@ func Apply(ctx context.Context, source config.Config) (config.Config, error) {
 	return ApplyAt(ctx, source, ".")
 }
 
+// ApplyAt resolves conditional rules against a project rooted at root,
+// mirroring Apply for callers that already know the root.
 func ApplyAt(ctx context.Context, source config.Config, root string) (config.Config, error) {
 	cfg, _, err := ApplyWithReportAt(ctx, source, root)
 	return cfg, err
 }
 
+// ApplyWithReportAt resolves rules and returns a detailed report of matched
+// rules and changes alongside the resulting configuration.
 func ApplyWithReportAt(ctx context.Context, source config.Config, root string) (config.Config, Report, error) {
 	cfg := source
 	report := Report{}
@@ -611,15 +631,20 @@ func diffRuleValues(before, after map[string]string) []Change {
 	return changes
 }
 
+// Assess reports whether each target in cfg is ready to build, evaluating from
+// the current directory.
 func Assess(ctx context.Context, cfg config.Config) map[string]Status {
 	return AssessAt(ctx, cfg, ".")
 }
 
+// AssessAt reports target readiness with relative paths resolved against root.
 func AssessAt(ctx context.Context, cfg config.Config, root string) map[string]Status {
 	statuses, _, _ := AssessWithToolchainAt(ctx, cfg, root)
 	return statuses
 }
 
+// AssessWithToolchainAt reports target readiness and also returns the resolved
+// toolchain, or the error that prevented resolving it, so callers can reuse it.
 func AssessWithToolchainAt(ctx context.Context, cfg config.Config, root string) (map[string]Status, toolchain.Toolchain, error) {
 	p := NewProbeAt(ctx, cfg, root)
 	_, ninjaErr := exec.LookPath("ninja")
@@ -761,6 +786,8 @@ func fallback(value, replacement string) string {
 	return value
 }
 
+// CheckSelected returns an error naming every reason the selected targets are
+// not ready, or nil when all are ready.
 func CheckSelected(statuses map[string]Status, names []string) error {
 	var details []string
 	for _, name := range names {
