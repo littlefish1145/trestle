@@ -97,15 +97,17 @@ type targetObject struct {
 	} `json:"link"`
 }
 
+type ctestTest struct {
+	Name       string   `json:"name"`
+	Command    []string `json:"command"`
+	Properties []struct {
+		Name  string `json:"name"`
+		Value any    `json:"value"`
+	} `json:"properties"`
+}
+
 type ctestModel struct {
-	Tests []struct {
-		Name       string   `json:"name"`
-		Command    []string `json:"command"`
-		Properties []struct {
-			Name  string `json:"name"`
-			Value any    `json:"value"`
-		} `json:"properties"`
-	} `json:"tests"`
+	Tests []ctestTest `json:"tests"`
 }
 
 // Import configures a CMake project in an isolated directory, reads CMake's
@@ -121,30 +123,88 @@ func ImportWithOptions(ctx context.Context, sourceRoot, configPath string, progr
 	if snapshotErr != nil {
 		return Result{}, snapshotErr
 	}
-	root, err := filepath.Abs(sourceRoot)
+	root, err := resolveImportRoot(sourceRoot)
 	if err != nil {
 		return Result{}, err
 	}
-	if _, err := os.Stat(filepath.Join(root, "CMakeLists.txt")); err != nil {
-		return Result{}, fmt.Errorf("CMakeLists.txt was not found in %s", root)
+	cmakePath, err := locateCMake()
+	if err != nil {
+		return Result{}, err
 	}
+	buildDir := importBuildDir(root, options)
+	if err := prepareFileAPIQuery(buildDir); err != nil {
+		return Result{}, err
+	}
+	if err := configureCMake(ctx, cmakePath, root, buildDir, options, progress); err != nil {
+		return Result{}, err
+	}
+	result, cfg, err := ParseReply(filepath.Join(buildDir, ".cmake", "api", "v1", "reply"), root)
+	if err != nil {
+		return Result{}, err
+	}
+	if err := materializeGeneratedTargets(ctx, cmakePath, root, buildDir, result.generatedTargets, options, progress); err != nil {
+		return Result{}, err
+	}
+	applyCTest(ctx, cmakePath, buildDir, &cfg, &result, progress)
+	preserveExistingSections(configPath, &cfg)
+	cfg.Build.DefaultTargets = resolveDefaultTargets(&cfg)
+	cfg.Package.Targets = resolvePackageTargets(&cfg)
+	if err := config.SaveExpected(configPath, cfg, expected); err != nil {
+		return Result{}, err
+	}
+	if progress != nil {
+		progress(fmt.Sprintf("Imported %d targets into %s", result.Targets, filepath.Base(configPath)))
+	}
+	return result, nil
+}
+
+// resolveImportRoot turns the requested source directory into an absolute path
+// and verifies that it looks like a CMake project.
+func resolveImportRoot(sourceRoot string) (string, error) {
+	root, err := filepath.Abs(sourceRoot)
+	if err != nil {
+		return "", err
+	}
+	if _, err := os.Stat(filepath.Join(root, "CMakeLists.txt")); err != nil {
+		return "", fmt.Errorf("CMakeLists.txt was not found in %s", root)
+	}
+	return root, nil
+}
+
+// locateCMake finds the cmake executable on PATH or reports the error the
+// importer should surface.
+func locateCMake() (string, error) {
 	cmakePath, err := exec.LookPath("cmake")
 	if err != nil {
-		return Result{}, fmt.Errorf("cmake is required for import: %w", err)
+		return "", fmt.Errorf("cmake is required for import: %w", err)
 	}
+	return cmakePath, nil
+}
+
+// importBuildDir derives the isolated build directory CMake is configured into,
+// disambiguating it by C++ compiler when one was pinned.
+func importBuildDir(root string, options Options) string {
 	buildName := "cmake"
 	if options.CXXCompiler != "" {
 		compilerName := strings.TrimSuffix(strings.ToLower(filepath.Base(options.CXXCompiler)), filepath.Ext(options.CXXCompiler))
 		buildName += "-" + compilerName
 	}
-	buildDir := filepath.Join(root, ".trestle", "import", buildName)
+	return filepath.Join(root, ".trestle", "import", buildName)
+}
+
+// prepareFileAPIQuery creates the CMake File API query directory and requests
+// the codemodel-v2 object.
+func prepareFileAPIQuery(buildDir string) error {
 	queryDir := filepath.Join(buildDir, ".cmake", "api", "v1", "query", "client-trestle")
 	if err := os.MkdirAll(queryDir, 0o755); err != nil {
-		return Result{}, err
+		return err
 	}
-	if err := os.WriteFile(filepath.Join(queryDir, "codemodel-v2"), nil, 0o644); err != nil {
-		return Result{}, err
-	}
+	return os.WriteFile(filepath.Join(queryDir, "codemodel-v2"), nil, 0o644)
+}
+
+// configureCMake runs the CMake configure step, forwarding its output to
+// progress and wrapping failures with the captured diagnostics.
+func configureCMake(ctx context.Context, cmakePath, root, buildDir string, options Options, progress func(string)) error {
 	if progress != nil {
 		progress("Configuring CMake project in " + filepath.ToSlash(relativeOrAbsolute(root, buildDir)))
 	}
@@ -167,15 +227,17 @@ func ImportWithOptions(ctx context.Context, sourceRoot, configPath string, progr
 	if err != nil {
 		detail := strings.TrimSpace(string(output))
 		if detail != "" {
-			return Result{}, fmt.Errorf("CMake configure failed: %w\n%s", err, detail)
+			return fmt.Errorf("CMake configure failed: %w\n%s", err, detail)
 		}
-		return Result{}, fmt.Errorf("CMake configure failed: %w", err)
+		return fmt.Errorf("CMake configure failed: %w", err)
 	}
-	result, cfg, err := ParseReply(filepath.Join(buildDir, ".cmake", "api", "v1", "reply"), root)
-	if err != nil {
-		return Result{}, err
-	}
-	for _, target := range result.generatedTargets {
+	return nil
+}
+
+// materializeGeneratedTargets rebuilds each target whose sources CMake must
+// generate on disk before the reply can be used.
+func materializeGeneratedTargets(ctx context.Context, cmakePath, root, buildDir string, targets []string, options Options, progress func(string)) error {
+	for _, target := range targets {
 		if progress != nil {
 			progress("Materializing CMake generated sources for " + target)
 		}
@@ -184,10 +246,15 @@ func ImportWithOptions(ctx context.Context, sourceRoot, configPath string, progr
 		generate.Env = mergedEnvironment(options.Environment)
 		output, generateErr := processx.Capture(ctx, generate)
 		if generateErr != nil {
-			return Result{}, fmt.Errorf("CMake could not generate sources for %s: %w\n%s", target, generateErr, strings.TrimSpace(string(output)))
+			return fmt.Errorf("CMake could not generate sources for %s: %w\n%s", target, generateErr, strings.TrimSpace(string(output)))
 		}
 	}
-	applyCTest(ctx, cmakePath, buildDir, &cfg, &result, progress)
+	return nil
+}
+
+// preserveExistingSections copies the settings this importer does not model from
+// an existing config file into the freshly generated one.
+func preserveExistingSections(configPath string, cfg *config.Config) {
 	if existing, loadErr := config.Load(configPath); loadErr == nil {
 		cfg.Toolchain = existing.Toolchain
 		cfg.Vcpkg = existing.Vcpkg
@@ -196,6 +263,12 @@ func ImportWithOptions(ctx context.Context, sourceRoot, configPath string, progr
 		cfg.Package = existing.Package
 		cfg.CompilerPresets = existing.CompilerPresets
 	}
+}
+
+// resolveDefaultTargets keeps the configured default targets that still exist
+// and otherwise falls back to the first executable, then the first target by
+// name.
+func resolveDefaultTargets(cfg *config.Config) []string {
 	validDefaults := []string{}
 	for _, name := range cfg.Build.DefaultTargets {
 		if _, ok := cfg.Targets[name]; ok {
@@ -220,7 +293,12 @@ func ImportWithOptions(ctx context.Context, sourceRoot, configPath string, progr
 			validDefaults = []string{names[0]}
 		}
 	}
-	cfg.Build.DefaultTargets = validDefaults
+	return validDefaults
+}
+
+// resolvePackageTargets keeps the configured package targets that still exist
+// and otherwise mirrors the resolved default targets.
+func resolvePackageTargets(cfg *config.Config) []string {
 	validPackageTargets := []string{}
 	for _, name := range cfg.Package.Targets {
 		if _, ok := cfg.Targets[name]; ok {
@@ -228,16 +306,9 @@ func ImportWithOptions(ctx context.Context, sourceRoot, configPath string, progr
 		}
 	}
 	if len(validPackageTargets) == 0 {
-		validPackageTargets = append([]string{}, validDefaults...)
+		validPackageTargets = append([]string{}, cfg.Build.DefaultTargets...)
 	}
-	cfg.Package.Targets = validPackageTargets
-	if err := config.SaveExpected(configPath, cfg, expected); err != nil {
-		return Result{}, err
-	}
-	if progress != nil {
-		progress(fmt.Sprintf("Imported %d targets into %s", result.Targets, filepath.Base(configPath)))
-	}
-	return result, nil
+	return validPackageTargets
 }
 
 func mergedEnvironment(overrides map[string]string) []string {
@@ -263,24 +334,13 @@ func mergedEnvironment(overrides map[string]string) []string {
 // ParseReply converts a CMake File API reply directory into a Trestle config.
 // It is separate from Import so fixtures can verify the mapping without CMake.
 func ParseReply(replyDir, sourceRoot string) (Result, config.Config, error) {
-	indexes, err := filepath.Glob(filepath.Join(replyDir, "index-*.json"))
-	if err != nil || len(indexes) == 0 {
-		return Result{}, config.Config{}, fmt.Errorf("CMake File API produced no reply index")
-	}
-	sort.Strings(indexes)
-	var index replyIndex
-	if err := readJSON(indexes[len(indexes)-1], &index); err != nil {
+	index, err := readReplyIndex(replyDir)
+	if err != nil {
 		return Result{}, config.Config{}, err
 	}
-	codemodelFile := ""
-	for _, object := range index.Objects {
-		if object.Kind == "codemodel" {
-			codemodelFile = object.JSONFile
-			break
-		}
-	}
-	if codemodelFile == "" {
-		return Result{}, config.Config{}, fmt.Errorf("CMake File API reply has no codemodel-v2 object")
+	codemodelFile, err := codemodelObjectFile(index)
+	if err != nil {
+		return Result{}, config.Config{}, err
 	}
 	var model codeModel
 	if err := readJSON(filepath.Join(replyDir, codemodelFile), &model); err != nil {
@@ -306,80 +366,165 @@ func ParseReply(replyDir, sourceRoot string) (Result, config.Config, error) {
 		if err := readJSON(filepath.Join(replyDir, reference.JSONFile), &object); err != nil {
 			return Result{}, config.Config{}, err
 		}
-		targetType, supported := mapTargetType(object.Type)
-		if !supported {
-			result.Warnings = append(result.Warnings, fmt.Sprintf("Skipped %s target %s", object.Type, reference.Name))
-			continue
-		}
-		outputName := reference.Name
-		if len(object.Artifacts) > 0 && object.Type != "OBJECT_LIBRARY" {
-			artifactName := filepath.Base(filepath.FromSlash(object.Artifacts[0].Path))
-			result.artifacts[reference.Name] = filepath.FromSlash(object.Artifacts[0].Path)
-			outputName = strings.TrimSuffix(artifactName, filepath.Ext(artifactName))
-			if targetType == "static" || targetType == "shared" {
-				outputName = strings.TrimPrefix(outputName, "lib")
-			}
-		}
-		target := config.Target{Type: targetType, OutputName: outputName}
-		hasGeneratedSource := false
-		for _, source := range object.Sources {
-			path := source.Path
-			if !filepath.IsAbs(path) {
-				// File API source paths are relative to the top-level source
-				// directory, not to the directory that defines the target.
-				path = filepath.Join(sourceRoot, filepath.FromSlash(path))
-			}
-			if !compilable(path) {
-				continue
-			}
-			if source.Generated {
-				hasGeneratedSource = true
-			}
-			target.Sources = appendUnique(target.Sources, relativeOrAbsolute(sourceRoot, path))
-		}
-		if len(target.Sources) == 0 {
-			result.Warnings = append(result.Warnings, fmt.Sprintf("Skipped target %s because it has no compilable sources", reference.Name))
-			continue
-		}
-		for _, group := range object.CompileGroups {
-			if group.LanguageStandard != nil {
-				switch group.Language {
-				case "C":
-					target.CStandard = normalizeCStandard(group.LanguageStandard.Standard)
-				case "CXX":
-					target.CXXStandard = normalizeCXXStandard(group.LanguageStandard.Standard)
-				}
-			}
-			for _, include := range group.Includes {
-				target.PrivateIncludeDirs = appendUnique(target.PrivateIncludeDirs, relativeOrAbsolute(sourceRoot, include.Path))
-			}
-			for _, define := range group.Defines {
-				target.PrivateDefines = appendUnique(target.PrivateDefines, define.Define)
-			}
-		}
-		for _, dependency := range object.Dependencies {
-			if name := idToName[dependency.ID]; name != "" {
-				target.Dependencies = append(target.Dependencies, config.Dependency{Target: name, Scope: "private"})
-			}
-		}
-		if object.Link != nil {
-			internal := make(map[string]bool, len(target.Dependencies))
-			for _, dependency := range target.Dependencies {
-				internal[strings.ToLower(dependency.Target)] = true
-			}
-			for _, fragment := range object.Link.CommandFragments {
-				if fragment.Role == "flags" && strings.Contains(strings.ToUpper(fragment.Fragment), "/DEF:") {
-					target.ExportAllSymbols = true
-				}
-				importLinkFragment(&target, fragment.Role, fragment.Fragment, internal, sourceRoot)
-			}
-		}
-		if hasGeneratedSource {
-			result.generatedTargets = appendStringUnique(result.generatedTargets, reference.Name)
-		}
-		cfg.Targets[reference.Name] = target
+		importTargetObject(&result, &cfg, object, reference.Name, idToName, sourceRoot)
 	}
-	// Remove dependency edges that point to targets we deliberately skipped.
+	filterMissingDependencies(&cfg)
+	result.Targets = len(cfg.Targets)
+	if result.Targets == 0 {
+		return Result{}, config.Config{}, fmt.Errorf("CMake project has no executable or library targets with compilable sources")
+	}
+	return result, cfg, nil
+}
+
+// readReplyIndex finds the newest CMake File API reply index and decodes it.
+func readReplyIndex(replyDir string) (replyIndex, error) {
+	indexes, err := filepath.Glob(filepath.Join(replyDir, "index-*.json"))
+	if err != nil || len(indexes) == 0 {
+		return replyIndex{}, fmt.Errorf("CMake File API produced no reply index")
+	}
+	sort.Strings(indexes)
+	var index replyIndex
+	if err := readJSON(indexes[len(indexes)-1], &index); err != nil {
+		return replyIndex{}, err
+	}
+	return index, nil
+}
+
+// codemodelObjectFile returns the codemodel object's file name from a reply
+// index, or an error when the object is absent.
+func codemodelObjectFile(index replyIndex) (string, error) {
+	codemodelFile := ""
+	for _, object := range index.Objects {
+		if object.Kind == "codemodel" {
+			codemodelFile = object.JSONFile
+			break
+		}
+	}
+	if codemodelFile == "" {
+		return "", fmt.Errorf("CMake File API reply has no codemodel-v2 object")
+	}
+	return codemodelFile, nil
+}
+
+// importTargetObject translates one CMake target object into cfg, recording
+// warnings and generated targets on result. Targets that cannot be represented
+// are skipped.
+func importTargetObject(result *Result, cfg *config.Config, object targetObject, name string, idToName map[string]string, sourceRoot string) {
+	targetType, supported := mapTargetType(object.Type)
+	if !supported {
+		result.Warnings = append(result.Warnings, fmt.Sprintf("Skipped %s target %s", object.Type, name))
+		return
+	}
+	outputName, artifact, hasArtifact := targetOutputName(object, name, targetType)
+	if hasArtifact {
+		result.artifacts[name] = artifact
+	}
+	target := config.Target{Type: targetType, OutputName: outputName}
+	hasGeneratedSource := collectTargetSources(&target, object, sourceRoot)
+	if len(target.Sources) == 0 {
+		result.Warnings = append(result.Warnings, fmt.Sprintf("Skipped target %s because it has no compilable sources", name))
+		return
+	}
+	applyCompileGroups(&target, object, sourceRoot)
+	applyDependencies(&target, object, idToName)
+	applyLinkFragments(&target, object, sourceRoot)
+	if hasGeneratedSource {
+		result.generatedTargets = appendStringUnique(result.generatedTargets, name)
+	}
+	cfg.Targets[name] = target
+}
+
+// targetOutputName derives a target's output name from its first artifact and
+// returns the artifact path plus whether one was present.
+func targetOutputName(object targetObject, name, targetType string) (string, string, bool) {
+	outputName := name
+	if len(object.Artifacts) > 0 && object.Type != "OBJECT_LIBRARY" {
+		artifact := filepath.FromSlash(object.Artifacts[0].Path)
+		artifactName := filepath.Base(artifact)
+		outputName = strings.TrimSuffix(artifactName, filepath.Ext(artifactName))
+		if targetType == "static" || targetType == "shared" {
+			outputName = strings.TrimPrefix(outputName, "lib")
+		}
+		return outputName, artifact, true
+	}
+	return outputName, "", false
+}
+
+// collectTargetSources appends the object's compilable sources to target,
+// resolving relative paths against the top-level source root. It reports whether
+// any source is generated.
+func collectTargetSources(target *config.Target, object targetObject, sourceRoot string) bool {
+	hasGeneratedSource := false
+	for _, source := range object.Sources {
+		path := source.Path
+		if !filepath.IsAbs(path) {
+			// File API source paths are relative to the top-level source
+			// directory, not to the directory that defines the target.
+			path = filepath.Join(sourceRoot, filepath.FromSlash(path))
+		}
+		if !compilable(path) {
+			continue
+		}
+		if source.Generated {
+			hasGeneratedSource = true
+		}
+		target.Sources = appendUnique(target.Sources, relativeOrAbsolute(sourceRoot, path))
+	}
+	return hasGeneratedSource
+}
+
+// applyCompileGroups copies language standards, include directories, and defines
+// from a target object's compile groups.
+func applyCompileGroups(target *config.Target, object targetObject, sourceRoot string) {
+	for _, group := range object.CompileGroups {
+		if group.LanguageStandard != nil {
+			switch group.Language {
+			case "C":
+				target.CStandard = normalizeCStandard(group.LanguageStandard.Standard)
+			case "CXX":
+				target.CXXStandard = normalizeCXXStandard(group.LanguageStandard.Standard)
+			}
+		}
+		for _, include := range group.Includes {
+			target.PrivateIncludeDirs = appendUnique(target.PrivateIncludeDirs, relativeOrAbsolute(sourceRoot, include.Path))
+		}
+		for _, define := range group.Defines {
+			target.PrivateDefines = appendUnique(target.PrivateDefines, define.Define)
+		}
+	}
+}
+
+// applyDependencies records the target's private dependencies using the reply's
+// id-to-name map and ignoring ids that did not resolve.
+func applyDependencies(target *config.Target, object targetObject, idToName map[string]string) {
+	for _, dependency := range object.Dependencies {
+		if name := idToName[dependency.ID]; name != "" {
+			target.Dependencies = append(target.Dependencies, config.Dependency{Target: name, Scope: "private"})
+		}
+	}
+}
+
+// applyLinkFragments interprets the target's link command fragments, treating
+// fragments naming the target's own dependencies as internal.
+func applyLinkFragments(target *config.Target, object targetObject, sourceRoot string) {
+	if object.Link == nil {
+		return
+	}
+	internal := make(map[string]bool, len(target.Dependencies))
+	for _, dependency := range target.Dependencies {
+		internal[strings.ToLower(dependency.Target)] = true
+	}
+	for _, fragment := range object.Link.CommandFragments {
+		if fragment.Role == "flags" && strings.Contains(strings.ToUpper(fragment.Fragment), "/DEF:") {
+			target.ExportAllSymbols = true
+		}
+		importLinkFragment(target, fragment.Role, fragment.Fragment, internal, sourceRoot)
+	}
+}
+
+// filterMissingDependencies removes dependency edges that point at targets the
+// import deliberately skipped.
+func filterMissingDependencies(cfg *config.Config) {
 	for name, target := range cfg.Targets {
 		filtered := target.Dependencies[:0]
 		for _, dependency := range target.Dependencies {
@@ -390,39 +535,14 @@ func ParseReply(replyDir, sourceRoot string) (Result, config.Config, error) {
 		target.Dependencies = filtered
 		cfg.Targets[name] = target
 	}
-	result.Targets = len(cfg.Targets)
-	if result.Targets == 0 {
-		return Result{}, config.Config{}, fmt.Errorf("CMake project has no executable or library targets with compilable sources")
-	}
-	return result, cfg, nil
 }
 
 func applyCTest(ctx context.Context, cmakePath, buildDir string, cfg *config.Config, result *Result, progress func(string)) {
-	ctestPath := filepath.Join(filepath.Dir(cmakePath), "ctest")
-	if _, err := os.Stat(ctestPath + ".exe"); err == nil {
-		ctestPath += ".exe"
-	} else if path, lookErr := exec.LookPath("ctest"); lookErr == nil {
-		ctestPath = path
-	} else {
+	ctestPath, found := locateCTest(cmakePath)
+	if !found {
 		return
 	}
-	var placeholders []string
-	for name, artifact := range result.artifacts {
-		if target, ok := cfg.Targets[name]; !ok || target.Type != "executable" {
-			continue
-		}
-		if !filepath.IsAbs(artifact) {
-			artifact = filepath.Join(buildDir, artifact)
-		}
-		if err := os.MkdirAll(filepath.Dir(artifact), 0o755); err != nil {
-			continue
-		}
-		file, err := os.OpenFile(artifact, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o755)
-		if err == nil {
-			_ = file.Close()
-			placeholders = append(placeholders, artifact)
-		}
-	}
+	placeholders := createTestPlaceholders(cfg, result, buildDir)
 	defer func() {
 		for _, placeholder := range placeholders {
 			_ = os.Remove(placeholder)
@@ -443,51 +563,93 @@ func applyCTest(ctx context.Context, cmakePath, buildDir string, cfg *config.Con
 	}
 	claimed := map[string]string{}
 	for _, test := range suite.Tests {
-		if len(test.Command) == 0 {
-			if target, ok := cfg.Targets[test.Name]; ok && target.Type == "executable" {
-				target.Type = "test"
-				target.TestGroup = "cmake"
-				cfg.Targets[test.Name] = target
-				claimed[test.Name] = test.Name
-				if progress != nil {
-					progress("Discovered CTest job " + test.Name + " → " + test.Name)
-				}
-			} else if progress != nil {
-				progress("CTest job " + test.Name + " has no resolved command; leave it as an executable target")
-			}
+		applyCTestJob(cfg, result, test, claimed, progress)
+	}
+}
+
+// locateCTest finds ctest next to cmake, falling back to PATH, and reports
+// whether one is available.
+func locateCTest(cmakePath string) (string, bool) {
+	ctestPath := filepath.Join(filepath.Dir(cmakePath), "ctest")
+	if _, err := os.Stat(ctestPath + ".exe"); err == nil {
+		return ctestPath + ".exe", true
+	}
+	if path, lookErr := exec.LookPath("ctest"); lookErr == nil {
+		return path, true
+	}
+	return "", false
+}
+
+// createTestPlaceholders creates empty files at the expected executable
+// artifacts so CTest can list them, returning the paths it created.
+func createTestPlaceholders(cfg *config.Config, result *Result, buildDir string) []string {
+	var placeholders []string
+	for name, artifact := range result.artifacts {
+		if target, ok := cfg.Targets[name]; !ok || target.Type != "executable" {
 			continue
 		}
-		executable := strings.TrimSuffix(filepath.Base(test.Command[0]), filepath.Ext(test.Command[0]))
-		matched := false
-		for name, target := range cfg.Targets {
-			if target.Type != "executable" || !strings.EqualFold(target.OutputName, executable) {
-				continue
-			}
-			if previous := claimed[name]; previous != "" {
-				result.Warnings = append(result.Warnings, fmt.Sprintf("CTest jobs %s and %s share target %s; imported the first job", previous, test.Name, name))
-				break
-			}
+		if !filepath.IsAbs(artifact) {
+			artifact = filepath.Join(buildDir, artifact)
+		}
+		if err := os.MkdirAll(filepath.Dir(artifact), 0o755); err != nil {
+			continue
+		}
+		file, err := os.OpenFile(artifact, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o755)
+		if err == nil {
+			_ = file.Close()
+			placeholders = append(placeholders, artifact)
+		}
+	}
+	return placeholders
+}
+
+// applyCTestJob maps one CTest job onto a matching executable target, promoting
+// it to a test target, and records any conflict or missed match.
+func applyCTestJob(cfg *config.Config, result *Result, test ctestTest, claimed map[string]string, progress func(string)) {
+	if len(test.Command) == 0 {
+		if target, ok := cfg.Targets[test.Name]; ok && target.Type == "executable" {
 			target.Type = "test"
 			target.TestGroup = "cmake"
-			target.TestArgs = append([]string{}, test.Command[1:]...)
-			for _, property := range test.Properties {
-				if property.Name == "WORKING_DIRECTORY" {
-					if value, ok := property.Value.(string); ok {
-						target.TestWorkingDir = value
-					}
-				}
-			}
-			cfg.Targets[name] = target
-			claimed[name] = test.Name
-			matched = true
+			cfg.Targets[test.Name] = target
+			claimed[test.Name] = test.Name
 			if progress != nil {
-				progress("Discovered CTest job " + test.Name + " → " + name)
+				progress("Discovered CTest job " + test.Name + " → " + test.Name)
 			}
+		} else if progress != nil {
+			progress("CTest job " + test.Name + " has no resolved command; leave it as an executable target")
+		}
+		return
+	}
+	executable := strings.TrimSuffix(filepath.Base(test.Command[0]), filepath.Ext(test.Command[0]))
+	matched := false
+	for name, target := range cfg.Targets {
+		if target.Type != "executable" || !strings.EqualFold(target.OutputName, executable) {
+			continue
+		}
+		if previous := claimed[name]; previous != "" {
+			result.Warnings = append(result.Warnings, fmt.Sprintf("CTest jobs %s and %s share target %s; imported the first job", previous, test.Name, name))
 			break
 		}
-		if !matched && progress != nil {
-			progress("CTest job " + test.Name + " uses an external command: " + test.Command[0])
+		target.Type = "test"
+		target.TestGroup = "cmake"
+		target.TestArgs = append([]string{}, test.Command[1:]...)
+		for _, property := range test.Properties {
+			if property.Name == "WORKING_DIRECTORY" {
+				if value, ok := property.Value.(string); ok {
+					target.TestWorkingDir = value
+				}
+			}
 		}
+		cfg.Targets[name] = target
+		claimed[name] = test.Name
+		matched = true
+		if progress != nil {
+			progress("Discovered CTest job " + test.Name + " → " + name)
+		}
+		break
+	}
+	if !matched && progress != nil {
+		progress("CTest job " + test.Name + " uses an external command: " + test.Command[0])
 	}
 }
 
