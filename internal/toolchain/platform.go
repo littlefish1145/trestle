@@ -5,6 +5,8 @@ import (
 	"strings"
 )
 
+// TargetPlatform returns the operating system and architecture the toolchain
+// builds for, inferred from its target triple and falling back to the host.
 func TargetPlatform(tc Toolchain) (string, string) {
 	osName, arch := runtime.GOOS, runtime.GOARCH
 	target := strings.ToLower(tc.Target)
@@ -29,6 +31,8 @@ func TargetPlatform(tc Toolchain) (string, string) {
 	return osName, arch
 }
 
+// TargetABI returns "msvc", "mingw", or "" to name the C++ ABI a Windows
+// toolchain produces.
 func TargetABI(tc Toolchain) string {
 	osName, _ := TargetPlatform(tc)
 	if osName != "windows" {

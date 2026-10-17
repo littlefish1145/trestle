@@ -11,6 +11,8 @@ import (
 	"time"
 )
 
+// DetectWSL resolves a compiler inside the named WSL distribution and returns a
+// Toolchain whose runner executes commands through wsl.exe.
 func DetectWSL(ctx context.Context, distribution, requested string) (Toolchain, error) {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
@@ -120,6 +122,8 @@ func WSLVariable(ctx context.Context, distribution, name string) string {
 	return strings.TrimSpace(string(out))
 }
 
+// WSLPath converts a Windows path to its Linux equivalent inside the
+// distribution, checking first that the two agree on the distribution.
 func WSLPath(ctx context.Context, distribution, path string) (string, error) {
 	if err := ValidateWSLPath(distribution, path); err != nil {
 		return "", err
@@ -154,6 +158,8 @@ func WSLPath(ctx context.Context, distribution, path string) (string, error) {
 	return converted, nil
 }
 
+// WSLWindowsPath converts a Linux path inside the distribution to a Windows
+// path the host can use.
 func WSLWindowsPath(ctx context.Context, distribution, path string) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
@@ -175,6 +181,8 @@ func WSLWindowsPath(ctx context.Context, distribution, path string) (string, err
 	return "", fmt.Errorf("convert Linux path %q to Windows: wslpath returned no Windows path", path)
 }
 
+// ValidateWSLPath rejects a distribution UNC path that contradicts the selected
+// distribution, so a path is not silently translated against the wrong root.
 func ValidateWSLPath(distribution, value string) error {
 	parts := strings.Split(strings.TrimPrefix(strings.ReplaceAll(value, `\`, `/`), "//"), "/")
 	if len(parts) > 1 && (strings.EqualFold(parts[0], "wsl.localhost") || strings.EqualFold(parts[0], "wsl$")) && distribution == "" {
@@ -212,6 +220,8 @@ func decodeWSLOutput(output []byte) string {
 	return strings.ReplaceAll(string(output), "\x00", "")
 }
 
+// WithWSLDirectory returns a copy of the toolchain that starts each command in
+// directory inside the distribution.
 func WithWSLDirectory(t Toolchain, directory string) Toolchain {
 	args := append([]string{}, t.RunnerArgs...)
 	args = append(args, "--cd", directory)

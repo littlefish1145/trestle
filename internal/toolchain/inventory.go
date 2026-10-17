@@ -12,6 +12,9 @@ import (
 	"unicode/utf16"
 )
 
+// Component is one discovered piece of a toolchain installation, such as a
+// compiler, MSVC toolset, CUDA toolkit, or Vulkan shader tool. Ready reports
+// whether it can actually be executed.
 type Component struct {
 	Name         string
 	Family       string
@@ -23,12 +26,17 @@ type Component struct {
 	Distribution string
 }
 
+// Discover returns every compiler, MSVC toolset, CUDA, and Vulkan component
+// found on the host and inside installed WSL distributions.
 func Discover(ctx context.Context) []Component {
 	return append(DiscoverNative(ctx), discoverWSL(ctx)...)
 }
 
+// DiscoverWSL returns only the components found inside WSL distributions.
 func DiscoverWSL(ctx context.Context) []Component { return discoverWSL(ctx) }
 
+// DiscoverNative returns the components found on the host, adding placeholder
+// entries for families that were not detected so callers can report them.
 func DiscoverNative(ctx context.Context) []Component {
 	components := discoverCompilerComponents(ctx)
 	components = append(components, discoverMSVC(ctx)...)
@@ -184,6 +192,8 @@ func discoverWSLDistribution(ctx context.Context, wsl, distribution string) []Co
 	return result
 }
 
+// WSLDistributions parses the output of "wsl.exe --list --quiet" into
+// distribution names, tolerating UTF-16 output and a leading byte-order mark.
 func WSLDistributions(output []byte) []string {
 	var result []string
 	for _, line := range strings.Split(strings.ReplaceAll(decodeWindowsCommand(output), "\r\n", "\n"), "\n") {

@@ -6,6 +6,8 @@ import (
 	"strings"
 )
 
+// Compile builds the argument vector for compiling one source file, choosing
+// MSVC or GNU-style flags from the toolchain kind.
 func (t Toolchain) Compile(spec CompileSpec) (string, []string, error) {
 	if t.CXX == "" {
 		return "", nil, fmt.Errorf("C++ compiler is not configured")
@@ -58,6 +60,8 @@ func (t Toolchain) Compile(spec CompileSpec) (string, []string, error) {
 	return exe, args, nil
 }
 
+// Link builds the argument vector that links the inputs into an executable or a
+// shared library.
 func (t Toolchain) Link(spec LinkSpec) (string, []string, error) {
 	if t.Kind == MSVC {
 		linker := t.Linker
@@ -147,6 +151,8 @@ func msvcLibrary(library string) string {
 	return library + ".lib"
 }
 
+// Archive builds the argument vector that combines the inputs into the static
+// library named output.
 func (t Toolchain) Archive(output string, inputs []string) (string, []string, error) {
 	if t.Kind == MSVC {
 		exe, args := t.Wrap(t.Archiver, append([]string{"/nologo", "/OUT:" + output}, inputs...))

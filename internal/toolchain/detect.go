@@ -11,18 +11,28 @@ import (
 	"strings"
 )
 
+// DetectorImpl is the default Detector, resolving compilers from the host PATH
+// and from well-known installation directories.
 type DetectorImpl struct{}
 
+// NewDetector returns the default toolchain detector.
 func NewDetector() Detector { return DetectorImpl{} }
 
+// Detect resolves the requested compiler spec, which may be "auto", a name, or
+// a path, into a concrete Toolchain with its target and archiver filled in.
 func (DetectorImpl) Detect(ctx context.Context, requested string) (Toolchain, error) {
 	return detect(ctx, requested, "")
 }
 
+// DetectWithSetup is Detect with an explicit Visual Studio environment script,
+// used when the caller already knows which MSVC tools to build against.
 func (DetectorImpl) DetectWithSetup(ctx context.Context, requested, setup string) (Toolchain, error) {
 	return detect(ctx, requested, setup)
 }
 
+// EnvironmentForSetup returns the environment variables a Visual Studio setup
+// script contributes, plus the root that vcpkg should build against. It is best
+// effort and never fails, since an incomplete probe only degrades the child.
 func EnvironmentForSetup(ctx context.Context, setup string) map[string]string {
 	// Best effort: these callers pass the environment on to a child tool, so an
 	// incomplete probe degrades it rather than failing the operation.
@@ -36,6 +46,9 @@ func EnvironmentForSetup(ctx context.Context, setup string) map[string]string {
 	return environment
 }
 
+// NeedsMSVCEnvironment reports whether the compiler requires the MSVC
+// environment (INCLUDE, LIB, and so on) to run, which is true for cl, clang-cl,
+// and any clang targeting the MSVC ABI.
 func NeedsMSVCEnvironment(ctx context.Context, compiler string) bool {
 	base := strings.ToLower(filepath.Base(strings.TrimSpace(compiler)))
 	if base == "cl" || base == "cl.exe" || strings.Contains(base, "clang-cl") {
@@ -260,6 +273,8 @@ func detect(ctx context.Context, requested, setup string) (Toolchain, error) {
 	return candidates[0], nil
 }
 
+// List returns the toolchain as a single-element slice, so callers that work
+// with a set of toolchains can treat a pinned one uniformly.
 func (t Toolchain) List() []Toolchain { return []Toolchain{t} }
 
 func withMSVCEnvironment(ctx context.Context, candidate Toolchain, setup string) (Toolchain, error) {
@@ -280,6 +295,8 @@ func withMSVCEnvironment(ctx context.Context, candidate Toolchain, setup string)
 	return candidate, nil
 }
 
+// List probes PATH for the known compilers and returns a Toolchain for each one
+// that is present, annotating MSVC-ABI candidates with their environment.
 func List(ctx context.Context) []Toolchain {
 	var result []Toolchain
 	for _, requested := range []string{"clang++", "g++", "cl"} {
