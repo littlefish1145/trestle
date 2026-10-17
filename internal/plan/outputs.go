@@ -7,6 +7,8 @@ import (
 	"trestle/internal/model"
 )
 
+// Outputs computes the artifact path for every target, relative to the project
+// root and using the profile and toolchain naming rules.
 func Outputs(cfg config.Config, project model.ResolvedProject, options Options) (map[model.TargetID]string, error) {
 	result := make(map[model.TargetID]string, len(project.Targets))
 	for _, target := range project.Targets {

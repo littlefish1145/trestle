@@ -16,6 +16,8 @@ import (
 	"trestle/internal/toolchain/cuda"
 )
 
+// ModuleInfo describes one C++ module source: the artifact it exports, the
+// modules it provides and requires, and the headers it depends on.
 type ModuleInfo struct {
 	Artifact   string
 	Provides   []string
@@ -23,6 +25,9 @@ type ModuleInfo struct {
 	HeaderDeps []string
 }
 
+// Options carries everything Build needs beyond the configuration and resolved
+// project: the output roots, the toolchain, optional CUDA and Vulkan toolchains,
+// and the per-source module backends.
 type Options struct {
 	Root           string
 	BuildDir       string
@@ -34,6 +39,10 @@ type Options struct {
 	ModuleBackends map[string]modules.Support
 }
 
+// Build assembles the Ninja action graph for a resolved project: a compile
+// action per source, module and shader steps where required, device linking for
+// CUDA, then archive or link, runtime copies, and the test and "all" phony
+// targets. It returns a validated plan or the first error encountered.
 func Build(cfg config.Config, project model.ResolvedProject, options Options) (BuildPlan, error) {
 	hasShader := false
 	for _, target := range project.Targets {
@@ -464,4 +473,6 @@ func appendUnique(values []string, candidates ...string) []string {
 	return values
 }
 
+// ActionID joins its parts into a sanitized ID, turning a target or source name
+// into a Ninja-safe rule or action name.
 func ActionID(parts ...string) ID { return ID(sanitize(strings.Join(parts, ":"))) }
