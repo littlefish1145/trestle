@@ -24,6 +24,8 @@ type syncWriter struct {
 	w     io.Writer
 }
 
+// Write forwards data to the wrapped writer while holding the mutex, keeping
+// concurrent process streams from interleaving.
 func (writer *syncWriter) Write(data []byte) (int, error) {
 	writer.mutex.Lock()
 	defer writer.mutex.Unlock()
@@ -76,6 +78,8 @@ type captureWriter struct {
 	notify func(string)
 }
 
+// Write persists a chunk to the sink and then reports it through the notify
+// callback, so parsers see the bytes only after they have been stored.
 func (writer *captureWriter) Write(data []byte) (int, error) {
 	n, err := writer.sink.Write(data)
 	if err == nil && writer.notify != nil {
