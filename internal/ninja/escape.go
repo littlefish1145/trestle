@@ -2,6 +2,8 @@ package ninja
 
 import "strings"
 
+// EscapePath escapes the characters Ninja treats specially in a path, doubling
+// "$" and escaping spaces and colons.
 func EscapePath(value string) string {
 	value = strings.ReplaceAll(value, "$", "$$")
 	value = strings.ReplaceAll(value, " ", "$ ")
@@ -9,6 +11,8 @@ func EscapePath(value string) string {
 	return value
 }
 
+// Unescape reverses EscapePath by dropping the "$" that introduces each escaped
+// character.
 func Unescape(value string) string {
 	var result strings.Builder
 	for i := 0; i < len(value); i++ {

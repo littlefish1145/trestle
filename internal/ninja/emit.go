@@ -1,3 +1,5 @@
+// Package ninja renders a build plan into the build.ninja manifest format and
+// the dyndep files Ninja consumes for dynamic dependencies.
 package ninja
 
 import (
@@ -10,6 +12,9 @@ import (
 	"trestle/internal/plan"
 )
 
+// Emit validates buildPlan and renders it as a build.ninja manifest: one rule per
+// distinct action rule, the compile and console pools, every build statement, and
+// the default goals.
 func Emit(buildPlan plan.BuildPlan) ([]byte, error) {
 	if err := buildPlan.Validate(); err != nil {
 		return nil, err
@@ -147,4 +152,5 @@ func shellQuote(value string) string {
 
 func join(values []string, separator string) string { return strings.Join(values, separator) }
 
+// Slashes converts a filesystem path to forward slashes for use in a manifest.
 func Slashes(path string) string { return filepath.ToSlash(path) }

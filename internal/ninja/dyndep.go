@@ -5,6 +5,9 @@ import (
 	"fmt"
 )
 
+// Dyndep describes a Ninja dyndep file: its version, optional build name, and the
+// bind and implicit dependency edges discovered after the initial manifest was
+// written.
 type Dyndep struct {
 	Version  int
 	Build    string
@@ -15,6 +18,8 @@ type Dyndep struct {
 	Implicit map[string][]string
 }
 
+// EmitDyndep renders dyndep as the contents of a Ninja dynamic-dependency file,
+// escaping every path and rejecting unsupported versions.
 func EmitDyndep(dyndep Dyndep) ([]byte, error) {
 	if dyndep.Version != 1 {
 		return nil, fmt.Errorf("unsupported dyndep version %d", dyndep.Version)
