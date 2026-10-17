@@ -500,15 +500,27 @@ func SetTestGroup(path, job, group string) error {
 }
 
 func importCMake(ctx context.Context, path string, progress func(string)) (cmakeimport.Result, error) {
+	cfg, err := config.Load(path)
+	if err != nil {
+		return cmakeimport.Result{}, err
+	}
 	options := cmakeimport.Options{}
-	if cfg, err := config.Load(path); err == nil {
-		if selected, detectErr := (toolchain.DetectorImpl{}).DetectWithSetup(ctx, cfg.Toolchain.CXX, cfg.Toolchain.Setup); detectErr == nil {
-			options.CCompiler = selected.CC
-			if cfg.Toolchain.C != "" && cfg.Toolchain.C != "auto" {
-				options.CCompiler = cfg.Toolchain.C
-			}
-			options.CXXCompiler = selected.CXX
-			options.Environment = selected.Env
+	// detectConfigured honours the msvc pin and setup scripts, so a configured
+	// cl that is not on PATH still resolves. Falling back to CMake's own
+	// compiler pick would configure the import with an unconfigured clang++ and
+	// fail its standard-library try-compiles, so a detection failure is fatal
+	// in native mode. WSL mode keeps CMake's default pick because the Windows
+	// cmake process cannot drive a WSL compiler.
+	if cfg.Toolchain.Mode != "wsl" {
+		selected, detectErr := detectConfigured(ctx, cfg)
+		if detectErr != nil {
+			return cmakeimport.Result{}, fmt.Errorf("import cmake needs a working toolchain: %w", detectErr)
+		}
+		options.CCompiler = selected.CC
+		options.CXXCompiler = selected.CXX
+		options.Environment = selected.Env
+		if cfg.Toolchain.C != "" && cfg.Toolchain.C != "auto" {
+			options.CCompiler = cfg.Toolchain.C
 		}
 	}
 	return cmakeimport.ImportWithOptions(ctx, filepath.Dir(path), path, progress, options)
