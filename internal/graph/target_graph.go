@@ -1,3 +1,6 @@
+// Package graph resolves the declarative project configuration into a concrete
+// target graph, folding dependency usage into the compile and link interfaces
+// each target needs.
 package graph
 
 import (
@@ -14,10 +17,14 @@ import (
 	"trestle/internal/model"
 )
 
+// Resolve builds the resolved project for cfg using the current working directory
+// as the project root.
 func Resolve(cfg config.Config) (model.ResolvedProject, error) {
 	return ResolveAt(context.Background(), cfg, ".")
 }
 
+// ResolveAt builds the resolved project for cfg, resolving source globs and
+// package metadata relative to root.
 func ResolveAt(ctx context.Context, cfg config.Config, root string) (model.ResolvedProject, error) {
 	names := make([]string, 0, len(cfg.Targets))
 	for name := range cfg.Targets {
