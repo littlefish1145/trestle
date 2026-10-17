@@ -5,7 +5,6 @@ package tui
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"path/filepath"
 	"sort"
@@ -18,7 +17,6 @@ import (
 	"github.com/charmbracelet/x/ansi"
 	"trestle/internal/config"
 	"trestle/internal/deps"
-	"trestle/internal/diag"
 	"trestle/internal/policy"
 	"trestle/internal/runlog"
 	"trestle/internal/toolchain"
@@ -327,248 +325,43 @@ func pulseCommand() tea.Cmd {
 func (model dashboardModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	switch value := message.(type) {
 	case workflowBatch:
-		model.batchingLogs = true
-		var command tea.Cmd
-		for _, event := range value {
-			updated, cmd := model.Update(event)
-			model = updated.(dashboardModel)
-			command = cmd
-			if event.done {
-				break
-			}
-		}
-		model.batchingLogs = false
-		model.followVisibleLog(model.workflowRoute)
-		return model, command
+		return model.applyWorkflowBatch(value)
 	case installBatch:
-		model.batchingLogs = true
-		var command tea.Cmd
-		for _, event := range value {
-			updated, cmd := model.Update(event)
-			model = updated.(dashboardModel)
-			command = cmd
-			if event.done {
-				break
-			}
-		}
-		model.batchingLogs = false
-		model.followVisibleLog(PackagesRoute)
-		return model, command
+		return model.applyInstallBatch(value)
 	case tea.WindowSizeMsg:
-		model.width, model.height = value.Width, value.Height
-		if model.logFollow && model.hasLog() {
-			model.logScroll = model.maxLogScroll()
-		}
+		return model.applyWindowSize(value), nil
 	case tea.BackgroundColorMsg:
-		// A missing or unreadable background answer falls back to dark, the
-		// look the console was designed around.
-		model.lightBackground = !value.IsDark()
+		return model.applyBackgroundColor(value), nil
 	case pulseMessage:
-		model.pulse++
-		if model.busy() {
-			return model, pulseCommand()
-		}
+		return model.applyPulse()
 	case inventoryMessage:
-		model.discovering = false
-		for _, component := range model.probe.Components {
-			if component.Execution == "wsl" || component.Family == "WSL" {
-				value.components = append(value.components, component)
-			}
-		}
-		model.probe.Components = value.components
-		model.probe.Vulkan = false
-		for _, component := range value.components {
-			if component.Family == "Vulkan" && component.Ready {
-				model.probe.Vulkan = true
-			}
-		}
+		return model.applyInventory(value), nil
 	case wslInventoryMessage:
-		model.wslDiscovering = false
-		var components []toolchain.Component
-		for _, component := range model.probe.Components {
-			if component.Execution != "wsl" && component.Family != "WSL" {
-				components = append(components, component)
-			}
-		}
-		model.probe.Components = append(components, value.components...)
+		return model.applyWSLInventory(value), nil
 	case assessmentMessage:
-		if value.fingerprint != model.projectFingerprint {
-			return model, nil
-		}
-		model.assessing = false
-		model.probe.Statuses, model.probe.Rules = value.statuses, value.rules
-		if value.cfg.SchemaVersion != 0 {
-			model.config = value.cfg
-		}
-		if value.err != nil {
-			model.lastError = value.err
-			model.setMessage(value.err.Error(), true)
-		}
+		return model.applyAssessment(value), nil
 	case probeMessage:
-		model.probing = false
-		changed := value.Fingerprint != model.projectFingerprint
-		value.Components, value.Toolchains, value.Vulkan = model.probe.Components, model.probe.Toolchains, model.probe.Vulkan
-		if !changed {
-			value.Statuses, value.Rules = model.probe.Statuses, model.probe.Rules
-			value.Config = model.config
-		}
-		model.probe, model.config, model.baseConfig = value, value.Config, value.BaseConfig
-		model.projectFingerprint = value.Fingerprint
-		if value.Error != nil {
-			model.lastError = value.Error
-			model.setMessage(value.Error.Error(), true)
-		} else if !model.mutating {
-			model.setMessage("Project model is ready", false)
-		}
-		model.clampCursor()
-		if changed && value.Error == nil && model.services.AssessTargets != nil {
-			model.assessing = true
-			return model, model.assessmentCommand()
-		}
+		return model.applyProbe(value)
 	case packageSearchMessage:
-		model.searching = false
-		if value.err != nil {
-			model.lastError = value.err
-			model.setMessage(value.err.Error(), true)
-		} else if len(value.ports) == 0 {
-			model.packageResults = nil
-			model.setMessage("No matching packages found", false)
-		} else {
-			model.packageResults = value.ports
-			// One row per package name, so a library offered by both vcpkg and
-			// conan is chosen once instead of twice.
-			model.packagePackages = deps.Merge(value.ports)
-			model.packageLevel = packageListLevel
-			model.cursor = len(model.config.Packages)
-			model.scroll = max(0, model.cursor-2)
-			if model.packageRequested != "" {
-				// A pinned version jumps straight into the picker with that
-				// release highlighted, ready to install with enter or i.
-				if model.enterPackageByName(value.ports) {
-					model.setMessage(fmt.Sprintf("%s %s · enter installs this version, esc returns", queryName(value.ports), model.packageRequested), false)
-					return model, nil
-				}
-			}
-			model.setMessage(fmt.Sprintf("Found %d package%s · enter chooses a version and source", len(model.packagePackages), plural(len(model.packagePackages))), false)
-		}
+		return model.applyPackageSearch(value), nil
 	case mutationMessage:
-		model.mutating = false
-		model.operation = ""
-		if value.err != nil {
-			value.err = runlog.Failure(model.path, value.label, value.err)
-			model.lastError = value.err
-			model.setMessage(value.err.Error(), true)
-			return model, nil
-		}
-		model.setMessage(value.label, false)
-		return model, model.probeCommand()
+		return model.applyMutation(value)
 	case installEvent:
-		if !value.done {
-			model.receiveLog(value.line, true)
-			model.followVisibleLog(PackagesRoute)
-			model.setMessage("Installing dependency · F2 complete output", false)
-			return model, waitInstallEvent(model.installEvents)
-		}
-		if model.installCancel != nil {
-			model.installCancel()
-		}
-		model.mutating, model.operation, model.installEvents, model.installCancel = false, "", nil, nil
-		if value.err != nil {
-			model.lastError = value.err
-			model.receiveLog(diag.Text(value.err), true)
-			model.followVisibleLog(PackagesRoute)
-			model.setMessage("Install failed · "+value.err.Error(), true)
-			if model.quitAfterTask {
-				model.quitAfterTask = false
-				return model, tea.Quit
-			}
-			return model, nil
-		}
-		if model.quitAfterTask {
-			model.quitAfterTask = false
-			return model, tea.Quit
-		}
-		model.setMessage("Installed and added "+value.name, false)
-		return model, model.probeCommand()
+		return model.applyInstallEvent(value)
 	case workflowEvent:
-		if !value.done {
-			model.receiveLog(value.line, false)
-			model.followVisibleLog(model.workflowRoute)
-			if diagnosticLine(value.line) {
-				model.workflowErrors = append(model.workflowErrors, value.line)
-				if len(model.workflowErrors) > 512 {
-					model.workflowErrors = model.workflowErrors[len(model.workflowErrors)-512:]
-				}
-			}
-			model.setMessage(value.label+" running · F2 complete output", false)
-			return model, waitWorkflowEvent(model.workflowEvents)
-		}
-		if model.workflowCancel != nil {
-			model.workflowCancel()
-		}
-		model.mutating, model.operation, model.workflowEvents, model.workflowCancel = false, "", nil, nil
-		quitAfterTask := model.quitAfterTask
-		model.quitAfterTask = false
-		if value.err != nil {
-			model.lastError = value.err
-			model.receiveLog(diag.Text(value.err), false)
-			model.followVisibleLog(model.workflowRoute)
-			switch {
-			case errors.Is(value.err, context.Canceled):
-				model.setMessage(value.label+" cancelled", false)
-			case errors.Is(value.err, context.DeadlineExceeded):
-				model.setMessage(value.label+" timed out · "+value.err.Error(), true)
-			default:
-				model.setMessage(value.label+" failed · "+value.err.Error(), true)
-			}
-			if quitAfterTask {
-				return model, tea.Quit
-			}
-			return model, nil
-		}
-		model.setMessage(value.label+" completed", false)
-		if value.label == "Build" {
-			model.lastRun = "Completed just now"
-		}
-		if quitAfterTask {
-			return model, tea.Quit
-		}
-		return model, model.probeCommand()
+		return model.applyWorkflowEvent(value)
 	case tea.MouseWheelMsg:
-		mouse := value.Mouse()
-		delta := 0
-		switch mouse.Button {
-		case tea.MouseWheelUp:
-			delta = -3
-		case tea.MouseWheelDown:
-			delta = 3
-		}
-		if delta != 0 {
-			if model.help || model.details || model.history {
-				model.overlayScroll = max(0, model.overlayScroll+delta)
-			} else if model.hasLog() && (model.fullLog || mouse.Y >= model.height-model.logHeight()-2 || model.focus == focusLog) {
-				model.focus = focusLog
-				model.scrollLog(delta)
-			} else {
-				model.focus = focusContent
-				model.scrollContent(delta)
-			}
-		}
-		return model, nil
+		return model.applyMouseWheel(value), nil
 	case tea.MouseClickMsg:
-		if value.Mouse().Button == tea.MouseLeft {
-			model.focus = focusContent
-			if model.hasLog() && (model.fullLog || value.Mouse().Y >= model.height-model.logHeight()-2) {
-				model.focus = focusLog
-			}
-		}
-		return model, nil
+		return model.applyMouseClick(value), nil
 	case tea.KeyPressMsg:
 		return model.handleKey(value)
 	}
 	return model, nil
 }
 
+// handleKey routes a key press through the console's modal layers and then the
+// active screen's key groups, in the order the overlays take precedence.
 func (model dashboardModel) handleKey(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	key := message.Key()
 	if !model.inputMode && model.pendingTask == "" {
@@ -580,564 +373,51 @@ func (model dashboardModel) handleKey(message tea.KeyPressMsg) (tea.Model, tea.C
 		}
 	}
 	if model.pendingTask != "" {
-		switch key.String() {
-		case "y", "enter":
-			name := model.pendingTask
-			preview := model.pendingTaskPreview
-			model.pendingTask = ""
-			model.pendingTaskPreview = config.TaskPreview{}
-			if model.services.RunTask == nil {
-				model.setMessage("Task service is unavailable", true)
-				return model, nil
-			}
-			return model.startWorkflow("Task "+name, func(ctx context.Context, progress func(string)) error {
-				return model.services.RunTask(ctx, name, preview, progress)
-			})
-		case "n", "esc", "q":
-			model.pendingTask = ""
-			model.pendingTaskPreview = config.TaskPreview{}
-			model.setMessage("Task cancelled", false)
-		}
-		return model, nil
+		return model.handlePendingTaskKey(key)
 	}
 	if model.inputMode {
 		return model.handleInput(key)
 	}
 	if model.help {
-		if key.String() == "?" || key.String() == "esc" || key.String() == "q" {
-			model.help = false
-		}
-		return model, nil
+		return model.handleHelpKey(key)
 	}
 	if (key.String() == "esc" || key.String() == "ctrl+c") && model.mutating && model.workflowCancel != nil {
 		model.workflowCancel()
 		model.setMessage("Cancelling operation…", false)
 		return model, nil
 	}
-	switch key.String() {
-	case "q", "ctrl+c":
-		if model.mutating && model.workflowCancel != nil {
-			model.quitAfterTask = true
-			model.workflowCancel()
-			model.setMessage("Stopping operation before exit…", false)
-			return model, nil
-		}
-		if model.installCancel != nil {
-			model.installCancel()
-			model.quitAfterTask = true
-			model.setMessage("Stopping installation before exit…", false)
-			return model, nil
-		}
-		if model.workflowCancel != nil {
-			model.workflowCancel()
-		}
-		return model, tea.Quit
-	case "esc", "backspace":
-		// esc is the universal "return" key: it steps back out of the package
-		// drill-down before it does anything else, so the user always has a way
-		// back to the previous level.
-		if model.route == PackagesRoute && model.packageLevel == packageCandidatesLevel {
-			model.leaveCandidates()
-			model.setMessage("Back to packages", false)
-			return model, nil
-		}
-		if model.inputMode {
-			model.closeInput()
-			model.setMessage("Cancelled", false)
-			return model, nil
-		}
-		if model.help || model.details || model.history {
-			model.help, model.details, model.history = false, false, false
-			return model, nil
-		}
-		model.setMessage("Nothing to go back to", false)
-		return model, nil
-	case "?":
-		model.saveOverlayPosition()
-		model.details, model.history = false, false
-		model.help = true
-		model.overlayScroll = model.helpScroll
-	case "tab":
-		model.focus = (model.focus + 1) % 3
-		if model.focus == focusContent {
-			model.keepCursorVisible()
-		}
-	case "shift+tab":
-		model.focus = (model.focus + 2) % 3
-		if model.focus == focusContent {
-			model.keepCursorVisible()
-		}
-	case "left", "h":
-		model.focus = focusNavigation
-	case "right", "l":
-		model.focus = focusContent
-	case "enter":
-		if model.focus == focusNavigation {
-			model.focus = focusContent
-			model.keepCursorVisible()
-		} else if model.route == PackagesRoute {
-			if model.packageLevel == packageCandidatesLevel {
-				pkg, candidate, ok := model.selectedCandidate()
-				if !ok {
-					return model, nil
-				}
-				return model.installPackage(referenceFor(pkg, candidate))
-			}
-			if model.enterCandidates() {
-				return model, nil
-			}
-		} else if model.route == ToolchainsRoute {
-			if component, ok := model.selectedComponent(); ok {
-				if component.Family == "CUDA" && component.Ready {
-					return model.connectCUDA(component)
-				}
-				if component.Family == "Vulkan" && component.Ready {
-					return model.connectVulkan(component)
-				}
-				if _, compiler := model.selectedCompiler(); !compiler {
-					break
-				}
-				if component.Execution == "wsl" {
-					return model.startMutation("Selecting WSL compiler", "WSL compiler selected: "+component.Name+" · builds run inside "+component.Distribution, func() error {
-						if model.services.SetWSLCompiler == nil {
-							return fmt.Errorf("WSL compiler service is unavailable")
-						}
-						return model.services.SetWSLCompiler(component.Distribution, component.Path)
-					})
-				}
-				return model.startMutation("Selecting compiler", "Compiler selected: "+component.Name, func() error { return callOne(model.services.SetCompiler, component.Path, "toolchain service") })
-			}
-		} else if model.route == ImportRoute {
-			return model.startProjectImport()
-		} else if model.route == TasksRoute {
-			if name, ok := model.selectedTask(); ok {
-				if model.services.PreviewTask == nil {
-					model.setMessage("Task preview service is unavailable", true)
-					return model, nil
-				}
-				preview, err := model.services.PreviewTask(context.Background(), name)
-				if err != nil {
-					model.setMessage(err.Error(), true)
-					return model, nil
-				}
-				model.pendingTask = name
-				model.pendingTaskPreview = preview
-				model.setMessage("Review task and press y to run, n to cancel", false)
-			}
-			return model, nil
-		} else if model.route == TargetsRoute || model.route == BuildRoute {
-			return model.startSelectedTargetBuild()
-		} else if model.route == TestsRoute {
-			return model.runSelectedTest()
-		} else if model.route == SettingsRoute {
-			model.openSelectedSetting()
-			return model, nil
-		} else if model.route == PresetsRoute {
-			if name, ok := model.selectedPreset(); ok {
-				return model.startMutation("Applying compiler preset", "Applied preset "+name, func() error { return callOne(model.services.ApplyPreset, name, "preset service") })
-			}
-		} else if model.route == ReleaseRoute {
-			return model.selectReleaseOptimization()
-		} else if model.route == DoctorRoute && model.services.Doctor != nil {
-			return model.startWorkflow("Doctor", model.services.Doctor)
-		}
-	case "up", "k":
-		model.move(-1)
-	case "down", "j":
-		model.move(1)
-	case "pgup":
-		if model.focus == focusContent && (model.route == SettingsRoute && model.rulesView) {
-			model.scrollContent(-max(1, model.viewportHeight()/2))
-		} else {
-			model.move(-max(1, model.viewportHeight()/2))
-		}
-	case "pgdown":
-		if model.focus == focusContent && (model.route == SettingsRoute && model.rulesView) {
-			model.scrollContent(max(1, model.viewportHeight()/2))
-		} else {
-			model.move(max(1, model.viewportHeight()/2))
-		}
-	case "home":
-		model.cursor, model.scroll = 0, 0
-		model.logFollow = false
-	case "end", "G":
-		if model.focus == focusContent && (model.route == SettingsRoute && model.rulesView) {
-			model.scroll = model.maxContentScroll()
-			model.logFollow = true
-		} else {
-			model.cursor = max(0, model.itemCount()-1)
-			model.keepCursorVisible()
-		}
-	case "b":
-		if model.route == ReleaseRoute {
-			return model.startRelease()
-		}
-		return model.startBuild()
-	case "r":
-		if model.route == ReleaseRoute {
-			return model.startRelease()
-		}
-		model.probing = true
-		model.setMessage("Refreshing project files…", false)
-		if model.route == ToolchainsRoute && !model.discovering && !model.wslDiscovering {
-			model.discovering = true
-			model.wslDiscovering = true
-			return model, tea.Batch(model.probeCommand(), model.inventoryCommand(), model.wslInventoryCommand(), pulseCommand())
-		}
-		return model, model.probeCommand()
-	case "ctrl+r":
-		model.probing = true
-		if !model.discovering && !model.wslDiscovering {
-			model.discovering = true
-			model.wslDiscovering = true
-			return model, tea.Batch(model.probeCommand(), model.inventoryCommand(), model.wslInventoryCommand(), pulseCommand())
-		}
-		return model, model.probeCommand()
-	case "p":
-		profile := "release"
-		if model.config.Build.Profile == "release" {
-			profile = "debug"
-		}
-		return model.startMutation("Switching profile", "Profile changed to "+profile, func() error { return callOne(model.services.SetProfile, profile, "profile service") })
-	case "a":
-		if model.route == TestsRoute {
-			return model.startTests(TestSelection{All: true}, "All tests")
-		} else if model.route == TargetsRoute || model.route == BuildRoute {
-			return model.startTargetBuild(nil, true, "Build all targets")
-		} else if model.route == PresetsRoute {
-			if name, ok := model.selectedPreset(); ok {
-				return model.startMutation("Applying compiler preset", "Applied preset "+name, func() error { return callOne(model.services.ApplyPreset, name, "preset service") })
-			}
-			model.setMessage("No compiler preset is selected", true)
-			return model, nil
-		}
-		model.route, model.focus = PackagesRoute, focusContent
-		model.openInput("install", "Install package by name (vcpkg port or conan name/version)")
-	case "n":
-		if model.route == PackagesRoute && model.packageLevel == packageListLevel && len(model.packagePackages) > 0 {
-			model.cursor = len(model.config.Packages)
-			model.scroll = max(0, model.cursor-2)
-			model.setMessage("Cursor jumped to first search result", false)
-		} else if model.route == ToolchainsRoute || model.route == PresetsRoute {
-			model.openInput("save-preset", "Save current compiler setup as preset")
-		}
-	case "i":
-		if model.route == ImportRoute {
-			return model.startProjectImport()
-		} else if model.route == PackagesRoute {
-			if model.packageLevel == packageCandidatesLevel {
-				pkg, candidate, ok := model.selectedCandidate()
-				if !ok {
-					return model, nil
-				}
-				return model.installPackage(referenceFor(pkg, candidate))
-			}
-			// On the package list "i" is the quick action: install the newest
-			// version right away, without stepping into the version picker.
-			pkg, ok := model.selectedPackage()
-			if !ok {
-				return model, nil
-			}
-			candidate, ok := pkg.Preferred(model.packageRequested)
-			if !ok {
-				model.setMessage("No installable version is available for "+pkg.Name, true)
-				return model, nil
-			}
-			notice := "Installing " + pkg.Name + " " + fallback(candidate.Version, "latest")
-			model.setMessage(notice+" from "+candidate.Provider+"…", false)
-			return model.installPackage(referenceFor(pkg, candidate))
-		}
-	case "f":
-		if model.route == TargetsRoute || model.route == BuildRoute {
-			if name, ok := model.selectedTarget(); ok {
-				return model.startForcedTargetBuild(name)
-			}
-		} else if model.route == TestsRoute {
-			model.testFileMode = !model.testFileMode
-			model.cursor, model.scroll = 0, 0
-			if model.testFileMode {
-				model.setMessage("File view · enter runs the job owning that file", false)
-			} else {
-				model.setMessage("Job view", false)
-			}
-		} else if model.route == PackagesRoute {
-			if model.packageLevel != packageListLevel {
-				return model, nil
-			}
-			if pkg, ok := model.selectedPackage(); ok {
-				features := candidateFeatures(model, pkg)
-				if len(features) > 0 {
-					model.openInput("features", "Features for "+pkg.Name+" (comma separated)")
-					model.inputPackage = pkg.Name
-				}
-			}
-		}
-	case "/", "s":
-		model.route, model.focus = PackagesRoute, focusContent
-		model.openInput("search", "Search vcpkg and conan (name:version pins a release, e.g. fmt:11.2.0)")
-	case "d":
-		if model.route == PackagesRoute {
-			names := sortedPackageNames(model.config.Packages)
-			if model.focus == focusContent && model.cursor >= 0 && model.cursor < len(names) {
-				name := names[model.cursor]
-				return model.startMutation("Removing dependency "+name, "Removed "+name, func() error {
-					return callOne(model.services.RemovePackage, name, "package service")
-				})
-			}
-			model.openInput("remove", "Remove configured package")
-		} else if model.route == TargetsRoute {
-			if name, ok := model.selectedTarget(); ok {
-				return model.startMutation("Setting default target", "Default target: "+name, func() error {
-					if model.services.SetDefaultTargets == nil {
-						return fmt.Errorf("default target service is unavailable")
-					}
-					return model.services.SetDefaultTargets([]string{name})
-				})
-			}
-		} else if model.route == PresetsRoute {
-			if name, ok := model.selectedPreset(); ok {
-				return model.startMutation("Deleting compiler preset", "Deleted preset "+name, func() error { return callOne(model.services.DeletePreset, name, "preset service") })
-			}
-		}
-	case "v":
-		if model.route == ToolchainsRoute {
-			enabled := model.config.Toolchain.Vulkan == ""
-			if enabled {
-				if component, ok := model.detectedSDK("Vulkan"); ok {
-					return model.connectVulkan(component)
-				}
-				model.setMessage("No Vulkan SDK was detected", true)
-				return model, nil
-			}
-			return model.startMutation("Disconnecting Vulkan SDK", "Vulkan SDK disconnected", func() error {
-				if model.services.SetVulkan == nil {
-					return fmt.Errorf("Vulkan service is unavailable")
-				}
-				return model.services.SetVulkan(false, "", "native", "")
-			})
-		} else if model.route == SettingsRoute {
-			model.rulesView = !model.rulesView
-			model.cursor, model.scroll, model.logFollow = 0, 0, false
-		} else if model.route == PackagesRoute {
-			model.openInput("version", "Set package version (name@version)")
-			names := sortedPackageNames(model.config.Packages)
-			if model.cursor >= 0 && model.cursor < len(names) {
-				model.inputText = names[model.cursor] + "@"
-			}
-		}
-	case "e":
-		if model.route == ToolchainsRoute {
-			model.openInput("environment", "Environment setup script (type inherit to clear)")
-		} else if model.route == SettingsRoute {
-			model.openSelectedSetting()
-		} else {
-			model.route, model.focus = SettingsRoute, focusContent
-			model.openInput("flags", "Set compiler flags")
-		}
-	case "x":
-		if model.route == ToolchainsRoute {
-			model.openInput("apply-preset", "Apply compiler preset")
-		} else if model.route == SettingsRoute {
-			model.openInput("cxx-flags", "Set C++-only compiler flags")
-		}
-	case "o":
-		if model.route == ReleaseRoute {
-			model.openInput("release-output", "Release ZIP output path")
-			model.inputText = model.config.Package.Output
-		} else if model.route == SettingsRoute {
-			model.openInput("link-flags", "Set linker flags")
-		}
-	case "c":
-		if model.route == ToolchainsRoute {
-			enabled := model.config.Toolchain.CUDA == ""
-			component, detected := model.detectedSDKForExecution("CUDA", model.config.Toolchain.Mode)
-			if enabled && !detected {
-				kind, prompt := "cuda", "CUDA toolkit root (no native toolkit was auto-detected)"
-				if model.config.Toolchain.Mode == "wsl" {
-					kind, prompt = "cuda-wsl", "CUDA toolkit root inside "+fallback(model.config.Toolchain.WSLDistribution, "the default WSL distribution")
-				}
-				model.openInput(kind, prompt)
-				return model, nil
-			}
-			if enabled {
-				return model.connectCUDA(component)
-			}
-			label := "CUDA disabled"
-			return model.startMutation("Updating CUDA", label, func() error {
-				if model.services.SetCUDAConnection != nil {
-					return model.services.SetCUDAConnection(false, "", "native", "")
-				}
-				if model.services.SetCUDA == nil {
-					return fmt.Errorf("CUDA service is unavailable")
-				}
-				return model.services.SetCUDA(false, "")
-			})
-		} else if model.route == SettingsRoute {
-			model.openInput("c-flags", "Set C-only compiler flags")
-		}
-	case "u":
-		if model.route == ToolchainsRoute {
-			kind := "cuda"
-			if model.config.Toolchain.Mode == "wsl" {
-				kind = "cuda-wsl"
-			}
-			model.openInput(kind, "CUDA toolkit root")
-		}
-	case "g":
-		if model.route == TestsRoute {
-			if job, ok := model.selectedTestJob(); ok {
-				return model.startTests(TestSelection{Group: job.Group}, "Test group "+job.Group)
-			}
-		} else {
-			model.cursor, model.scroll = 0, 0
-		}
-	case "m":
-		if model.route == TestsRoute {
-			if job, ok := model.selectedTestJob(); ok {
-				model.openInput("test-group", "Move "+job.Name+" to test group")
-				model.inputPackage = job.Name
-				model.inputText = job.Group
-			}
-		}
-	case "t":
-		if model.route == ReleaseRoute {
-			model.openInput("release-targets", "Release targets (comma separated)")
-			model.inputText = strings.Join(model.config.Package.Targets, ",")
-		}
-	default:
-		if key.String() == "0" {
-			model.selectRoute(9)
-		} else if len(key.String()) == 1 && key.String()[0] >= '1' && key.String()[0] <= '9' {
-			model.selectRoute(int(key.String()[0] - '1'))
-		}
+	if updated, cmd, handled := model.handleModalKeys(key); handled {
+		return updated, cmd
 	}
+	if updated, cmd, handled := model.handleFocusKeys(key); handled {
+		return updated, cmd
+	}
+	if updated, cmd, handled := model.handleMoveKeys(key); handled {
+		return updated, cmd
+	}
+	if updated, cmd, handled := model.handleActionKeys(key); handled {
+		return updated, cmd
+	}
+	if updated, cmd, handled := model.handleListKeys(key); handled {
+		return updated, cmd
+	}
+	if updated, cmd, handled := model.handleToolchainKeys(key); handled {
+		return updated, cmd
+	}
+	if updated, cmd, handled := model.handleSurfaceKeys(key); handled {
+		return updated, cmd
+	}
+	model.selectRouteByNumber(key)
 	return model, nil
 }
 
+// handleInput edits the active text prompt: enter submits, esc cancels and the
+// remaining keys edit the buffer. While searching settings every keystroke also
+// refreshes the filter.
 func (model dashboardModel) handleInput(key tea.Key) (tea.Model, tea.Cmd) {
 	switch key.String() {
 	case "enter":
-		text, kind, packageName := strings.TrimSpace(model.inputText), model.inputKind, model.inputPackage
-		model.closeInput()
-		if kind == "settings-search" {
-			model.settingsQuery = text
-			model.settingsCategory = ""
-			model.cursor, model.scroll = 0, 0
-			return model, nil
-		}
-		if kind == "log-search" {
-			model.logQuery = text
-			model.findLog(false)
-			return model, nil
-		}
-		if text == "" && kind != "environment" && kind != "setting" {
-			model.setMessage("Nothing changed", false)
-			return model, nil
-		}
-		if kind == "search" {
-			if model.services.SearchPackages == nil {
-				model.setMessage("package search is unavailable", true)
-				return model, nil
-			}
-			model.searching = true
-			model.packageResults = nil
-			// A "name:version" term remembers the version so the page can
-			// highlight it and the quick install action can target it.
-			model.packageRequested = deps.ParseQuery(text).Version
-			model.cursor, model.scroll = max(0, len(model.config.Packages)-1), 0
-			model.setMessage("Searching vcpkg and conan indexes for “"+text+"”…", false)
-			return model, tea.Batch(func() tea.Msg {
-				ports, err := model.services.SearchPackages(context.Background(), text)
-				return packageSearchMessage{ports: ports, err: err}
-			}, pulseCommand())
-		}
-		var action func() error
-		label := "Saved"
-		switch kind {
-		case "package":
-			action, label = func() error { return callOne(model.services.AddPackage, text, "package service") }, "Added "+text
-		case "install":
-			return model.installPackage(text)
-		case "features":
-			features := strings.Join(strings.FieldsFunc(text, func(value rune) bool { return value == ',' || value == ' ' }), ",")
-			spec := packageName + "[" + features + "]"
-			return model.installPackage(spec)
-		case "flags":
-			action, label = func() error { return callOne(model.services.SetCompileFlags, text, "settings service") }, "Compiler flags updated"
-		case "c-flags", "cxx-flags", "link-flags":
-			language := strings.TrimSuffix(kind, "-flags")
-			action, label = func() error {
-				if model.services.SetLanguageFlags == nil {
-					return fmt.Errorf("language flag service is unavailable")
-				}
-				return model.services.SetLanguageFlags(language, text)
-			}, strings.ToUpper(language)+" flags updated"
-		case "apply-preset":
-			action, label = func() error { return callOne(model.services.ApplyPreset, text, "preset service") }, "Applied preset "+text
-		case "save-preset":
-			action, label = func() error { return callOne(model.services.SavePreset, text, "preset service") }, "Saved preset "+text
-		case "setting":
-			action, label = func() error {
-				if model.services.SetProjectSetting == nil {
-					return fmt.Errorf("settings service is unavailable")
-				}
-				return model.services.SetProjectSetting(packageName, text)
-			}, "Updated "+packageName
-		case "release-output":
-			action, label = func() error {
-				if model.services.ConfigureRelease == nil {
-					return fmt.Errorf("release service is unavailable")
-				}
-				return model.services.ConfigureRelease("", nil, text)
-			}, "Release output updated"
-		case "release-targets":
-			targets := splitList(text)
-			action, label = func() error {
-				if model.services.ConfigureRelease == nil {
-					return fmt.Errorf("release service is unavailable")
-				}
-				return model.services.ConfigureRelease("", targets, "")
-			}, "Release targets updated"
-		case "environment":
-			action, label = func() error { return callOne(model.services.SetEnvironment, text, "environment service") }, "Build environment updated"
-		case "cuda":
-			action, label = func() error {
-				if model.services.SetCUDA == nil {
-					return fmt.Errorf("CUDA service is unavailable")
-				}
-				return model.services.SetCUDA(true, text)
-			}, "CUDA enabled"
-		case "cuda-wsl":
-			action, label = func() error {
-				if model.services.SetCUDAConnection == nil {
-					return fmt.Errorf("WSL CUDA service is unavailable")
-				}
-				return model.services.SetCUDAConnection(true, text, "wsl", model.config.Toolchain.WSLDistribution)
-			}, "WSL CUDA enabled"
-		case "test-group":
-			action, label = func() error {
-				if model.services.SetTestGroup == nil {
-					return fmt.Errorf("test suite service is unavailable")
-				}
-				return model.services.SetTestGroup(packageName, text)
-			}, "Moved "+packageName+" to group "+text
-		case "remove":
-			action, label = func() error { return callOne(model.services.RemovePackage, text, "package service") }, "Removed "+text
-		case "version":
-			parts := strings.SplitN(text, "@", 2)
-			if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
-				model.setMessage("Use name@version, for example fmt@11.0.2", true)
-				return model, nil
-			}
-			action = func() error {
-				if model.services.SetPackageVersion == nil {
-					return fmt.Errorf("package service is unavailable")
-				}
-				return model.services.SetPackageVersion(parts[0], parts[1])
-			}
-			label = "Updated " + parts[0] + " to " + parts[1]
-		}
-		return model.startMutation("Saving changes", label, action)
+		return model.submitInput()
 	case "esc":
 		model.closeInput()
 		model.setMessage("Cancelled", false)
