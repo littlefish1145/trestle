@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -29,9 +28,6 @@ import (
 	cmakeimport "trestle/internal/importer/cmake"
 	xmakeimport "trestle/internal/importer/xmake"
 	"trestle/internal/model"
-	"trestle/internal/modules"
-	"trestle/internal/modules/backends/clang"
-	"trestle/internal/modules/p1689"
 	"trestle/internal/ninja"
 	"trestle/internal/plan"
 	"trestle/internal/policy"
@@ -380,29 +376,9 @@ func SetCUDAConnection(configPath string, enabled bool, root, execution, distrib
 	distribution = strings.TrimSpace(distribution)
 	switch execution {
 	case "wsl":
-		if cfg.Toolchain.Mode != "wsl" {
-			return fmt.Errorf("E_CUDA_WSL_HOST: select a WSL C/C++ compiler before connecting WSL CUDA")
-		}
-		if distribution == "" {
-			distribution = cfg.Toolchain.WSLDistribution
-		}
-		if cfg.Toolchain.WSLDistribution != "" && distribution != "" && !strings.EqualFold(cfg.Toolchain.WSLDistribution, distribution) {
-			return fmt.Errorf("E_CUDA_WSL_DISTRIBUTION: CUDA is in %s but the compiler is in %s", distribution, cfg.Toolchain.WSLDistribution)
-		}
-		host, detectErr := detectConfigured(context.Background(), cfg)
-		if detectErr != nil {
-			return detectErr
-		}
-		detected, detectErr := cuda.DetectWSL(context.Background(), distribution, request, host)
-		if detectErr != nil {
-			return detectErr
-		}
-		// A WSL toolkit root is a Linux path on this machine; keep the version
-		// range when the layout names one so nothing machine-specific is stored.
-		if version, ok := toolkitVersionOfRoot(detected.Toolkit.Root, detected.Toolkit.Version); ok {
-			request, root = version+"~"+version, ""
-		} else {
-			request, root = "auto", detected.Toolkit.Root
+		request, root, distribution, err = resolveWSLConnection(cfg, distribution, request)
+		if err != nil {
+			return err
 		}
 	case "native":
 		version, toolkit, resolveErr := configureCUDA(context.Background(), cfg, request)
@@ -418,6 +394,35 @@ func SetCUDAConnection(configPath string, enabled bool, root, execution, distrib
 	cfg.Toolchain.CUDAExecution = execution
 	cfg.Toolchain.CUDAWSLDistribution = distribution
 	return config.Save(configPath, cfg)
+}
+
+// resolveWSLConnection resolves a requested WSL CUDA toolkit into the portable
+// version range or root the configuration stores, returning the effective
+// distribution alongside them. A WSL toolkit root is a Linux path on this
+// machine, so the version range is kept when the layout names one, ensuring
+// nothing machine-specific is stored.
+func resolveWSLConnection(cfg config.Config, distribution, request string) (string, string, string, error) {
+	if cfg.Toolchain.Mode != "wsl" {
+		return "", "", "", fmt.Errorf("E_CUDA_WSL_HOST: select a WSL C/C++ compiler before connecting WSL CUDA")
+	}
+	if distribution == "" {
+		distribution = cfg.Toolchain.WSLDistribution
+	}
+	if cfg.Toolchain.WSLDistribution != "" && distribution != "" && !strings.EqualFold(cfg.Toolchain.WSLDistribution, distribution) {
+		return "", "", "", fmt.Errorf("E_CUDA_WSL_DISTRIBUTION: CUDA is in %s but the compiler is in %s", distribution, cfg.Toolchain.WSLDistribution)
+	}
+	host, err := detectConfigured(context.Background(), cfg)
+	if err != nil {
+		return "", "", "", err
+	}
+	detected, err := cuda.DetectWSL(context.Background(), distribution, request, host)
+	if err != nil {
+		return "", "", "", err
+	}
+	if version, ok := toolkitVersionOfRoot(detected.Toolkit.Root, detected.Toolkit.Version); ok {
+		return version + "~" + version, "", distribution, nil
+	}
+	return "auto", detected.Toolkit.Root, distribution, nil
 }
 
 // toolkitVersionOfRoot recovers a CUDA version from a WSL toolkit root, whose
@@ -681,19 +686,45 @@ func SetProjectSetting(path, key, value string) error {
 	if err != nil {
 		return err
 	}
-	values := strings.Fields(value)
-	csv := func() []string {
-		var out []string
-		for _, item := range strings.FieldsFunc(value, func(r rune) bool { return r == ',' || r == ';' }) {
-			if item = strings.TrimSpace(item); item != "" {
-				out = append(out, item)
-			}
-		}
-		return out
+	if err := applyProjectSetting(&cfg, key, value); err != nil {
+		return err
+	}
+	if err := config.Validate(cfg); err != nil {
+		return err
+	}
+	return config.Save(path, cfg)
+}
+
+// applyProjectSetting routes one setting assignment to the section that owns the
+// key, rejecting keys that are not editable.
+func applyProjectSetting(cfg *config.Config, key, value string) error {
+	switch {
+	case strings.HasPrefix(key, "build."):
+		return applyBuildSetting(cfg, key, value)
+	case strings.HasPrefix(key, "toolchain."):
+		return applyToolchainSetting(cfg, key, value)
+	case strings.HasPrefix(key, "vcpkg."):
+		return applyVcpkgSetting(cfg, key, value)
+	case strings.HasPrefix(key, "target:"):
+		return applyTargetSetting(cfg, key, value)
+	case strings.HasPrefix(key, "preset:"):
+		return applyPresetSetting(cfg, key, value)
 	}
 	switch key {
 	case "project.name":
 		cfg.Project.Name = value
+	case "package.output":
+		cfg.Package.Output = value
+	default:
+		return fmt.Errorf("setting %q is not editable", key)
+	}
+	return nil
+}
+
+// applyBuildSetting applies one build.* setting, rejecting unknown fields.
+func applyBuildSetting(cfg *config.Config, key, value string) error {
+	values := strings.Fields(value)
+	switch key {
 	case "build.build_dir":
 		cfg.Build.BuildDir = value
 	case "build.c_standard":
@@ -709,9 +740,19 @@ func SetProjectSetting(path, key, value string) error {
 	case "build.link_flags":
 		cfg.Build.LinkFlags = values
 	case "build.default_targets":
-		cfg.Build.DefaultTargets = csv()
+		cfg.Build.DefaultTargets = splitSettingList(value)
 	case "build.compile_commands":
 		cfg.Build.CompileCommands = value
+	default:
+		return fmt.Errorf("setting %q is not editable", key)
+	}
+	return nil
+}
+
+// applyToolchainSetting applies one toolchain.* setting, rejecting unknown
+// fields.
+func applyToolchainSetting(cfg *config.Config, key, value string) error {
+	switch key {
 	case "toolchain.mode":
 		cfg.Toolchain.Mode = value
 	case "toolchain.wsl_distribution":
@@ -737,7 +778,7 @@ func SetProjectSetting(path, key, value string) error {
 	case "toolchain.cuda_mode":
 		cfg.Toolchain.CUDAMode = value
 	case "toolchain.cuda_architectures":
-		cfg.Toolchain.CUDAArchitectures = csv()
+		cfg.Toolchain.CUDAArchitectures = splitSettingList(value)
 	case "toolchain.cuda_execution":
 		cfg.Toolchain.CUDAExecution = value
 	case "toolchain.cuda_wsl_distribution":
@@ -748,6 +789,15 @@ func SetProjectSetting(path, key, value string) error {
 		cfg.Toolchain.VulkanExecution = value
 	case "toolchain.vulkan_wsl_distribution":
 		cfg.Toolchain.VulkanWSLDistribution = value
+	default:
+		return fmt.Errorf("setting %q is not editable", key)
+	}
+	return nil
+}
+
+// applyVcpkgSetting applies one vcpkg.* setting, rejecting unknown fields.
+func applyVcpkgSetting(cfg *config.Config, key, value string) error {
+	switch key {
 	case "vcpkg.root":
 		cfg.Vcpkg.Root = value
 	case "vcpkg.triplet":
@@ -756,107 +806,124 @@ func SetProjectSetting(path, key, value string) error {
 		cfg.Vcpkg.CRTLinkage = value
 	case "vcpkg.library_linkage":
 		cfg.Vcpkg.LibraryLinkage = value
-	case "package.output":
-		cfg.Package.Output = value
 	default:
-		if strings.HasPrefix(key, "target:") {
-			rest := strings.TrimPrefix(key, "target:")
-			cut := strings.LastIndex(rest, ":")
-			if cut < 1 {
-				return fmt.Errorf("invalid target setting %q", key)
-			}
-			name, field := rest[:cut], rest[cut+1:]
-			target, ok := cfg.Targets[name]
-			if !ok {
-				return fmt.Errorf("target %q was not found", name)
-			}
-			switch field {
-			case "type":
-				target.Type = value
-			case "sources":
-				target.Sources = csv()
-			case "output_name":
-				target.OutputName = value
-			case "c_standard":
-				target.CStandard = value
-			case "cxx_standard":
-				target.CXXStandard = value
-			case "include_dirs":
-				target.IncludeDirs = csv()
-			case "private_include_dirs":
-				target.PrivateIncludeDirs = csv()
-			case "defines":
-				target.Defines = csv()
-			case "private_defines":
-				target.PrivateDefines = csv()
-			case "compile_options":
-				target.CompileOptions = values
-			case "c_flags":
-				target.CFlags = values
-			case "cxx_flags":
-				target.CXXFlags = values
-			case "library_dirs":
-				target.LibraryDirs = csv()
-			case "libraries":
-				target.Libraries = csv()
-			case "link_options":
-				target.LinkOptions = values
-			case "export_all_symbols":
-				parsed, e := strconv.ParseBool(value)
-				if e != nil {
-					return e
-				}
-				target.ExportAllSymbols = parsed
-			default:
-				return fmt.Errorf("target setting %q is not editable", field)
-			}
-			cfg.Targets[name] = target
-		} else if strings.HasPrefix(key, "preset:") {
-			rest := strings.TrimPrefix(key, "preset:")
-			cut := strings.LastIndex(rest, ":")
-			if cut < 1 {
-				return fmt.Errorf("invalid preset setting %q", key)
-			}
-			name, field := rest[:cut], rest[cut+1:]
-			preset, ok := cfg.CompilerPresets[name]
-			if !ok {
-				return fmt.Errorf("compiler preset %q was not found", name)
-			}
-			switch field {
-			case "c":
-				preset.C = value
-			case "cxx":
-				preset.CXX = value
-			case "archiver":
-				preset.Archiver = value
-			case "linker":
-				preset.Linker = value
-			case "setup":
-				preset.Setup = value
-			case "mode":
-				preset.Mode = value
-			case "wsl_distribution":
-				preset.WSLDistribution = value
-			case "compile_flags":
-				preset.CompileFlags = values
-			case "c_flags":
-				preset.CFlags = values
-			case "cxx_flags":
-				preset.CXXFlags = values
-			case "link_flags":
-				preset.LinkFlags = values
-			default:
-				return fmt.Errorf("preset setting %q is not editable", field)
-			}
-			cfg.CompilerPresets[name] = preset
-		} else {
-			return fmt.Errorf("setting %q is not editable", key)
+		return fmt.Errorf("setting %q is not editable", key)
+	}
+	return nil
+}
+
+// applyTargetSetting applies one target:<name>:<field> setting, rejecting a
+// malformed key, an unknown target, or a non-editable field.
+func applyTargetSetting(cfg *config.Config, key, value string) error {
+	rest := strings.TrimPrefix(key, "target:")
+	cut := strings.LastIndex(rest, ":")
+	if cut < 1 {
+		return fmt.Errorf("invalid target setting %q", key)
+	}
+	name, field := rest[:cut], rest[cut+1:]
+	target, ok := cfg.Targets[name]
+	if !ok {
+		return fmt.Errorf("target %q was not found", name)
+	}
+	values := strings.Fields(value)
+	switch field {
+	case "type":
+		target.Type = value
+	case "sources":
+		target.Sources = splitSettingList(value)
+	case "output_name":
+		target.OutputName = value
+	case "c_standard":
+		target.CStandard = value
+	case "cxx_standard":
+		target.CXXStandard = value
+	case "include_dirs":
+		target.IncludeDirs = splitSettingList(value)
+	case "private_include_dirs":
+		target.PrivateIncludeDirs = splitSettingList(value)
+	case "defines":
+		target.Defines = splitSettingList(value)
+	case "private_defines":
+		target.PrivateDefines = splitSettingList(value)
+	case "compile_options":
+		target.CompileOptions = values
+	case "c_flags":
+		target.CFlags = values
+	case "cxx_flags":
+		target.CXXFlags = values
+	case "library_dirs":
+		target.LibraryDirs = splitSettingList(value)
+	case "libraries":
+		target.Libraries = splitSettingList(value)
+	case "link_options":
+		target.LinkOptions = values
+	case "export_all_symbols":
+		parsed, e := strconv.ParseBool(value)
+		if e != nil {
+			return e
+		}
+		target.ExportAllSymbols = parsed
+	default:
+		return fmt.Errorf("target setting %q is not editable", field)
+	}
+	cfg.Targets[name] = target
+	return nil
+}
+
+// applyPresetSetting applies one preset:<name>:<field> setting, rejecting a
+// malformed key, an unknown preset, or a non-editable field.
+func applyPresetSetting(cfg *config.Config, key, value string) error {
+	rest := strings.TrimPrefix(key, "preset:")
+	cut := strings.LastIndex(rest, ":")
+	if cut < 1 {
+		return fmt.Errorf("invalid preset setting %q", key)
+	}
+	name, field := rest[:cut], rest[cut+1:]
+	preset, ok := cfg.CompilerPresets[name]
+	if !ok {
+		return fmt.Errorf("compiler preset %q was not found", name)
+	}
+	values := strings.Fields(value)
+	switch field {
+	case "c":
+		preset.C = value
+	case "cxx":
+		preset.CXX = value
+	case "archiver":
+		preset.Archiver = value
+	case "linker":
+		preset.Linker = value
+	case "setup":
+		preset.Setup = value
+	case "mode":
+		preset.Mode = value
+	case "wsl_distribution":
+		preset.WSLDistribution = value
+	case "compile_flags":
+		preset.CompileFlags = values
+	case "c_flags":
+		preset.CFlags = values
+	case "cxx_flags":
+		preset.CXXFlags = values
+	case "link_flags":
+		preset.LinkFlags = values
+	default:
+		return fmt.Errorf("preset setting %q is not editable", field)
+	}
+	cfg.CompilerPresets[name] = preset
+	return nil
+}
+
+// splitSettingList splits a comma- or semicolon-separated setting value into its
+// trimmed, non-empty items.
+func splitSettingList(value string) []string {
+	var out []string
+	for _, item := range strings.FieldsFunc(value, func(r rune) bool { return r == ',' || r == ';' }) {
+		if item = strings.TrimSpace(item); item != "" {
+			out = append(out, item)
 		}
 	}
-	if err := config.Validate(cfg); err != nil {
-		return err
-	}
-	return config.Save(path, cfg)
+	return out
 }
 
 // OptimizationPresetNames lists the built-in release optimizations followed by
@@ -928,53 +995,61 @@ func applyReleaseOptimization(cfg *config.Config) error {
 	}
 	msvc := strings.Contains(strings.ToLower(cfg.Toolchain.CXX), "cl.exe") || strings.Contains(strings.ToLower(cfg.Toolchain.CXX), "clang-cl")
 	msvcLink := msvc || runtime.GOOS == "windows" && cfg.Toolchain.Mode != "wsl" && cfg.Toolchain.Setup != "" && strings.Contains(strings.ToLower(cfg.Toolchain.CXX), "clang")
-	filter := func(flags []string) []string {
-		var out []string
-		for _, flag := range flags {
-			lower := strings.ToLower(flag)
-			if strings.HasPrefix(lower, "/o") || strings.HasPrefix(lower, "-o") || lower == "/gl" || lower == "-flto" || lower == "/ltcg" || lower == "-ffunction-sections" || lower == "-fdata-sections" || lower == "-dndebug" || lower == "/dndebug" || lower == "-wl,--gc-sections" || lower == "-wl,-dead_strip" || strings.HasPrefix(lower, "-wl,/opt:") || lower == "/ob3" {
-				continue
-			}
-			out = append(out, flag)
-		}
-		return out
+	cfg.Build.CompileFlags = filterReleaseFlags(cfg.Build.CompileFlags)
+	cfg.Build.LinkFlags = filterReleaseFlags(cfg.Build.LinkFlags)
+	compileFlags, linkFlags, err := releaseOptimizationFlags(name, msvc, msvcLink, runtime.GOOS == "darwin" && cfg.Toolchain.Mode != "wsl")
+	if err != nil {
+		return err
 	}
-	cfg.Build.CompileFlags = filter(cfg.Build.CompileFlags)
-	cfg.Build.LinkFlags = filter(cfg.Build.LinkFlags)
+	cfg.Build.CompileFlags = append(cfg.Build.CompileFlags, compileFlags...)
+	cfg.Build.LinkFlags = append(cfg.Build.LinkFlags, linkFlags...)
+	return nil
+}
+
+// filterReleaseFlags drops optimization and debug flags that a built-in release
+// optimization re-adds explicitly, leaving an unrelated user flag untouched.
+func filterReleaseFlags(flags []string) []string {
+	var out []string
+	for _, flag := range flags {
+		lower := strings.ToLower(flag)
+		if strings.HasPrefix(lower, "/o") || strings.HasPrefix(lower, "-o") || lower == "/gl" || lower == "-flto" || lower == "/ltcg" || lower == "-ffunction-sections" || lower == "-fdata-sections" || lower == "-dndebug" || lower == "/dndebug" || lower == "-wl,--gc-sections" || lower == "-wl,-dead_strip" || strings.HasPrefix(lower, "-wl,/opt:") || lower == "/ob3" {
+			continue
+		}
+		out = append(out, flag)
+	}
+	return out
+}
+
+// releaseOptimizationFlags returns the compile and link flags a built-in release
+// optimization adds, honouring the MSVC and clang-cl variants of each.
+func releaseOptimizationFlags(name string, msvc, msvcLink, darwinNative bool) ([]string, []string, error) {
 	switch name {
 	case "balanced":
 		if msvc {
-			cfg.Build.CompileFlags = append(cfg.Build.CompileFlags, "/O2", "/DNDEBUG")
-			cfg.Build.LinkFlags = append(cfg.Build.LinkFlags, "/OPT:REF", "/OPT:ICF")
-		} else {
-			cfg.Build.CompileFlags = append(cfg.Build.CompileFlags, "-O2", "-DNDEBUG")
+			return []string{"/O2", "/DNDEBUG"}, []string{"/OPT:REF", "/OPT:ICF"}, nil
 		}
+		return []string{"-O2", "-DNDEBUG"}, nil, nil
 	case "speed":
 		if msvc {
-			cfg.Build.CompileFlags = append(cfg.Build.CompileFlags, "/O2", "/Ob3", "/GL", "/DNDEBUG")
-			cfg.Build.LinkFlags = append(cfg.Build.LinkFlags, "/LTCG", "/OPT:REF", "/OPT:ICF")
-		} else {
-			cfg.Build.CompileFlags = append(cfg.Build.CompileFlags, "-O3", "-flto", "-DNDEBUG")
-			cfg.Build.LinkFlags = append(cfg.Build.LinkFlags, "-flto")
+			return []string{"/O2", "/Ob3", "/GL", "/DNDEBUG"}, []string{"/LTCG", "/OPT:REF", "/OPT:ICF"}, nil
 		}
+		return []string{"-O3", "-flto", "-DNDEBUG"}, []string{"-flto"}, nil
 	case "size":
 		if msvc {
-			cfg.Build.CompileFlags = append(cfg.Build.CompileFlags, "/O1", "/GL", "/DNDEBUG")
-			cfg.Build.LinkFlags = append(cfg.Build.LinkFlags, "/LTCG", "/OPT:REF", "/OPT:ICF")
-		} else {
-			cfg.Build.CompileFlags = append(cfg.Build.CompileFlags, "-Os", "-ffunction-sections", "-fdata-sections", "-DNDEBUG")
-			if msvcLink {
-				cfg.Build.LinkFlags = append(cfg.Build.LinkFlags, "-Wl,/OPT:REF", "-Wl,/OPT:ICF")
-			} else if runtime.GOOS == "darwin" && cfg.Toolchain.Mode != "wsl" {
-				cfg.Build.LinkFlags = append(cfg.Build.LinkFlags, "-Wl,-dead_strip")
-			} else {
-				cfg.Build.LinkFlags = append(cfg.Build.LinkFlags, "-Wl,--gc-sections")
-			}
+			return []string{"/O1", "/GL", "/DNDEBUG"}, []string{"/LTCG", "/OPT:REF", "/OPT:ICF"}, nil
+		}
+		compile := []string{"-Os", "-ffunction-sections", "-fdata-sections", "-DNDEBUG"}
+		switch {
+		case msvcLink:
+			return compile, []string{"-Wl,/OPT:REF", "-Wl,/OPT:ICF"}, nil
+		case darwinNative:
+			return compile, []string{"-Wl,-dead_strip"}, nil
+		default:
+			return compile, []string{"-Wl,--gc-sections"}, nil
 		}
 	default:
-		return fmt.Errorf("unknown release optimization %q", name)
+		return nil, nil, fmt.Errorf("unknown release optimization %q", name)
 	}
-	return nil
 }
 
 func releaseWithProgress(ctx context.Context, path string, progress func(string)) error {
@@ -1540,12 +1615,7 @@ func generateWithConfig(ctx context.Context, path string, cfg config.Config) (Bu
 	if err != nil {
 		return BuildResult{}, err
 	}
-	hasNonShader := false
-	for _, target := range project.Targets {
-		if target.Type != model.Shader {
-			hasNonShader = true
-		}
-	}
+	hasNonShader := projectHasNonShader(project)
 	root, err := filepath.Abs(filepath.Dir(path))
 	if err != nil {
 		return BuildResult{}, err
@@ -1569,22 +1639,9 @@ func generateWithConfig(ctx context.Context, path string, cfg config.Config) (Bu
 			return BuildResult{}, err
 		}
 	}
-	for _, item := range []struct {
-		value, role string
-		output      *string
-	}{
-		{cfg.Toolchain.C, "C compiler", &tc.CC},
-		{cfg.Toolchain.Archiver, "archiver", &tc.Archiver},
-		{cfg.Toolchain.Linker, "linker", &tc.Linker},
-	} {
-		if item.value == "" || item.value == "auto" {
-			continue
-		}
-		resolved, err := configuredExecutable(ctx, cfg, tc, root, item.value, item.role)
-		if err != nil {
-			return BuildResult{}, err
-		}
-		*item.output = resolved
+	tc, err = applyConfiguredExecutables(ctx, cfg, tc, root)
+	if err != nil {
+		return BuildResult{}, err
 	}
 	if cfg.Toolchain.Mode == "wsl" && hasNonShader {
 		linuxDir, pathErr := toolchain.WSLPath(ctx, cfg.Toolchain.WSLDistribution, manifestDir)
@@ -1593,223 +1650,18 @@ func generateWithConfig(ctx context.Context, path string, cfg config.Config) (Bu
 		}
 		tc = toolchain.WithWSLDirectory(tc, linuxDir)
 	}
-	if tc.Kind == toolchain.MSVC {
-		linkage := strings.ToLower(cfg.Vcpkg.CRTLinkage)
-		if linkage == "" && strings.Contains(strings.ToLower(cfg.Vcpkg.Triplet), "static") && !strings.Contains(strings.ToLower(cfg.Vcpkg.Triplet), "static-md") {
-			linkage = "static"
-		}
-		if linkage == "static" || linkage == "dynamic" {
-			flag := "/MD"
-			if linkage == "static" {
-				flag = "/MT"
-			}
-			if cfg.Build.Profile == "debug" {
-				flag += "d"
-			}
-			cfg.Build.CompileFlags = append(cfg.Build.CompileFlags, flag)
-		}
+	cfg = applyMSVCRuntimeFlag(cfg, tc)
+	cudaToolchain, err := detectCUDAToolchain(ctx, cfg, tc)
+	if err != nil {
+		return BuildResult{}, err
 	}
-	var cudaToolchain *cuda.Toolchain
-	if cfg.Toolchain.CUDA != "" || cfg.Toolchain.CUDARoot != "" {
-		var detected cuda.Toolchain
-		var detectErr error
-		if cfg.Toolchain.CUDAExecution == "wsl" {
-			if cfg.Toolchain.Mode != "wsl" {
-				return BuildResult{}, fmt.Errorf("E_CUDA_WSL_HOST: WSL CUDA requires a WSL C/C++ toolchain")
-			}
-			distribution := cfg.Toolchain.CUDAWSLDistribution
-			if distribution == "" {
-				distribution = cfg.Toolchain.WSLDistribution
-			}
-			if cfg.Toolchain.WSLDistribution != "" && distribution != "" && !strings.EqualFold(cfg.Toolchain.WSLDistribution, distribution) {
-				return BuildResult{}, fmt.Errorf("E_CUDA_WSL_DISTRIBUTION: CUDA is in %s but the compiler is in %s", distribution, cfg.Toolchain.WSLDistribution)
-			}
-			detected, detectErr = cuda.DetectWSL(context.Background(), distribution, cfg.Toolchain.CUDARoot, tc)
-		} else {
-			if tc.Runner != "" {
-				return BuildResult{}, fmt.Errorf("E_CUDA_NATIVE_HOST: native CUDA cannot use a WSL host compiler; connect CUDA from the same WSL distribution")
-			}
-			root, resolveErr := cudaRoot(ctx, cfg)
-			if resolveErr != nil {
-				return BuildResult{}, resolveErr
-			}
-			detected, detectErr = cuda.DetectWithHost(context.Background(), root, tc)
-		}
-		if detectErr != nil {
-			return BuildResult{}, detectErr
-		}
-		detected.Architectures = append([]string{}, cfg.Toolchain.CUDAArchitectures...)
-		if err := cuda.ProbeHost(context.Background(), detected); err != nil {
-			return BuildResult{}, err
-		}
-		if cfg.Toolchain.CUDAMode == "rdc" || cfg.Toolchain.CUDAMode == "separate" {
-			detected.Mode = cuda.SeparateCompilation
-		}
-		cudaToolchain = &detected
+	vulkanSDK, err := detectVulkanSDK(cfg, project, manifestDir)
+	if err != nil {
+		return BuildResult{}, err
 	}
-	var vulkanSDK *vulkan.SDK
-	for _, target := range project.Targets {
-		if target.Type == model.Shader {
-			var detected vulkan.SDK
-			var detectErr error
-			if cfg.Toolchain.VulkanExecution == "wsl" {
-				distribution := cfg.Toolchain.VulkanWSLDistribution
-				if distribution == "" {
-					distribution = cfg.Toolchain.WSLDistribution
-				}
-				detected, detectErr = vulkan.DetectWSL(context.Background(), distribution, cfg.Toolchain.Vulkan)
-				if detectErr == nil {
-					linuxDir, pathErr := toolchain.WSLPath(context.Background(), distribution, manifestDir)
-					if pathErr != nil {
-						return BuildResult{}, pathErr
-					}
-					detected = vulkan.WithWSLDirectory(detected, linuxDir)
-				}
-			} else if cfg.Toolchain.Vulkan != "" {
-				detected, detectErr = vulkan.DetectRoot(cfg.Toolchain.Vulkan)
-			} else {
-				detected, detectErr = vulkan.Detect()
-			}
-			if detectErr != nil {
-				return BuildResult{}, detectErr
-			}
-			vulkanSDK = &detected
-			break
-		}
-	}
-	moduleInfos := map[string]plan.ModuleInfo{}
-	var moduleBackend modules.Support
-	moduleBackends := map[string]modules.Support{}
-	if cfg.Build.Modules {
-		if tc.Kind != toolchain.Clang {
-			return BuildResult{}, fmt.Errorf("E_MODULE_BACKEND_UNSUPPORTED: modules currently require a Clang toolchain")
-		}
-		scannerPath := cfg.Toolchain.ModuleScanner
-		if scannerPath == "" {
-			scannerPath = os.Getenv("CLANG_SCAN_DEPS")
-		}
-		if scannerPath == "" {
-			if tc.Runner != "" {
-				scannerPath, err = toolchain.WSLExecutable(ctx, cfg.Toolchain.WSLDistribution, "clang-scan-deps")
-			} else {
-				scannerPath, err = exec.LookPath("clang-scan-deps")
-			}
-			if err != nil {
-				return BuildResult{}, fmt.Errorf("E_MODULE_SCAN_FAILED: clang-scan-deps was not found: %w", err)
-			}
-		}
-		if tc.Runner != "" && filepath.VolumeName(scannerPath) != "" {
-			return BuildResult{}, fmt.Errorf("E_MODULE_SCAN_FAILED: WSL requires a Linux clang-scan-deps path, got %q", scannerPath)
-		}
-		documents := make([]p1689.Document, 0)
-		bySource := make(map[string]p1689.Document)
-		scanKeysBySource := make(map[string]modules.ScanKey)
-		headerDepsBySource := make(map[string][]string)
-		for _, target := range project.Targets {
-			for _, source := range target.Sources {
-				if moduleScannableSource(source) {
-					standard := cfg.Build.CXXStandard
-					if target.CXXStandard != "" {
-						standard = target.CXXStandard
-					}
-					options := append(append(append(append([]string{}, cfg.Build.CompileFlags...), cfg.Build.CXXFlags...), target.CXXFlags...), target.CompileSelf.Options...)
-					if target.Type == model.SharedLibrary && !hasPICOption(options) {
-						options = append(options, "-fPIC")
-					}
-					localDirs := make([]string, 0, len(target.CompileSelf.IncludeDirs))
-					for _, include := range target.CompileSelf.IncludeDirs {
-						absolute := include
-						if !filepath.IsAbs(absolute) {
-							absolute = filepath.Join(root, absolute)
-						}
-						localDirs = append(localDirs, absolute)
-						relative, relErr := filepath.Rel(manifestDir, absolute)
-						if relErr != nil {
-							relative = absolute
-						}
-						options = append(options, "-I"+filepath.ToSlash(relative))
-					}
-					for _, define := range target.CompileSelf.Defines {
-						options = append(options, "-D"+define)
-					}
-					localOptions := append([]string{}, options...)
-					if tc.Runner != "" {
-						options, err = mapWSLModuleOptions(ctx, cfg.Toolchain.WSLDistribution, manifestDir, options)
-						if err != nil {
-							return BuildResult{}, err
-						}
-					}
-					scanner := modules.CommandScanner{Compiler: tc.CXX, Scanner: scannerPath, Standard: standard, Options: options, Cache: modules.NewCache(manifestDir), Directory: manifestDir, Runner: tc.Runner, RunnerArgs: tc.RunnerArgs, HeaderDirs: localDirs, LocalOptions: localOptions}
-					if tc.Runner != "" {
-						scanner.PathMapper = func(ctx context.Context, path string) (string, error) {
-							return toolchain.WSLPath(ctx, cfg.Toolchain.WSLDistribution, path)
-						}
-						scanner.DependencyMapper = func(ctx context.Context, path string) (string, error) {
-							return toolchain.WSLWindowsPath(ctx, cfg.Toolchain.WSLDistribution, path)
-						}
-					}
-					scan, err := scanner.Scan(ctx, source)
-					if err != nil {
-						return BuildResult{}, err
-					}
-					if previous, exists := scanKeysBySource[source]; exists && previous != scan.Key && (hasModuleEdges(bySource[source]) || hasModuleEdges(scan.Document)) {
-						return BuildResult{}, fmt.Errorf("E_MODULE_SCAN_CONFLICT: %s is used by multiple targets with different module compile options", source)
-					}
-					moduleBackends[source] = clang.Backend{Compiler: tc.CXX, Scanner: scannerPath, Standard: standard, Options: options, Runner: tc.Runner, RunnerArgs: tc.RunnerArgs}
-					if _, exists := scanKeysBySource[source]; !exists {
-						documents = append(documents, scan.Document)
-					}
-					scanKeysBySource[source] = scan.Key
-					bySource[source] = scan.Document
-					headerDepsBySource[source] = scan.HeaderDeps
-					if !scan.Complete {
-						stamp := filepath.Join(manifestDir, "modules", "stamps", moduleArtifactName(source)+".stamp")
-						if err := fsx.AtomicWrite(stamp, []byte(time.Now().UTC().Format(time.RFC3339Nano))); err != nil {
-							return BuildResult{}, err
-						}
-						headerDepsBySource[source] = append(headerDepsBySource[source], stamp)
-					}
-				}
-			}
-		}
-		if _, err := modules.BuildGraph(documents); err != nil {
-			return BuildResult{}, err
-		}
-		providerArtifacts := make(map[string]string)
-		artifactFor := func(source string) string {
-			return filepath.Join(buildRoot, cfg.Build.Profile, "bmi", moduleArtifactName(source))
-		}
-		for source, document := range bySource {
-			for _, rule := range document.Rules {
-				for _, provided := range rule.Provides {
-					artifact, relErr := filepath.Rel(manifestDir, artifactFor(source))
-					if relErr != nil {
-						return BuildResult{}, relErr
-					}
-					providerArtifacts[provided.Key().String()] = filepath.ToSlash(artifact)
-				}
-			}
-		}
-		for source, document := range bySource {
-			info := plan.ModuleInfo{HeaderDeps: headerDepsBySource[source]}
-			for _, rule := range document.Rules {
-				for _, provided := range rule.Provides {
-					info.Artifact = artifactFor(source)
-					info.Provides = append(info.Provides, provided.LogicalName)
-				}
-				for _, required := range rule.Requires {
-					artifact, ok := providerArtifacts[required.Key().String()]
-					if !ok {
-						return BuildResult{}, fmt.Errorf("E_MODULE_MISSING_PROVIDER: %s", required.LogicalName)
-					}
-					info.Requires = append(info.Requires, modules.Reference{LogicalName: required.LogicalName, Path: artifact})
-				}
-			}
-			if len(info.Provides) > 0 || len(info.Requires) > 0 {
-				moduleInfos[source] = info
-			}
-		}
-		moduleBackend = clang.Backend{Compiler: tc.CXX, Scanner: scannerPath, Standard: cfg.Build.CXXStandard, Runner: tc.Runner, RunnerArgs: tc.RunnerArgs}
+	moduleInfos, moduleBackend, moduleBackends, err := scanModules(ctx, cfg, project, tc, root, buildRoot, manifestDir)
+	if err != nil {
+		return BuildResult{}, err
 	}
 	options := plan.Options{Root: root, BuildDir: buildRoot, Toolchain: tc, CUDA: cudaToolchain, Vulkan: vulkanSDK, Modules: moduleInfos, ModuleBackend: moduleBackend, ModuleBackends: moduleBackends}
 	buildPlan, err := plan.Build(cfg, project, options)
@@ -1829,23 +1681,7 @@ func generateWithConfig(ctx context.Context, path string, cfg config.Config) (Bu
 	if _, err := plan.Outputs(cfg, project, options); err != nil {
 		return BuildResult{}, err
 	}
-	marker := filepath.Join(manifestDir, ".trestle", "incomplete")
-	if err := fsx.AtomicWrite(marker, []byte("Generation interrupted: run trestle build to regenerate.\n")); err != nil {
-		return BuildResult{}, err
-	}
-	if err := writeResponseFiles(ctx, cfg, manifestDir, buildPlan); err != nil {
-		return BuildResult{}, err
-	}
-	if err := fsx.AtomicWrite(manifestPath, manifest); err != nil {
-		return BuildResult{}, err
-	}
-	if err := writeCommandMetadata(ctx, root, manifestDir, cfg, buildPlan); err != nil {
-		return BuildResult{}, err
-	}
-	if err := writeGenerationState(manifestDir, cfg, project, tc); err != nil {
-		return BuildResult{}, err
-	}
-	if err := os.Remove(marker); err != nil {
+	if err := writeGenerationArtifacts(ctx, root, manifestDir, manifestPath, cfg, project, tc, buildPlan, manifest); err != nil {
 		return BuildResult{}, err
 	}
 	outputs, err := plan.Outputs(cfg, project, options)
@@ -1876,24 +1712,7 @@ func writeCommandMetadata(ctx context.Context, root, manifestDir string, cfg con
 		return err
 	}
 	defer lock.Close()
-	entries := make([]compileCommandEntry, 0)
-	for _, action := range buildPlan.Actions {
-		if !strings.HasPrefix(string(action.ID), "compile_") || len(action.Inputs) == 0 || len(action.Outputs) == 0 {
-			continue
-		}
-		absolute := func(path string) string {
-			if filepath.IsAbs(path) {
-				return filepath.Clean(path)
-			}
-			value, err := filepath.Abs(filepath.Join(manifestDir, filepath.FromSlash(path)))
-			if err != nil {
-				return filepath.Clean(path)
-			}
-			return value
-		}
-		arguments := append([]string{action.Command.Exe}, action.Command.Args...)
-		entries = append(entries, compileCommandEntry{Directory: manifestDir, File: absolute(action.Inputs[0]), Output: absolute(action.Outputs[0]), Arguments: arguments})
-	}
+	entries := compileCommandEntries(buildPlan, manifestDir)
 	sort.Slice(entries, func(i, j int) bool { return entries[i].File < entries[j].File })
 	data, err := json.MarshalIndent(entries, "", "  ")
 	if err != nil {
@@ -1915,14 +1734,7 @@ func writeCommandMetadata(ctx context.Context, root, manifestDir string, cfg con
 	if err := fsx.AtomicWrite(compileCommands, data); err != nil {
 		return err
 	}
-	metadata := commandMetadata{Version: 1, Project: cfg.Project.Name, Profile: cfg.Build.Profile, Targets: map[string][]string{}, Tests: map[string][]string{}}
-	for _, name := range sortedTargetNames(cfg.Targets) {
-		metadata.Targets[name] = []string{"trestle", "build", name}
-		if cfg.Targets[name].Type == "test" {
-			metadata.Tests[name] = []string{"trestle", "test", "-job", name}
-		}
-	}
-	commands, err := json.MarshalIndent(metadata, "", "  ")
+	commands, err := json.MarshalIndent(commandMetadataFor(cfg), "", "  ")
 	if err != nil {
 		return err
 	}
@@ -1930,6 +1742,44 @@ func writeCommandMetadata(ctx context.Context, root, manifestDir string, cfg con
 		return err
 	}
 	return fsx.AtomicWrite(filepath.Join(root, ".trestle", "commands.json"), append(commands, '\n'))
+}
+
+// compileCommandEntries builds the clang-style compile_commands.json entries for
+// every compile action in the build plan, resolving each path against the
+// manifest directory.
+func compileCommandEntries(buildPlan plan.BuildPlan, manifestDir string) []compileCommandEntry {
+	absolute := func(path string) string {
+		if filepath.IsAbs(path) {
+			return filepath.Clean(path)
+		}
+		value, err := filepath.Abs(filepath.Join(manifestDir, filepath.FromSlash(path)))
+		if err != nil {
+			return filepath.Clean(path)
+		}
+		return value
+	}
+	entries := make([]compileCommandEntry, 0)
+	for _, action := range buildPlan.Actions {
+		if !strings.HasPrefix(string(action.ID), "compile_") || len(action.Inputs) == 0 || len(action.Outputs) == 0 {
+			continue
+		}
+		arguments := append([]string{action.Command.Exe}, action.Command.Args...)
+		entries = append(entries, compileCommandEntry{Directory: manifestDir, File: absolute(action.Inputs[0]), Output: absolute(action.Outputs[0]), Arguments: arguments})
+	}
+	return entries
+}
+
+// commandMetadataFor builds the project, target, and test command index written
+// alongside compile_commands.json.
+func commandMetadataFor(cfg config.Config) commandMetadata {
+	metadata := commandMetadata{Version: 1, Project: cfg.Project.Name, Profile: cfg.Build.Profile, Targets: map[string][]string{}, Tests: map[string][]string{}}
+	for _, name := range sortedTargetNames(cfg.Targets) {
+		metadata.Targets[name] = []string{"trestle", "build", name}
+		if cfg.Targets[name].Type == "test" {
+			metadata.Tests[name] = []string{"trestle", "test", "-job", name}
+		}
+	}
+	return metadata
 }
 
 func writeResponseFiles(ctx context.Context, cfg config.Config, manifestDir string, buildPlan plan.BuildPlan) error {
@@ -2203,6 +2053,32 @@ func runTests(ctx context.Context, path string, selection TestSelection, progres
 	defer release()
 	ctx = context.WithValue(ctx, configurationKey{}, cfg)
 	jobs := listTestsConfig(cfg)
+	selected := selectTestJobs(jobs, selection)
+	if len(selected) == 0 {
+		return fmt.Errorf("no test jobs match the selection")
+	}
+	result, err := GenerateWithContext(ctx, path)
+	if err != nil {
+		return err
+	}
+	manifestDir := filepath.Dir(result.Manifest)
+	environment := environmentList(result.Environment)
+	writer := &progressWriter{callback: processx.Notify(ctx, progress), statusCallback: progress}
+	defer writer.Flush()
+	for index, job := range selected {
+		if err := runTestJob(ctx, path, manifestDir, environment, writer, result, index, len(selected), job, progress); err != nil {
+			return err
+		}
+	}
+	if progress != nil {
+		progress(fmt.Sprintf("Passed %d test job(s)", len(selected)))
+	}
+	return nil
+}
+
+// selectTestJobs returns the jobs a test selection matches: all of them when All
+// is set, otherwise those matching the requested job, group, or source file.
+func selectTestJobs(jobs []TestJob, selection TestSelection) []TestJob {
 	selected := make([]TestJob, 0, len(jobs))
 	for _, job := range jobs {
 		matches := selection.All || (selection.Job != "" && job.Name == selection.Job) || (selection.Group != "" && job.Group == selection.Group)
@@ -2219,56 +2095,46 @@ func runTests(ctx context.Context, path string, selection TestSelection, progres
 			selected = append(selected, job)
 		}
 	}
-	if len(selected) == 0 {
-		return fmt.Errorf("no test jobs match the selection")
+	return selected
+}
+
+// runTestJob builds and runs one test job, reporting its progress under the
+// "[index/total]" prefix. index is zero-based.
+func runTestJob(ctx context.Context, path, manifestDir string, environment []string, writer *progressWriter, result BuildResult, index, total int, job TestJob, progress func(string)) error {
+	if progress != nil {
+		progress(fmt.Sprintf("[%d/%d] Building test job %s", index+1, total, job.Name))
 	}
-	result, err := GenerateWithContext(ctx, path)
-	if err != nil {
+	output, ok := result.Outputs[model.TargetID(job.Name)]
+	if !ok {
+		return fmt.Errorf("test job %q has no build output", job.Name)
+	}
+	if err := (runner.Runner{}).RunWithEvents(ctx, "ninja", []string{"-f", "build.ninja", filepath.ToSlash(output)}, runner.Options{Dir: manifestDir, Env: environment, Stdout: writer, Stderr: writer, RawOutput: processx.Output(ctx)}, writer); err != nil {
 		return err
 	}
-	manifestDir := filepath.Dir(result.Manifest)
-	environment := environmentList(result.Environment)
-	writer := &progressWriter{callback: processx.Notify(ctx, progress), statusCallback: progress}
-	defer writer.Flush()
-	for index, job := range selected {
-		if progress != nil {
-			progress(fmt.Sprintf("[%d/%d] Building test job %s", index+1, len(selected), job.Name))
-		}
-		output, ok := result.Outputs[model.TargetID(job.Name)]
-		if !ok {
-			return fmt.Errorf("test job %q has no build output", job.Name)
-		}
-		if err := (runner.Runner{}).RunWithEvents(ctx, "ninja", []string{"-f", "build.ninja", filepath.ToSlash(output)}, runner.Options{Dir: manifestDir, Env: environment, Stdout: writer, Stderr: writer, RawOutput: processx.Output(ctx)}, writer); err != nil {
-			return err
-		}
-		executable := output
-		if !filepath.IsAbs(executable) {
-			executable = filepath.Join(manifestDir, filepath.FromSlash(executable))
-		}
-		workingDir := job.WorkingDir
-		if workingDir == "" {
-			workingDir = filepath.Dir(path)
-		}
-		if progress != nil {
-			progress(fmt.Sprintf("[%d/%d] Running %s · group %s", index+1, len(selected), job.Name, job.Group))
-		}
-		command := processx.Command(ctx, executable, job.Args...)
-		command.Dir = workingDir
-		command.Env = append(os.Environ(), environment...)
-		var processOutput io.Writer = writer
-		if raw := processx.Output(ctx); raw != nil {
-			processOutput = io.MultiWriter(raw, writer)
-		}
-		command.Stdout, command.Stderr = processOutput, processOutput
-		if err := command.Run(); err != nil {
-			return fmt.Errorf("test job %s failed: %w", job.Name, err)
-		}
-		if progress != nil {
-			progress("PASS " + job.Name)
-		}
+	executable := output
+	if !filepath.IsAbs(executable) {
+		executable = filepath.Join(manifestDir, filepath.FromSlash(executable))
+	}
+	workingDir := job.WorkingDir
+	if workingDir == "" {
+		workingDir = filepath.Dir(path)
 	}
 	if progress != nil {
-		progress(fmt.Sprintf("Passed %d test job(s)", len(selected)))
+		progress(fmt.Sprintf("[%d/%d] Running %s · group %s", index+1, total, job.Name, job.Group))
+	}
+	command := processx.Command(ctx, executable, job.Args...)
+	command.Dir = workingDir
+	command.Env = append(os.Environ(), environment...)
+	var processOutput io.Writer = writer
+	if raw := processx.Output(ctx); raw != nil {
+		processOutput = io.MultiWriter(raw, writer)
+	}
+	command.Stdout, command.Stderr = processOutput, processOutput
+	if err := command.Run(); err != nil {
+		return fmt.Errorf("test job %s failed: %w", job.Name, err)
+	}
+	if progress != nil {
+		progress("PASS " + job.Name)
 	}
 	return nil
 }
