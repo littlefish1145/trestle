@@ -25,42 +25,51 @@ func EmitDyndep(dyndep Dyndep) ([]byte, error) {
 		return nil, fmt.Errorf("unsupported dyndep version %d", dyndep.Version)
 	}
 	var output bytes.Buffer
-	fmt.Fprintf(&output, "ninja_dyndep_version = %d\n", dyndep.Version)
+	writeDyndepHeader(&output, dyndep)
+	writeDyndepEdges(&output, "bind", dyndep.Binds)
+	writeDyndepEdges(&output, "implicit", dyndep.Implicit)
+	return output.Bytes(), nil
+}
+
+// writeDyndepHeader writes the version line and the optional build, restat,
+// inputs, and outputs bindings that precede a dyndep file's build statements.
+func writeDyndepHeader(output *bytes.Buffer, dyndep Dyndep) {
+	fmt.Fprintf(output, "ninja_dyndep_version = %d\n", dyndep.Version)
 	if dyndep.Build != "" {
-		fmt.Fprintf(&output, "build = %s\n", EscapePath(dyndep.Build))
+		fmt.Fprintf(output, "build = %s\n", EscapePath(dyndep.Build))
 	}
 	if dyndep.Restat {
 		output.WriteString("restat = 1\n")
 	}
-	if len(dyndep.Inputs) > 0 {
-		output.WriteString("inputs = ")
-		for i, input := range dyndep.Inputs {
-			if i > 0 {
-				output.WriteByte(' ')
-			}
-			output.WriteString(EscapePath(input))
+	writeDyndepList(output, "inputs", dyndep.Inputs)
+	writeDyndepList(output, "outputs", dyndep.Outputs)
+}
+
+// writeDyndepList writes a "keyword = value" line whose value is the
+// space-separated, escaped paths, and is skipped entirely when values is empty.
+func writeDyndepList(output *bytes.Buffer, keyword string, values []string) {
+	if len(values) == 0 {
+		return
+	}
+	output.WriteString(keyword)
+	output.WriteString(" = ")
+	for i, value := range values {
+		if i > 0 {
+			output.WriteByte(' ')
 		}
-		output.WriteByte('\n')
+		output.WriteString(EscapePath(value))
 	}
-	if len(dyndep.Outputs) > 0 {
-		output.WriteString("outputs = ")
-		for i, item := range dyndep.Outputs {
-			if i > 0 {
-				output.WriteByte(' ')
-			}
-			output.WriteString(EscapePath(item))
-		}
-		output.WriteByte('\n')
+	output.WriteByte('\n')
+}
+
+// writeDyndepEdges writes one "build <path>: dyndep" block per entry in edges,
+// listing the discovered paths under keyword ("bind" or "implicit"). Entries are
+// emitted in Go's unspecified map iteration order.
+func writeDyndepEdges(output *bytes.Buffer, keyword string, edges map[string][]string) {
+	for outputPath, inputs := range edges {
+		fmt.Fprintf(output, "build %s: dyndep\n", EscapePath(outputPath))
+		fmt.Fprintf(output, "  %s = %s\n", keyword, joinEscaped(inputs))
 	}
-	for outputPath, inputs := range dyndep.Binds {
-		fmt.Fprintf(&output, "build %s: dyndep\n", EscapePath(outputPath))
-		fmt.Fprintf(&output, "  bind = %s\n", joinEscaped(inputs))
-	}
-	for outputPath, inputs := range dyndep.Implicit {
-		fmt.Fprintf(&output, "build %s: dyndep\n", EscapePath(outputPath))
-		fmt.Fprintf(&output, "  implicit = %s\n", joinEscaped(inputs))
-	}
-	return output.Bytes(), nil
 }
 
 func joinEscaped(values []string) string {
