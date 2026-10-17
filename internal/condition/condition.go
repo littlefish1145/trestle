@@ -1,3 +1,6 @@
+// Package condition parses and evaluates the sandboxed boolean expressions used
+// to enable targets and settings. Only the supported read-only facts and helper
+// functions are available; Go functions, file access, and shell commands are not.
 package condition
 
 import (
@@ -20,6 +23,8 @@ type Facts struct {
 	Path           func(string) bool
 }
 
+// Validate reports whether source is a well-formed condition that evaluates to a
+// boolean. An empty source is valid and means always enabled.
 func Validate(source string) error {
 	if source == "" {
 		return nil
@@ -38,6 +43,8 @@ func Validate(source string) error {
 	return nil
 }
 
+// Evaluate parses source and resolves it against facts, returning the resulting
+// boolean. An empty source evaluates to true.
 func Evaluate(source string, facts Facts) (bool, error) {
 	if source == "" {
 		return true, nil
