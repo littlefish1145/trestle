@@ -3,6 +3,7 @@ package app
 import (
 	"archive/zip"
 	"context"
+	"encoding/json"
 	"io"
 	"os"
 	"os/exec"
@@ -61,7 +62,12 @@ func TestRealNativeCPPBuild(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	output, err := exec.Command(filepath.Join(filepath.Dir(result.Manifest), result.Outputs["app"])).CombinedOutput()
+	command := editorRunCommand(t, root, "Trestle: Run app")
+	artifact := filepath.Join(filepath.Dir(result.Manifest), result.Outputs["app"])
+	if command != artifact {
+		t.Fatalf("generated run task points at %q, but the build produced %q", command, artifact)
+	}
+	output, err := exec.Command(command).CombinedOutput()
 	if err != nil || strings.TrimSpace(string(output)) != "native OK" {
 		t.Fatalf("run: %s %v", output, err)
 	}
@@ -234,4 +240,40 @@ func TestRealWSLBuild(t *testing.T) {
 	if err != nil || strings.TrimSpace(string(output)) != "WSL OK" {
 		t.Fatalf("run: %s %v", output, err)
 	}
+}
+
+// editorRunCommand returns the command the generated tasks.json runs on this
+// host, resolving ${workspaceFolder} and the platform override the way VS Code
+// does.
+func editorRunCommand(t *testing.T, root, label string) string {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(root, ".vscode", "tasks.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document struct {
+		Tasks []struct {
+			Label   string `json:"label"`
+			Command string `json:"command"`
+			Windows *struct {
+				Command string `json:"command"`
+			} `json:"windows"`
+		} `json:"tasks"`
+	}
+	if err := json.Unmarshal(data, &document); err != nil {
+		t.Fatal(err)
+	}
+	for _, task := range document.Tasks {
+		if task.Label != label {
+			continue
+		}
+		command := task.Command
+		if runtime.GOOS == "windows" && task.Windows != nil {
+			command = task.Windows.Command
+		}
+		command = strings.ReplaceAll(command, "${workspaceFolder}", filepath.ToSlash(root))
+		return filepath.FromSlash(command)
+	}
+	t.Fatalf("missing task %q", label)
+	return ""
 }

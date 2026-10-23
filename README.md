@@ -29,6 +29,7 @@ Trestle 把编译器发现、依赖解析、项目导入、Ninja 构建、测试
 - 测试支持单个 job、分组、源文件归属和全部运行。
 - Release 页面/命令支持内置或自定义优化预设，并将目标及运行时依赖打包为 ZIP。
 - 为 VS Code/clangd 生成 `compile_commands.json`，并生成 `.trestle/commands.json`。
+- VS Code 任务：`trestle init` 自动生成含构建、测试、发布、目标选择和逐可执行目标运行任务的 `.vscode/tasks.json`；`trestle editor-config` 可刷新配置，合并时不会覆盖你自定义的任务。
 - 构建诊断按目标和编译/链接阶段聚合，汇总成功、失败和跳过的目标。
 
 ## 环境要求
@@ -108,6 +109,7 @@ trestle import-xmake            导入 Xmake
 trestle export-cmake            反向导出 trestle.toml 至 CMakeLists.txt（实验；-force 覆盖已存在文件）
 trestle package                 按 [package] 设置生成发布归档
 trestle release                 构建并生成 ZIP 发布包
+trestle editor-config           生成 VS Code 任务（-merge 合并，-force 覆盖）
 trestle vcpkg --search QUERY    搜索 vcpkg 包
 trestle vcpkg --install --ports fmt,zlib
                                 安装 vcpkg 包

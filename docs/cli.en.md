@@ -26,6 +26,7 @@ Trestle ships a single executable, `trestle`. It runs inside a project directory
 | `trestle export-cmake` | Reverse-export to `CMakeLists.txt` (experimental) |
 | `trestle package` | Build a release archive |
 | `trestle release` | Build and create a release package |
+| `trestle editor-config` | Generate VS Code `.vscode/tasks.json` |
 | `trestle vcpkg` | Search or install vcpkg ports |
 | `trestle toolchain` | List detected toolchains |
 | `trestle doctor` | Check the project environment |
@@ -48,7 +49,7 @@ Open the Project Console. With no subcommand, `trestle` discovers the project co
 trestle init [-C dir] [-name project]
 ```
 
-Create a minimal working project (`trestle.toml` plus a sample source file). `-C` selects the directory to create, `-name` sets the project name.
+Create a minimal working project (`trestle.toml` plus a sample source file). `-C` selects the directory to create, `-name` sets the project name. When `.vscode/tasks.json` does not exist yet, init also writes VS Code build, test, release, and run tasks; an existing file is left untouched.
 
 ## `trestle configure`
 
@@ -163,6 +164,16 @@ trestle release [-C dir] [-optimization balanced|speed|size|custom:name] [-targe
 ```
 
 Configure and run a release build, then package it. `-optimization` selects the optimization preset, `-targets` takes a comma-separated target list, and `-output` overrides the archive path.
+
+## `trestle editor-config`
+
+```text
+trestle editor-config [-C dir] [-merge | -force]
+```
+
+Write `.vscode/tasks.json` with `Trestle: Build`, `Trestle: Build All`, `Trestle: Build Current Target`, `Trestle: Test`, `Trestle: Release`, and one `Trestle: Run <target>` task per executable target. Run tasks depend on `Trestle: Build`, execute the profile artifact from `${workspaceFolder}`, and carry a `windows` override that appends `.exe`, so the same file works on every OS and is safe to commit.
+
+An existing `.vscode/tasks.json` is never overwritten silently. Without flags the command fails, `-merge` replaces only the tasks and inputs trestle generates (your own tasks, inputs, and top-level settings are kept), and `-force` replaces the whole file. Tasks whose label starts with `Trestle: ` count as generated. `-merge` requires plain JSON; files containing comments are rejected so nothing is lost. `trestle init` writes the file automatically when it is missing, and prints a hint when a `launch.json` exists: set `"preLaunchTask": "Trestle: Build"` to build before debugging.
 
 ## `trestle vcpkg`
 

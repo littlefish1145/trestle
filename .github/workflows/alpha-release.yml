@@ -80,6 +80,17 @@ jobs:
           printf 'Command: go test -count=1 ./...\n' | tee "$log"
           go test -count=1 ./... 2>&1 | tee -a "$log"
 
+      - name: Enforce VS Code generator coverage
+        run: |
+          set -Eeuo pipefail
+          log="quality-logs/go-test-vscode-cover-${RUNNER_OS}-${RUNNER_ARCH}.log"
+          printf 'Command: go test -count=1 -covermode=atomic -coverprofile=quality-logs/vscode-cover.out ./internal/vscode/...\n' | tee "$log"
+          go test -count=1 -covermode=atomic -coverprofile=quality-logs/vscode-cover.out ./internal/vscode/... 2>&1 | tee -a "$log"
+          go tool cover -func=quality-logs/vscode-cover.out | tail -n 1 | tee -a "$log"
+          total=$(go tool cover -func=quality-logs/vscode-cover.out | tail -n 1 | sed -E 's/.*[[:space:]]([0-9]+([.][0-9]+)?)%$/\1/')
+          awk -v total="$total" 'BEGIN { if (total + 0 < 95) { printf "internal/vscode coverage is %.2f%%, below the 95%% requirement\n", total; exit 1 } }'
+          printf 'internal/vscode coverage: %s%% (>= 95%%)\n' "$total"
+
       - name: Run go vet
         run: |
           set -Eeuo pipefail

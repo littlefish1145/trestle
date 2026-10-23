@@ -29,6 +29,7 @@ Trestle brings compiler discovery, dependency resolution, project import, Ninja 
 - Test selection by job, group, owning source file, or the complete suite.
 - Release workflows with built-in or custom optimization presets and ZIP packaging of outputs and runtime dependencies.
 - `compile_commands.json` for VS Code/clangd and `.trestle/commands.json` for editor automation.
+- VS Code tasks: `trestle init` writes `.vscode/tasks.json` with build, test, release, target-picker, and per-executable run tasks; `trestle editor-config` refreshes them, merging instead of clobbering your own tasks.
 - Diagnostics grouped by target and compile/link stage, followed by succeeded, failed, and skipped target summaries.
 
 ## Requirements
@@ -108,6 +109,7 @@ trestle import-xmake            Import an Xmake project
 trestle export-cmake            Reverse-export trestle.toml to CMakeLists.txt (experimental; -force overwrites)
 trestle package                 Build a release archive from the [package] settings
 trestle release                 Build and create a release ZIP
+trestle editor-config           Generate VS Code tasks (-merge updates, -force overwrites)
 trestle vcpkg --search QUERY    Search vcpkg ports
 trestle vcpkg --install --ports fmt,zlib
                                 Install vcpkg ports

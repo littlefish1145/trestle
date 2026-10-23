@@ -26,6 +26,7 @@ Trestle 只有一个可执行文件 `trestle`。它在项目目录中运行，�
 | `trestle export-cmake` | 反向导出为 `CMakeLists.txt`（实验） |
 | `trestle package` | 生成发布归档 |
 | `trestle release` | 构建并生成发布包 |
+| `trestle editor-config` | 生成 VS Code 的 `.vscode/tasks.json` |
 | `trestle vcpkg` | 搜索或安装 vcpkg 包 |
 | `trestle toolchain` | 列出检测到的工具链 |
 | `trestle doctor` | 检查项目环境 |
@@ -48,7 +49,7 @@ trestle tui [-C dir]
 trestle init [-C dir] [-name project]
 ```
 
-创建一个最小可用的项目（`trestle.toml` 与示例源文件）。`-C` 指定创建目录，`-name` 指定项目名。
+创建一个最小可用的项目（`trestle.toml` 与示例源文件）。`-C` 指定创建目录，`-name` 指定项目名。若 `.vscode/tasks.json` 尚不存在，init 还会写入 VS Code 的构建、测试、发布和运行任务；已存在的文件不会被改动。
 
 ## `trestle configure`
 
@@ -163,6 +164,16 @@ trestle release [-C dir] [-optimization balanced|speed|size|custom:name] [-targe
 ```
 
 配置并运行一次发布构建，然后打包。`-optimization` 选择优化预设，`-targets` 指定逗号分隔的目标，`-output` 覆盖归档路径。
+
+## `trestle editor-config`
+
+```text
+trestle editor-config [-C dir] [-merge | -force]
+```
+
+生成 `.vscode/tasks.json`，包含 `Trestle: Build`、`Trestle: Build All`、`Trestle: Build Current Target`、`Trestle: Test`、`Trestle: Release`，以及每个可执行目标对应的 `Trestle: Run <目标>` 任务。运行任务依赖 `Trestle: Build`，执行 `${workspaceFolder}` 下当前 profile 的产物，并带有追加 `.exe` 后缀的 `windows` 覆盖；因此同一份文件可在各操作系统使用，适合提交到仓库。
+
+已存在的 `.vscode/tasks.json` 绝不会被静默覆盖：不带参数时命令直接报错，`-merge` 只替换 trestle 生成的任务和输入（你自定义的任务、输入及顶层设置都会保留），`-force` 才会整体替换。标签以 `Trestle: ` 开头的任务视为 trestle 生成的任务。`-merge` 要求文件是纯 JSON；含注释的文件会被拒绝，以免丢失内容。`trestle init` 会在文件缺失时自动生成；检测到 `launch.json` 时还会提示设置 `"preLaunchTask": "Trestle: Build"`，以便调试前先构建。
 
 ## `trestle vcpkg`
 

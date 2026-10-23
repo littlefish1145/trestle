@@ -37,6 +37,7 @@ import (
 	"trestle/internal/state"
 	"trestle/internal/toolchain"
 	"trestle/internal/toolchain/cuda"
+	"trestle/internal/vscode"
 )
 
 // BuildResult reports what a generation run produced: the manifest path, the
@@ -52,7 +53,8 @@ type BuildResult struct {
 }
 
 // Init creates a new project at root, writing a default trestle.toml, a starter
-// src/main.cpp, and a .gitignore when they are missing.
+// src/main.cpp, a .gitignore, and a VS Code .vscode/tasks.json when they are
+// missing. Existing files are never overwritten.
 func Init(root, name string) error {
 	if strings.TrimSpace(name) == "" {
 		absolute, err := filepath.Abs(root)
@@ -70,7 +72,8 @@ func Init(root, name string) error {
 	if err := os.MkdirAll(filepath.Join(root, "src"), 0o755); err != nil {
 		return err
 	}
-	if err := config.SaveExpected(path, config.Default(name), "missing"); err != nil {
+	cfg := config.Default(name)
+	if err := config.SaveExpected(path, cfg, "missing"); err != nil {
 		return err
 	}
 	main := filepath.Join(root, "src", "main.cpp")
@@ -85,7 +88,9 @@ func Init(root, name string) error {
 			return err
 		}
 	}
-	return nil
+	document := vscode.Generate(vscode.FromConfig(root, cfg))
+	_, err := vscode.Write(filepath.Join(root, ".vscode", "tasks.json"), document, vscode.ModeCreate)
+	return err
 }
 
 // ConfigureOptions carries the settings resolved from the command-line flags and
