@@ -52,7 +52,9 @@ type WorkspaceDoctorFunc func(context.Context, string, func(string)) error
 
 // Services is the set of operations the console can perform. The host supplies
 // one callback per action; a nil field disables that action, which the console
-// then reports as unavailable.
+// then reports as unavailable. SetScope selects which configuration file the
+// single-project operations read and write: empty means the workspace root,
+// otherwise a member name.
 type Services struct {
 	Build             BuildFunc
 	BuildTargets      TargetBuildFunc
@@ -60,6 +62,7 @@ type Services struct {
 	BuildWorkspace    WorkspaceFunc
 	TestWorkspace     WorkspaceTestFunc
 	DoctorWorkspace   WorkspaceDoctorFunc
+	SetScope          func(string)
 	AssessTargets     func(context.Context) (config.Config, map[string]policy.Status, policy.Report, error)
 	PreviewTask       func(context.Context, string) (config.TaskPreview, error)
 	RunTask           func(context.Context, string, config.TaskPreview, func(string)) error
@@ -509,7 +512,7 @@ func (model dashboardModel) selectedTarget() (string, bool) {
 }
 
 func (model dashboardModel) selectedTask() (string, bool) {
-	names := sortedTaskNames(model.config.Tasks)
+	names := sortedTaskNames(model.scopedTasks())
 	if model.cursor < 0 || model.cursor >= len(names) {
 		return "", false
 	}
@@ -570,8 +573,9 @@ func (model *dashboardModel) openSelectedSetting() {
 	model.inputText = row.value
 }
 func (model dashboardModel) presetNames() []string {
-	names := make([]string, 0, len(model.config.CompilerPresets))
-	for name := range model.config.CompilerPresets {
+	presets := model.scopedPresets()
+	names := make([]string, 0, len(presets))
+	for name := range presets {
 		names = append(names, name)
 	}
 	sort.Strings(names)
@@ -1069,10 +1073,10 @@ func (model *dashboardModel) keepCursorVisible() {
 // rows, so itemCount stays a single lookup.
 var itemCounters = map[Route]func(dashboardModel) int{
 	TargetsRoute:      func(model dashboardModel) int { return len(model.scopedConfig().Targets) },
-	TasksRoute:        func(model dashboardModel) int { return len(model.config.Tasks) },
+	TasksRoute:        func(model dashboardModel) int { return len(model.scopedTasks()) },
 	DependenciesRoute: dashboardModel.dependencyCount,
 	ToolchainsRoute:   func(model dashboardModel) int { return len(model.probe.Components) },
-	PresetsRoute:      func(model dashboardModel) int { return len(model.config.CompilerPresets) },
+	PresetsRoute:      func(model dashboardModel) int { return len(model.scopedPresets()) },
 	PackagesRoute:     dashboardModel.packageItemCount,
 	TestsRoute:        dashboardModel.testItemCount,
 	BuildRoute:        func(model dashboardModel) int { return len(model.scopedConfig().Targets) },
@@ -1502,13 +1506,14 @@ func (model dashboardModel) targetDetailLines(p palette, width int, name string,
 }
 
 func (model dashboardModel) taskLines(p palette, width int) []string {
-	names := sortedTaskNames(model.config.Tasks)
+	tasks := model.scopedTasks()
+	names := sortedTaskNames(tasks)
 	if len(names) == 0 {
 		return emptyState(p, "No tasks configured", "Add a [tasks.<name>] section to trestle.toml.")
 	}
 	lines := []string{p.warning.Render("来源不明的 DSL 任务可能损害您的设备。仅运行可信项目中的任务。"), ""}
 	for index, name := range names {
-		task := model.config.Tasks[name]
+		task := tasks[name]
 		if model.pendingTask == name {
 			task = model.pendingTaskPreview.Task
 		}
@@ -1662,7 +1667,7 @@ func (model dashboardModel) presetLines(p palette, width int) []string {
 		lines = append(lines, p.muted.Render("  No custom presets. Configure Settings, then press n to save the current toolchain and flags."))
 	}
 	for index, name := range names {
-		preset := model.config.CompilerPresets[name]
+		preset := model.scopedPresets()[name]
 		summary := fmt.Sprintf("%-20s  %s  C:%d C++:%d link:%d", name, fallback(filepath.Base(preset.CXX), "current compiler"), len(preset.CFlags), len(preset.CXXFlags), len(preset.LinkFlags))
 		lines = append(lines, model.selectableRow(p, index, ansi.Truncate(summary, width-3, "…")))
 		if index == model.cursor && model.focus == focusContent {
@@ -1931,7 +1936,15 @@ func (model dashboardModel) settingsLines(p palette, width int) []string {
 	return model.settingsMenuLines(p, width)
 }
 
+// editableConfig is the configuration the settings screen displays and edits.
+// In a member scope it is that member's merged configuration, so its own values
+// stay visible; the host writes changes into the member's trestle.toml.
 func (model dashboardModel) editableConfig() config.Config {
+	if model.member != "" {
+		if member, ok := model.probe.MemberConfigs[model.member]; ok {
+			return member
+		}
+	}
 	if model.baseConfig.SchemaVersion != 0 {
 		return model.baseConfig
 	}

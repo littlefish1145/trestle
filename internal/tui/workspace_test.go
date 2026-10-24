@@ -39,11 +39,15 @@ func workspaceConsole(t *testing.T) (dashboardModel, *callJournal) {
 	return model, journal
 }
 
-func TestWorkspaceTreeRendersMembersAndCounts(t *testing.T) {
+func TestWorkspaceTreeRendersRootAndMemberScreens(t *testing.T) {
 	model, _ := workspaceConsole(t)
 	p := newPalette(false)
-	side := ansi.Strip(model.sidebar(p, 34, 46))
-	for _, expected := range []string{"▼ Root", "Overview", "Toolchains", "Build All", "▼ core", "Targets (2)", "Packages", "▼ cli", "Targets (1)"} {
+	side := ansi.Strip(model.sidebar(p, 40, 60))
+	for _, expected := range []string{
+		"▼ Root", "Overview", "Targets (all)", "Packages", "Tasks", "Toolchains", "Presets", "Doctor", "Settings",
+		"▼ core", "Targets (2)", "Packages (1)", "Tests (1)", "Release",
+		"▼ cli", "Targets (1)",
+	} {
 		if !strings.Contains(side, expected) {
 			t.Fatalf("workspace tree missing %q:\n%s", expected, side)
 		}
@@ -58,16 +62,16 @@ func TestWorkspaceTreeRendersMembersAndCounts(t *testing.T) {
 	if !strings.Contains(header, "pkg: core") {
 		t.Fatalf("header missing selected member: %q", header)
 	}
-	side = ansi.Strip(model.sidebar(p, 34, 46))
-	if !strings.Contains(side, "▸ 4 Targets (2)") {
+	side = ansi.Strip(model.sidebar(p, 40, 60))
+	if !strings.Contains(side, "▸ 9 Targets (2)") {
 		t.Fatalf("workspace tree does not mark the active member screen:\n%s", side)
 	}
 }
 
 func TestWorkspaceTreeSelectsMemberTargets(t *testing.T) {
 	model, _ := workspaceConsole(t)
-	// Row 4 is "core → Targets (2)"; digits address the tree rows.
-	model = tapNumber(t, model, "4")
+	// Row 9 is "core → Targets (2)"; digits address the tree rows.
+	model = tapNumber(t, model, "9")
 	if model.member != "core" || model.route != TargetsRoute {
 		t.Fatalf("tree selection: member=%q route=%q", model.member, model.route)
 	}
@@ -90,31 +94,27 @@ func tapNumber(t *testing.T, model dashboardModel, digit string) dashboardModel 
 func TestWorkspaceTreeMovesWithArrowsLikeFlatNavigation(t *testing.T) {
 	model, _ := workspaceConsole(t)
 	model.focus = focusNavigation
-	// Overview → Toolchains → Build All, immediately switching the screen the
+	// Overview → Targets (all) → Packages, immediately switching the screen the
 	// way the flat navigation does.
 	down := func(m dashboardModel) dashboardModel {
 		updated, _ := tap(m, "down")
 		return updated
 	}
 	model = down(model)
-	if model.route != ToolchainsRoute || model.member != "" {
+	if model.route != TargetsRoute || model.member != "" {
 		t.Fatalf("first down: route=%q member=%q", model.route, model.member)
 	}
 	model = down(model)
-	if model.route != BuildRoute || model.member != "" {
+	if model.route != PackagesRoute || model.member != "" {
 		t.Fatalf("second down: route=%q member=%q", model.route, model.member)
 	}
-	side := ansi.Strip(model.sidebar(newPalette(false), 34, 46))
-	if !strings.Contains(side, "▸ 3 Build All") {
+	side := ansi.Strip(model.sidebar(newPalette(false), 40, 60))
+	if !strings.Contains(side, "▸ 3 Packages") {
 		t.Fatalf("active row not highlighted:\n%s", side)
-	}
-	view := ansi.Strip(strings.Join(model.contentLines(newPalette(false), 90), "\n"))
-	if !strings.Contains(view, "core") || !strings.Contains(view, "cli") {
-		t.Fatalf("workspace build screen does not summarize members:\n%s", view)
 	}
 }
 
-func TestWorkspaceBuildScreenBuildsEveryMember(t *testing.T) {
+func TestWorkspaceBuildBuildsEveryMemberFromRootScope(t *testing.T) {
 	model, _ := workspaceConsole(t)
 	var requested WorkspaceBuildRequest
 	called := false
@@ -124,13 +124,7 @@ func TestWorkspaceBuildScreenBuildsEveryMember(t *testing.T) {
 			return nil
 		},
 	}
-	model.member = "core"
-	// Row 3 is "Build All": opening it clears the member filter and shows the
-	// aggregate build screen.
-	model = tapNumber(t, model, "3")
-	if model.route != BuildRoute || model.member != "" {
-		t.Fatalf("Build All row: route=%q member=%q", model.route, model.member)
-	}
+	model.member = ""
 	updated, cmd := model.startBuild()
 	model = updated.(dashboardModel)
 	if cmd == nil {
@@ -141,7 +135,39 @@ func TestWorkspaceBuildScreenBuildsEveryMember(t *testing.T) {
 		t.Fatal("build did not invoke the workspace build service")
 	}
 	if requested.Member != "" || requested.Targets != nil {
-		t.Fatalf("Build All request = %#v", requested)
+		t.Fatalf("root build request = %#v", requested)
+	}
+}
+
+func TestWorkspaceScopeFollowsSelectedMember(t *testing.T) {
+	model, _ := workspaceConsole(t)
+	scopes := []string{}
+	model.services = Services{SetScope: func(member string) { scopes = append(scopes, member) }}
+	model = tapNumber(t, model, "9")
+	if model.member != "core" {
+		t.Fatalf("member = %q", model.member)
+	}
+	model = tapNumber(t, model, "1")
+	if model.member != "" {
+		t.Fatalf("root row did not clear the scope: %q", model.member)
+	}
+	if len(scopes) < 2 || scopes[len(scopes)-2] != "core" || scopes[len(scopes)-1] != "" {
+		t.Fatalf("scope changes = %#v", scopes)
+	}
+}
+
+func TestWorkspaceMemberPackagesAreEditable(t *testing.T) {
+	model, _ := workspaceConsole(t)
+	model.member = "core"
+	model.route = PackagesRoute
+	view := ansi.Strip(strings.Join(model.contentLines(newPalette(false), 90), "\n"))
+	if !strings.Contains(view, "fmt") {
+		t.Fatalf("member packages not shown:\n%s", view)
+	}
+	updated, _, handled := model.handleListKeys(tea.Key{Code: 'a', Text: "a"})
+	model = updated.(dashboardModel)
+	if !handled || !model.inputMode {
+		t.Fatalf("member package key was blocked (handled=%v input=%v message=%q)", handled, model.inputMode, model.message)
 	}
 }
 
@@ -175,24 +201,6 @@ func TestWorkspaceMemberSwitchDrivesBuilds(t *testing.T) {
 	model = feed(t, model, cmd, 8)
 	if !called || requested.Member != "core" {
 		t.Fatalf("build request = %#v (called=%v)", requested, called)
-	}
-}
-
-func TestWorkspacePackagesAreReadOnlyForMembers(t *testing.T) {
-	model, _ := workspaceConsole(t)
-	model.member = "core"
-	model.route = PackagesRoute
-	view := ansi.Strip(strings.Join(model.contentLines(newPalette(false), 90), "\n"))
-	if !strings.Contains(view, "fmt") {
-		t.Fatalf("member packages not shown:\n%s", view)
-	}
-	updatedModel, _, handled := model.handleListKeys(tea.Key{Code: 'a', Text: "a"})
-	model = updatedModel.(dashboardModel)
-	if !handled {
-		t.Fatal("add key not handled")
-	}
-	if !model.messageError || !strings.Contains(model.message, "core/trestle.toml") {
-		t.Fatalf("member package mutation was not blocked: %q", model.message)
 	}
 }
 

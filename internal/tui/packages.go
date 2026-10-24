@@ -67,7 +67,7 @@ func queryName(entries []deps.PackageEntry) string {
 // enterCandidates drills into the selected package and remembers where the user
 // came from, so escape and the return key restore that exact position.
 func (model *dashboardModel) enterCandidates() bool {
-	index := model.cursor - len(model.config.Packages)
+	index := model.cursor - len(model.scopedConfig().Packages)
 	if index < 0 || index >= len(model.packagePackages) {
 		return false
 	}
@@ -97,7 +97,7 @@ func (model dashboardModel) selectedPackage() (deps.Package, bool) {
 	if model.packageLevel != packageListLevel {
 		return deps.Package{}, false
 	}
-	index := model.cursor - len(model.config.Packages)
+	index := model.cursor - len(model.scopedConfig().Packages)
 	if index < 0 || index >= len(model.packagePackages) {
 		return deps.Package{}, false
 	}

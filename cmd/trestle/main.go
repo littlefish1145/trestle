@@ -425,7 +425,18 @@ func editorConfigProject(path string, flags *runFlags) error {
 }
 
 func dashboardServices(path string) tuimodel.Services {
+	// The console tells the host which scope it is editing; single-config
+	// operations then read and write that file. Workspace-wide operations keep
+	// using the root path and carry the member themselves.
+	scopeMember := ""
+	configPath := func() string {
+		if scopeMember == "" {
+			return path
+		}
+		return filepath.Join(filepath.Dir(path), filepath.FromSlash(scopeMember), config.DefaultFileName)
+	}
 	return tuimodel.Services{
+		SetScope: func(member string) { scopeMember = member },
 		BuildWorkspace: func(ctx context.Context, request tuimodel.WorkspaceBuildRequest, progress func(string)) error {
 			return app.BuildWorkspace(ctx, path, app.WorkspaceBuildOptions{
 				Member:  request.Member,
@@ -446,6 +457,9 @@ func dashboardServices(path string) tuimodel.Services {
 			return app.DoctorWorkspace(ctx, path, member, progress)
 		},
 		Doctor: func(ctx context.Context, progress func(string)) error {
+			if scopeMember != "" {
+				return app.DoctorWorkspace(ctx, path, scopeMember, progress)
+			}
 			return app.DoctorWithContext(ctx, path, progress)
 		},
 		Build: func(ctx context.Context, progress func(string)) error {
@@ -458,43 +472,45 @@ func dashboardServices(path string) tuimodel.Services {
 			return app.BuildTargetsWithOptions(ctx, path, targets, all, true, progress)
 		},
 		AssessTargets: func(ctx context.Context) (config.Config, map[string]policy.Status, policy.Report, error) {
-			return app.AssessTargetsWithReport(ctx, path)
+			return app.AssessTargetsWithReport(ctx, configPath())
 		},
 		PreviewTask: func(_ context.Context, name string) (config.TaskPreview, error) {
-			return app.PreviewTask(path, name)
+			return app.PreviewTask(configPath(), name)
 		},
 		RunTask: func(ctx context.Context, name string, preview config.TaskPreview, progress func(string)) error {
-			return app.ExecuteTaskPreview(ctx, path, name, preview, progress)
+			return app.ExecuteTaskPreview(ctx, configPath(), name, preview, progress)
 		},
-		AddPackage: func(name string) error { return app.AddPackage(path, name, "") },
+		AddPackage: func(name string) error { return app.AddPackage(configPath(), name, "") },
 		InstallPackage: func(ctx context.Context, name string, progress func(string)) error {
-			return app.InstallPackage(ctx, path, name, progress)
+			return app.InstallPackage(ctx, configPath(), name, progress)
 		},
-		SetProfile:      func(profile string) error { return app.SetProfile(path, profile) },
-		SetCompileFlags: func(flags string) error { return app.SetFlags(path, flags, "") },
+		SetProfile:      func(profile string) error { return app.SetProfile(configPath(), profile) },
+		SetCompileFlags: func(flags string) error { return app.SetFlags(configPath(), flags, "") },
 		SearchPackages: func(ctx context.Context, query string) ([]deps.PackageEntry, error) {
-			return app.SearchPackages(ctx, path, query)
+			return app.SearchPackages(ctx, configPath(), query)
 		},
-		RemovePackage: func(name string) error { return app.RemovePackage(path, name) },
+		RemovePackage: func(name string) error { return app.RemovePackage(configPath(), name) },
 		SetPackageVersion: func(name, version string) error {
-			return app.SetPackageVersion(path, name, version)
+			return app.SetPackageVersion(configPath(), name, version)
 		},
-		SetCompiler:    func(compiler string) error { return app.SetCompiler(path, compiler) },
-		SetWSLCompiler: func(distribution, compiler string) error { return app.SetWSLCompiler(path, distribution, compiler) },
-		SetEnvironment: func(setup string) error { return app.SetEnvironment(path, setup) },
-		SetCUDA:        func(enabled bool, root string) error { return app.SetCUDA(path, enabled, root) },
+		SetCompiler: func(compiler string) error { return app.SetCompiler(configPath(), compiler) },
+		SetWSLCompiler: func(distribution, compiler string) error {
+			return app.SetWSLCompiler(configPath(), distribution, compiler)
+		},
+		SetEnvironment: func(setup string) error { return app.SetEnvironment(configPath(), setup) },
+		SetCUDA:        func(enabled bool, root string) error { return app.SetCUDA(configPath(), enabled, root) },
 		SetCUDAConnection: func(enabled bool, root, execution, distribution string) error {
-			return app.SetCUDAConnection(path, enabled, root, execution, distribution)
+			return app.SetCUDAConnection(configPath(), enabled, root, execution, distribution)
 		},
 		SetVulkan: func(enabled bool, root, execution, distribution string) error {
-			return app.SetVulkanConnection(path, enabled, root, execution, distribution)
+			return app.SetVulkanConnection(configPath(), enabled, root, execution, distribution)
 		},
-		SetTestGroup: func(job, group string) error { return app.SetTestGroup(path, job, group) },
+		SetTestGroup: func(job, group string) error { return app.SetTestGroup(configPath(), job, group) },
 		RunTests: func(ctx context.Context, selection tuimodel.TestSelection, progress func(string)) error {
-			return app.RunTests(ctx, path, app.TestSelection{Job: selection.Job, Group: selection.Group, File: selection.File, All: selection.All}, progress)
+			return app.RunTests(ctx, configPath(), app.TestSelection{Job: selection.Job, Group: selection.Group, File: selection.File, All: selection.All}, progress)
 		},
 		ImportCMake: func(ctx context.Context, progress func(string)) error {
-			result, err := app.ImportCMake(ctx, path, progress)
+			result, err := app.ImportCMake(ctx, configPath(), progress)
 			if err == nil {
 				for _, warning := range result.Warnings {
 					progress("Warning: " + warning)
@@ -502,18 +518,20 @@ func dashboardServices(path string) tuimodel.Services {
 			}
 			return err
 		},
-		ImportXmake:       func(ctx context.Context, progress func(string)) error { return app.ImportXmake(ctx, path, progress) },
-		SetLanguageFlags:  func(language, flags string) error { return app.SetLanguageFlags(path, language, flags) },
-		ApplyPreset:       func(name string) error { return app.ApplyCompilerPreset(path, name) },
-		SavePreset:        func(name string) error { return app.SaveCompilerPreset(path, name) },
-		SetDefaultTargets: func(targets []string) error { return app.SetDefaultTargets(path, targets) },
-		SetProjectSetting: func(key, value string) error { return app.SetProjectSetting(path, key, value) },
-		DeletePreset:      func(name string) error { return app.DeleteCompilerPreset(path, name) },
+		ImportXmake: func(ctx context.Context, progress func(string)) error {
+			return app.ImportXmake(ctx, configPath(), progress)
+		},
+		SetLanguageFlags:  func(language, flags string) error { return app.SetLanguageFlags(configPath(), language, flags) },
+		ApplyPreset:       func(name string) error { return app.ApplyCompilerPreset(configPath(), name) },
+		SavePreset:        func(name string) error { return app.SaveCompilerPreset(configPath(), name) },
+		SetDefaultTargets: func(targets []string) error { return app.SetDefaultTargets(configPath(), targets) },
+		SetProjectSetting: func(key, value string) error { return app.SetProjectSetting(configPath(), key, value) },
+		DeletePreset:      func(name string) error { return app.DeleteCompilerPreset(configPath(), name) },
 		ConfigureRelease: func(preset string, targets []string, output string) error {
-			return app.ConfigureRelease(path, preset, targets, output)
+			return app.ConfigureRelease(configPath(), preset, targets, output)
 		},
 		Release: func(ctx context.Context, progress func(string)) error {
-			return app.ReleaseWithProgress(ctx, path, progress)
+			return app.ReleaseWithProgress(ctx, configPath(), progress)
 		},
 	}
 }

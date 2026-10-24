@@ -29,10 +29,6 @@ func (model dashboardModel) submitInput() (tea.Model, tea.Cmd) {
 	if kind == "switch-member" {
 		return model.applyMemberSwitch(text)
 	}
-	if model.memberScopeLocked() && (kind == "install" || kind == "features" || kind == "version" || kind == "package") {
-		model.setMessage(model.memberScopeMessage(), true)
-		return model, nil
-	}
 	if text == "" && kind != "environment" && kind != "setting" {
 		model.setMessage("Nothing changed", false)
 		return model, nil
@@ -73,6 +69,7 @@ func (model dashboardModel) applyMemberSwitch(text string) (tea.Model, tea.Cmd) 
 		}
 	}
 	model.member = text
+	model.applyScope()
 	if text == "" {
 		model.setMessage("Workspace: operating on all members", false)
 		return model, nil
@@ -93,7 +90,7 @@ func (model dashboardModel) submitPackageSearch(text string) (tea.Model, tea.Cmd
 	// A "name:version" term remembers the version so the page can highlight it
 	// and the quick install action can target it.
 	model.packageRequested = deps.ParseQuery(text).Version
-	model.cursor, model.scroll = max(0, len(model.config.Packages)-1), 0
+	model.cursor, model.scroll = max(0, len(model.scopedConfig().Packages)-1), 0
 	model.setMessage("Searching vcpkg and conan indexes for “"+text+"”…", false)
 	return model, tea.Batch(func() tea.Msg {
 		ports, err := model.services.SearchPackages(context.Background(), text)

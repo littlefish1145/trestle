@@ -144,6 +144,7 @@ func (model dashboardModel) applyProbe(probe probeMessage) (tea.Model, tea.Cmd) 
 	if model.member != "" && !containsString(model.workspaceMembers(), model.member) {
 		model.member = ""
 	}
+	model.applyScope()
 	if probe.Error != nil {
 		model.lastError = probe.Error
 		model.setMessage(probe.Error.Error(), true)
@@ -177,7 +178,7 @@ func (model dashboardModel) applyPackageSearch(message packageSearchMessage) das
 	// chosen once instead of twice.
 	model.packagePackages = deps.Merge(message.ports)
 	model.packageLevel = packageListLevel
-	model.cursor = len(model.config.Packages)
+	model.cursor = len(model.scopedConfig().Packages)
 	model.scroll = max(0, model.cursor-2)
 	if model.packageRequested != "" {
 		// A pinned version jumps straight into the picker with that release

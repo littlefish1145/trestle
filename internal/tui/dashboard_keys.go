@@ -281,10 +281,6 @@ func (model dashboardModel) handleEnterKey() (tea.Model, tea.Cmd, bool) {
 // enterPackages handles enter on the packages screen: choosing a candidate
 // version installs it, while on the list level it drills into the versions.
 func (model dashboardModel) enterPackages() (tea.Model, tea.Cmd, bool) {
-	if model.memberScopeLocked() {
-		model.setMessage(model.memberScopeMessage(), true)
-		return model, nil, true
-	}
 	if model.packageLevel == packageCandidatesLevel {
 		pkg, candidate, ok := model.selectedCandidate()
 		if !ok {
@@ -385,13 +381,6 @@ func (model dashboardModel) enterDoctor() (tea.Model, tea.Cmd, bool) {
 // handleListKeys dispatches the per-screen list actions: install or search
 // packages, add or remove dependencies, and save presets.
 func (model dashboardModel) handleListKeys(key tea.Key) (tea.Model, tea.Cmd, bool) {
-	if model.memberScopeLocked() {
-		switch key.String() {
-		case "a", "i", "f", "/", "s", "d":
-			model.setMessage(model.memberScopeMessage(), true)
-			return model, nil, true
-		}
-	}
 	switch key.String() {
 	case "a":
 		return model.addKey()
@@ -440,7 +429,7 @@ func (model dashboardModel) addKey() (tea.Model, tea.Cmd, bool) {
 // save-preset prompt on the toolchain and preset screens.
 func (model dashboardModel) newPresetKey() (tea.Model, tea.Cmd, bool) {
 	if model.route == PackagesRoute && model.packageLevel == packageListLevel && len(model.packagePackages) > 0 {
-		model.cursor = len(model.config.Packages)
+		model.cursor = len(model.scopedConfig().Packages)
 		model.scroll = max(0, model.cursor-2)
 		model.setMessage("Cursor jumped to first search result", false)
 	} else if model.route == ToolchainsRoute || model.route == PresetsRoute {

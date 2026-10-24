@@ -8,34 +8,69 @@ import (
 )
 
 // workspaceNavItem is one selectable row in the workspace tree: a root-level
-// screen, the aggregate build action, or a member's screens.
+// screen or a member's screen.
 type workspaceNavItem struct {
-	label    string
-	route    Route
-	member   string
-	buildAll bool
+	label  string
+	route  Route
+	member string
 }
 
-// workspaceNavItems builds the tree rows in render order: the root section
-// first, then one section per member. Non-workspace consoles have no tree.
-func (model dashboardModel) workspaceNavItems() []workspaceNavItem {
+// workspaceNavSection is one collapsible group in the workspace tree: the root
+// section or one member.
+type workspaceNavSection struct {
+	name  string // "" for the root section
+	items []workspaceNavItem
+}
+
+// workspaceNavSections builds the tree groups. The root group holds the
+// workspace-wide screens (aggregate targets, shared packages, toolchains,
+// presets, tasks, doctor, settings); every member group holds the screens that
+// edit that member's own trestle.toml.
+func (model dashboardModel) workspaceNavSections() []workspaceNavSection {
 	if !model.isWorkspace() {
 		return nil
 	}
-	items := []workspaceNavItem{
+	sections := []workspaceNavSection{{items: []workspaceNavItem{
 		{label: "Overview", route: OverviewRoute},
+		{label: "Targets (all)", route: TargetsRoute},
+		{label: "Packages", route: PackagesRoute},
+		{label: "Tasks", route: TasksRoute},
 		{label: "Toolchains", route: ToolchainsRoute},
-		{label: "Build All", route: BuildRoute, buildAll: true},
-	}
+		{label: "Presets", route: PresetsRoute},
+		{label: "Doctor", route: DoctorRoute},
+		{label: "Settings", route: SettingsRoute},
+	}}}
 	for _, name := range model.workspaceMembers() {
-		targets := 0
-		if member, ok := model.probe.MemberConfigs[name]; ok {
+		member, ok := model.probe.MemberConfigs[name]
+		targets, tests, packages := 0, 0, 0
+		if ok {
 			targets = len(member.Targets)
+			packages = len(member.Packages)
+			for _, target := range member.Targets {
+				if target.Type == "test" {
+					tests++
+				}
+			}
 		}
-		items = append(items,
-			workspaceNavItem{label: fmt.Sprintf("Targets (%d)", targets), route: TargetsRoute, member: name},
-			workspaceNavItem{label: "Packages", route: PackagesRoute, member: name},
-		)
+		sections = append(sections, workspaceNavSection{name: name, items: []workspaceNavItem{
+			{label: fmt.Sprintf("Targets (%d)", targets), route: TargetsRoute, member: name},
+			{label: fmt.Sprintf("Packages (%d)", packages), route: PackagesRoute, member: name},
+			{label: fmt.Sprintf("Tests (%d)", tests), route: TestsRoute, member: name},
+			{label: "Tasks", route: TasksRoute, member: name},
+			{label: "Presets", route: PresetsRoute, member: name},
+			{label: "Release", route: ReleaseRoute, member: name},
+			{label: "Doctor", route: DoctorRoute, member: name},
+			{label: "Settings", route: SettingsRoute, member: name},
+		}})
+	}
+	return sections
+}
+
+// workspaceNavItems flattens the visible tree rows.
+func (model dashboardModel) workspaceNavItems() []workspaceNavItem {
+	var items []workspaceNavItem
+	for _, section := range model.workspaceNavSections() {
+		items = append(items, section.items...)
 	}
 	return items
 }
@@ -49,16 +84,23 @@ func (model dashboardModel) workspaceNavIndex() int {
 			return index
 		}
 	}
+	if model.route == BuildRoute {
+		// Build is reached with `b` and has no tree row of its own; point the
+		// highlight at the scope's Targets row so the tree stays in sync.
+		for index, item := range items {
+			if item.route == TargetsRoute && item.member == model.member {
+				return index
+			}
+		}
+	}
 	if len(items) > 0 {
 		return 0
 	}
 	return -1
 }
 
-// activateWorkspaceNav opens the tree row at index. Every row is a screen, so
-// arrows and digits behave like the flat navigation of a standalone project:
-// selecting Build All opens the build screen scoped to every member, and `b`
-// starts the aggregate build.
+// activateWorkspaceNav opens the tree row at index, carrying the row's member
+// scope into the host so mutations write the right trestle.toml.
 func (model *dashboardModel) activateWorkspaceNav(index int) dashboardModel {
 	items := model.workspaceNavItems()
 	if index < 0 || index >= len(items) {
@@ -66,25 +108,25 @@ func (model *dashboardModel) activateWorkspaceNav(index int) dashboardModel {
 	}
 	item := items[index]
 	model.member = item.member
+	model.applyScope()
 	model.selectRoute(routeIndex(item.route))
 	return *model
 }
 
-// workspaceNavLines renders the workspace tree. The root section groups the
-// workspace-wide screens; every member gets its own section with target and
-// package screens.
+// workspaceNavLines renders the workspace tree section by section.
 func (model dashboardModel) workspaceNavLines(p palette, width int) []string {
-	items := model.workspaceNavItems()
 	active := model.workspaceNavIndex()
-	lines := []string{p.faint.Render("▼ Root")}
-	for index := 0; index < len(items) && index < 3; index++ {
-		lines = append(lines, model.workspaceNavRow(p, width, index, items[index], index == active))
-	}
-	for index := 3; index < len(items); index += 2 {
-		lines = append(lines, p.faint.Render("▼ "+items[index].member))
-		lines = append(lines, model.workspaceNavRow(p, width, index, items[index], index == active))
-		if index+1 < len(items) {
-			lines = append(lines, model.workspaceNavRow(p, width, index+1, items[index+1], index+1 == active))
+	var lines []string
+	index := 0
+	for _, section := range model.workspaceNavSections() {
+		name := section.name
+		if name == "" {
+			name = "Root"
+		}
+		lines = append(lines, p.faint.Render("▼ "+name))
+		for _, item := range section.items {
+			lines = append(lines, model.workspaceNavRow(p, width, index, item, index == active))
+			index++
 		}
 	}
 	return lines
@@ -145,6 +187,32 @@ func (model dashboardModel) scopedTestJobs() []testJob {
 	return jobs
 }
 
+// scopedTasks returns the tasks the Tasks screen shows: the selected member's
+// tasks, or the root project's tasks.
+func (model dashboardModel) scopedTasks() map[string]config.Task {
+	if model.member != "" {
+		if member, ok := model.probe.MemberConfigs[model.member]; ok {
+			return member.Tasks
+		}
+	}
+	return model.config.Tasks
+}
+
+// scopedPresets returns the presets the Presets screen shows: a member's merged
+// preset set (root presets plus overrides), or the root project's presets.
+func (model dashboardModel) scopedPresets() map[string]config.CompilerPreset {
+	return model.scopedConfig().CompilerPresets
+}
+
+// applyScope tells the host which configuration file subsequent single-project
+// operations must read and write. Workspace builds, tests and doctor runs carry
+// the member themselves and ignore this.
+func (model *dashboardModel) applyScope() {
+	if model.services.SetScope != nil {
+		model.services.SetScope(model.member)
+	}
+}
+
 // workspaceBuildLines is the workspace Build screen: every member with its
 // target count, ready for an aggregate build. Member targets live on their own
 // Targets rows in the tree.
@@ -169,17 +237,4 @@ func (model dashboardModel) workspaceBuildLines(p palette, width int) []string {
 		lines = append(lines, "", p.faint.Render(" LAST RUN"), p.text.Render(model.lastRun))
 	}
 	return lines
-}
-
-// memberScopeLocked reports whether a package mutation must be refused because a
-// member is selected: console mutations write the root configuration, so a
-// member's package set is edited in its own trestle.toml.
-func (model dashboardModel) memberScopeLocked() bool {
-	return model.route == PackagesRoute && model.isWorkspace() && model.member != ""
-}
-
-// memberScopeMessage explains why a member-scoped package change is refused.
-func (model dashboardModel) memberScopeMessage() string {
-	return "Packages for member " + model.member + " are edited in " + model.member +
-		"/trestle.toml; press w and clear the member to manage the workspace root's packages"
 }
