@@ -30,6 +30,26 @@ type BuildFunc func(context.Context, func(string)) error
 // true, and forwards progress lines to the callback.
 type TargetBuildFunc func(context.Context, []string, bool, func(string)) error
 
+// WorkspaceBuildRequest narrows a workspace operation to one member and an
+// optional target set; an empty Member operates on every member.
+type WorkspaceBuildRequest struct {
+	Member  string
+	Targets []string
+	All     bool
+	Force   bool
+}
+
+// WorkspaceFunc runs a workspace build, optionally narrowed to one member and
+// target set, forwarding progress lines to the callback.
+type WorkspaceFunc func(context.Context, WorkspaceBuildRequest, func(string)) error
+
+// WorkspaceTestFunc runs a workspace member's tests.
+type WorkspaceTestFunc func(context.Context, string, TestSelection, func(string)) error
+
+// WorkspaceDoctorFunc checks a workspace member, or every member when the
+// member name is empty.
+type WorkspaceDoctorFunc func(context.Context, string, func(string)) error
+
 // Services is the set of operations the console can perform. The host supplies
 // one callback per action; a nil field disables that action, which the console
 // then reports as unavailable.
@@ -37,6 +57,9 @@ type Services struct {
 	Build             BuildFunc
 	BuildTargets      TargetBuildFunc
 	BuildTargetsForce TargetBuildFunc
+	BuildWorkspace    WorkspaceFunc
+	TestWorkspace     WorkspaceTestFunc
+	DoctorWorkspace   WorkspaceDoctorFunc
 	AssessTargets     func(context.Context) (config.Config, map[string]policy.Status, policy.Report, error)
 	PreviewTask       func(context.Context, string) (config.TaskPreview, error)
 	RunTask           func(context.Context, string, config.TaskPreview, func(string)) error
@@ -139,7 +162,10 @@ type probeMessage struct {
 	Xmake        bool
 	XmakeProject bool
 	Tests        []testJob
-	Error        error
+	// MemberConfigs holds each workspace member's merged configuration so the
+	// console can show a member's targets and packages.
+	MemberConfigs map[string]config.Config
+	Error         error
 }
 
 type pulseMessage time.Time
@@ -236,6 +262,7 @@ type dashboardModel struct {
 	quitAfterTask      bool
 	workflowLog        []string
 	workflowErrors     []string
+	member             string
 	testFileMode       bool
 	rulesView          bool
 	pendingTask        string
@@ -456,7 +483,17 @@ func callOne(action func(string) error, value, service string) error {
 }
 
 func (model dashboardModel) startBuild() (tea.Model, tea.Cmd) {
-	if model.busy() || model.services.Build == nil {
+	if model.busy() {
+		return model, nil
+	}
+	if model.isWorkspace() && model.services.BuildWorkspace != nil {
+		model.route, model.focus = BuildRoute, focusContent
+		member := model.member
+		return model.startWorkflow("Build", func(ctx context.Context, progress func(string)) error {
+			return model.services.BuildWorkspace(ctx, WorkspaceBuildRequest{Member: member}, progress)
+		})
+	}
+	if model.services.Build == nil {
 		return model, nil
 	}
 	model.route, model.focus = BuildRoute, focusContent
@@ -464,7 +501,7 @@ func (model dashboardModel) startBuild() (tea.Model, tea.Cmd) {
 }
 
 func (model dashboardModel) selectedTarget() (string, bool) {
-	names := sortedTargetNames(model.config.Targets)
+	names := sortedTargetNames(model.scopedConfig().Targets)
 	if model.cursor < 0 || model.cursor >= len(names) {
 		return "", false
 	}
@@ -585,6 +622,10 @@ func splitList(value string) []string {
 }
 
 func (model dashboardModel) startSelectedTargetBuild() (tea.Model, tea.Cmd) {
+	if model.isWorkspace() && model.member == "" {
+		// The workspace Build screen aggregates members, so Enter builds them all.
+		return model.startBuild()
+	}
 	name, ok := model.selectedTarget()
 	if !ok {
 		model.setMessage("No target is selected", true)
@@ -594,6 +635,13 @@ func (model dashboardModel) startSelectedTargetBuild() (tea.Model, tea.Cmd) {
 }
 
 func (model dashboardModel) startForcedTargetBuild(name string) (tea.Model, tea.Cmd) {
+	if model.isWorkspace() && model.services.BuildWorkspace != nil {
+		model.route, model.focus = BuildRoute, focusContent
+		member := model.member
+		return model.startWorkflow("Force build "+name, func(ctx context.Context, progress func(string)) error {
+			return model.services.BuildWorkspace(ctx, WorkspaceBuildRequest{Member: member, Targets: []string{name}, Force: true}, progress)
+		})
+	}
 	if model.services.BuildTargetsForce == nil {
 		model.setMessage("Force-build service is unavailable", true)
 		return model, nil
@@ -605,6 +653,13 @@ func (model dashboardModel) startForcedTargetBuild(name string) (tea.Model, tea.
 }
 
 func (model dashboardModel) startTargetBuild(targets []string, all bool, label string) (tea.Model, tea.Cmd) {
+	if model.isWorkspace() && model.services.BuildWorkspace != nil {
+		model.route, model.focus = BuildRoute, focusContent
+		member := model.member
+		return model.startWorkflow(label, func(ctx context.Context, progress func(string)) error {
+			return model.services.BuildWorkspace(ctx, WorkspaceBuildRequest{Member: member, Targets: targets, All: all}, progress)
+		})
+	}
 	if model.services.BuildTargets == nil {
 		model.setMessage("Target build service is unavailable", true)
 		return model, nil
@@ -773,6 +828,12 @@ func (model dashboardModel) startProjectImport() (tea.Model, tea.Cmd) {
 }
 
 func (model dashboardModel) startTests(selection TestSelection, label string) (tea.Model, tea.Cmd) {
+	if model.isWorkspace() && model.services.TestWorkspace != nil {
+		member := model.member
+		return model.startWorkflow(label, func(ctx context.Context, progress func(string)) error {
+			return model.services.TestWorkspace(ctx, member, selection, progress)
+		})
+	}
 	if model.services.RunTests == nil {
 		model.setMessage("Test suite service is unavailable", true)
 		return model, nil
@@ -890,7 +951,7 @@ type testFileRow struct {
 
 func (model dashboardModel) testFiles() []testFileRow {
 	var rows []testFileRow
-	for _, job := range model.probe.Tests {
+	for _, job := range model.scopedTestJobs() {
 		for _, file := range job.Files {
 			rows = append(rows, testFileRow{file: file, job: job})
 		}
@@ -907,8 +968,8 @@ func (model dashboardModel) selectedTestJob() (testJob, bool) {
 		}
 		return testJob{}, false
 	}
-	if model.cursor >= 0 && model.cursor < len(model.probe.Tests) {
-		return model.probe.Tests[model.cursor], true
+	if model.cursor >= 0 && model.cursor < len(model.scopedTestJobs()) {
+		return model.scopedTestJobs()[model.cursor], true
 	}
 	return testJob{}, false
 }
@@ -944,6 +1005,18 @@ func (model *dashboardModel) selectRoute(index int) {
 
 func (model *dashboardModel) move(delta int) {
 	if model.focus == focusNavigation {
+		if model.isWorkspace() {
+			items := model.workspaceNavItems()
+			if len(items) == 0 {
+				return
+			}
+			index := (model.workspaceNavIndex() + delta) % len(items)
+			if index < 0 {
+				index += len(items)
+			}
+			*model = model.activateWorkspaceNav(index)
+			return
+		}
 		index := routeIndex(model.route) + delta
 		for index < 0 {
 			index += len(routes)
@@ -995,14 +1068,14 @@ func (model *dashboardModel) keepCursorVisible() {
 // itemCounters maps each screen to the function that counts its selectable
 // rows, so itemCount stays a single lookup.
 var itemCounters = map[Route]func(dashboardModel) int{
-	TargetsRoute:      func(model dashboardModel) int { return len(model.config.Targets) },
+	TargetsRoute:      func(model dashboardModel) int { return len(model.scopedConfig().Targets) },
 	TasksRoute:        func(model dashboardModel) int { return len(model.config.Tasks) },
 	DependenciesRoute: dashboardModel.dependencyCount,
 	ToolchainsRoute:   func(model dashboardModel) int { return len(model.probe.Components) },
 	PresetsRoute:      func(model dashboardModel) int { return len(model.config.CompilerPresets) },
 	PackagesRoute:     dashboardModel.packageItemCount,
 	TestsRoute:        dashboardModel.testItemCount,
-	BuildRoute:        func(model dashboardModel) int { return len(model.config.Targets) },
+	BuildRoute:        func(model dashboardModel) int { return len(model.scopedConfig().Targets) },
 	ReleaseRoute:      func(model dashboardModel) int { return len(model.optimizationNames()) },
 	SettingsRoute:     dashboardModel.settingsItemCount,
 }
@@ -1017,7 +1090,7 @@ func (model dashboardModel) itemCount() int {
 // dependencyCount totals the dependency edges declared by every target.
 func (model dashboardModel) dependencyCount() int {
 	count := 0
-	for _, target := range model.config.Targets {
+	for _, target := range model.scopedConfig().Targets {
 		count += len(target.Dependencies)
 	}
 	return count
@@ -1031,7 +1104,7 @@ func (model dashboardModel) packageItemCount() int {
 	if model.packageLevel == packageCandidatesLevel {
 		return model.packageRows()
 	}
-	return len(model.config.Packages) + model.packageRows()
+	return len(model.scopedConfig().Packages) + model.packageRows()
 }
 
 // testItemCount counts the rows the tests screen shows: files in file view,
@@ -1040,7 +1113,7 @@ func (model dashboardModel) testItemCount() int {
 	if model.testFileMode {
 		return len(model.testFiles())
 	}
-	return len(model.probe.Tests)
+	return len(model.scopedTestJobs())
 }
 
 // settingsItemCount counts the rows the settings screen shows: the group menu,
@@ -1142,13 +1215,35 @@ func (model dashboardModel) View() tea.View {
 	return view
 }
 
+// workspaceMembers returns the declared member names, nil for a standalone
+// project.
+func (model dashboardModel) workspaceMembers() []string {
+	if model.config.Workspace == nil {
+		return nil
+	}
+	return model.config.Workspace.Members
+}
+
+// isWorkspace reports whether the opened project is a workspace root.
+func (model dashboardModel) isWorkspace() bool {
+	return len(model.workspaceMembers()) > 0
+}
+
 func (model dashboardModel) header(p palette, width int) string {
 	project := model.probe.ProjectName
 	if project == "" {
 		project = "Loading project…"
 	}
-	left := p.brand.Render(" TRESTLE ") + " " + p.title.Render(project)
-	right := model.pill(p, fallback(model.config.Build.Profile, "auto"), "accent") + " " + model.pill(p, model.activityLabel(), model.activityTone())
+	title := project
+	if model.isWorkspace() {
+		title = "ws: " + project
+	}
+	left := p.brand.Render(" TRESTLE ") + " " + p.title.Render(title)
+	right := ""
+	if model.isWorkspace() {
+		right = model.pill(p, "pkg: "+fallback(model.member, "all"), "accent") + " "
+	}
+	right += model.pill(p, fallback(model.config.Build.Profile, "auto"), "accent") + " " + model.pill(p, model.activityLabel(), model.activityTone())
 	space := max(1, width-lipgloss.Width(left)-lipgloss.Width(right))
 	first := left + strings.Repeat(" ", space) + right
 	return ansi.Truncate(first, width, "") + "\n" + ansi.Truncate(p.faint.Render(" Unified workspace / build / dependency console"), width, "")
@@ -1199,6 +1294,11 @@ func (model dashboardModel) activityTone() string {
 }
 
 func (model dashboardModel) sidebar(p palette, width, height int) string {
+	if model.isWorkspace() {
+		lines := append([]string{p.faint.Render(" WORKSPACE"), ""}, model.workspaceNavLines(p, width)...)
+		lines = append(lines, "", p.faint.Render(" tab  switch focus"), p.faint.Render(" ↑↓   navigate"), p.faint.Render(" w    switch member"))
+		return lipgloss.NewStyle().Border(p.border).BorderForeground(lipgloss.Color(p.borderMuted)).Width(width - 2).Height(max(1, height-2)).Render(strings.Join(lines, "\n"))
+	}
 	lines := []string{p.faint.Render(" WORKSPACE"), ""}
 	for index, route := range routes {
 		label := fmt.Sprintf(" %s  %s  %s", navigationKey(index), routeGlyph[route], navigationLabel(route))
@@ -1351,13 +1451,14 @@ func statusRow(p palette, ok bool, success, failure string) string {
 }
 
 func (model dashboardModel) targetLines(p palette, width int) []string {
-	names := sortedTargetNames(model.config.Targets)
+	cfg := model.scopedConfig()
+	names := sortedTargetNames(cfg.Targets)
 	if len(names) == 0 {
 		return emptyState(p, "No targets configured", "Add a [targets.<name>] section to trestle.toml.")
 	}
 	var lines []string
 	for index, name := range names {
-		target := model.config.Targets[name]
+		target := cfg.Targets[name]
 		row := fmt.Sprintf("%s %s %-18s  %-12s  %3d sources", model.targetAvailability(name), model.defaultTargetMark(name), name, target.Type, len(target.Sources))
 		lines = append(lines, model.selectableRow(p, index, ansi.Truncate(row, width-3, "…")))
 		if index == model.cursor && model.focus == focusContent {
@@ -1378,7 +1479,7 @@ func (model dashboardModel) targetAvailability(name string) string {
 
 // defaultTargetMark stars a target when it is one of the default build targets.
 func (model dashboardModel) defaultTargetMark(name string) string {
-	for _, item := range model.config.Build.DefaultTargets {
+	for _, item := range model.scopedConfig().Build.DefaultTargets {
 		if item == name {
 			return "★"
 		}
@@ -1588,7 +1689,7 @@ func (model dashboardModel) importLines(p palette, width int) []string {
 }
 
 func (model dashboardModel) testLines(p palette, width int) []string {
-	if len(model.probe.Tests) == 0 {
+	if len(model.scopedTestJobs()) == 0 {
 		return emptyState(p, "No test jobs configured", "Add a target with type = \"test\", or import test executables and mark them as tests.")
 	}
 	mode := "JOB VIEW"
@@ -1618,7 +1719,7 @@ func (model dashboardModel) testFileLines(p palette, width int) []string {
 // testJobLines renders one row per test job in job view.
 func (model dashboardModel) testJobLines(p palette, width int) []string {
 	var lines []string
-	for index, job := range model.probe.Tests {
+	for index, job := range model.scopedTestJobs() {
 		text := fmt.Sprintf("%-24s  group %-16s  %d files", job.Name, job.Group, len(job.Files))
 		lines = append(lines, model.selectableRow(p, index, ansi.Truncate(text, width-3, "…")))
 		if index == model.cursor && model.focus == focusContent && len(job.Files) > 0 {
@@ -1633,7 +1734,7 @@ func (model dashboardModel) packageLines(p palette, width int) []string {
 		lines := model.packageCandidateLines(p, width)
 		return append(lines, "", p.faint.Render(model.packageHint()))
 	}
-	names := sortedPackageNames(model.config.Packages)
+	names := sortedPackageNames(model.scopedConfig().Packages)
 	lines := model.packageSearchHeader(p)
 	if len(names) == 0 {
 		lines = append(lines, p.muted.Render("No packages configured."))
@@ -1663,9 +1764,10 @@ func (model dashboardModel) packageSearchHeader(p palette) []string {
 
 // configuredPackageLines renders the rows for the packages pinned in the config.
 func (model dashboardModel) configuredPackageLines(p palette, width int, names []string) []string {
+	cfg := model.scopedConfig()
 	var lines []string
 	for index, name := range names {
-		pkg := model.config.Packages[name]
+		pkg := cfg.Packages[name]
 		version := pkg.Version
 		if version == "" {
 			version = "latest compatible"
@@ -1676,7 +1778,7 @@ func (model dashboardModel) configuredPackageLines(p palette, width int, names [
 		}
 		detail := pkg.Triplet
 		if detail == "" {
-			detail = fallback(providerOf(model.config.Packages, name), "vcpkg")
+			detail = fallback(providerOf(cfg.Packages, name), "vcpkg")
 		}
 		lines = append(lines, model.selectableRow(p, index, ansi.Truncate(fmt.Sprintf("%-22s %-18s %s", name+featureText, version, detail), width-3, "…")))
 	}
@@ -1689,7 +1791,7 @@ func (model dashboardModel) searchedPackageLines(p palette, width, offset int) [
 	var lines []string
 	for index, pkg := range model.packagePackages {
 		marker := "○"
-		_, configured := model.config.Packages[pkg.Name]
+		_, configured := model.scopedConfig().Packages[pkg.Name]
 		if pkg.Installed || configured {
 			marker = "✓"
 		}
@@ -1742,6 +1844,9 @@ func plural(count int) string {
 }
 
 func (model dashboardModel) buildLines(p palette, width int) []string {
+	if model.isWorkspace() && model.member == "" {
+		return model.workspaceBuildLines(p, width)
+	}
 	lines := []string{"", "  " + model.buildStateLabel(p), "", p.faint.Render(" ACTIVE PROFILE"), keyValue(p, "Profile", fallback(model.config.Build.Profile, "debug")), keyValue(p, "Default targets", fallback(strings.Join(model.config.Build.DefaultTargets, ", "), "automatic")), keyValue(p, "Build directory", fallback(model.config.Build.BuildDir, "build/{profile}")), keyValue(p, "C++ standard", fallback(model.config.Build.CXXStandard, "compiler default")), keyValue(p, "Compiler", fallback(model.config.Toolchain.CXX, "auto-detect")), "", p.faint.Render(" TARGETS · ENTER BUILDS SELECTED")}
 	lines = append(lines, model.buildTargetLines(p, width)...)
 	lines = append(lines, "", p.faint.Render(" LAST RUN"), p.text.Render(model.lastRun))
@@ -1764,8 +1869,9 @@ func (model dashboardModel) buildStateLabel(p palette) string {
 // selected one.
 func (model dashboardModel) buildTargetLines(p palette, width int) []string {
 	var lines []string
-	for index, name := range sortedTargetNames(model.config.Targets) {
-		lines = append(lines, model.selectableRow(p, index, ansi.Truncate(model.targetAvailability(name)+" "+name+"  "+model.config.Targets[name].Type, width-3, "…")))
+	cfg := model.scopedConfig()
+	for index, name := range sortedTargetNames(cfg.Targets) {
+		lines = append(lines, model.selectableRow(p, index, ansi.Truncate(model.targetAvailability(name)+" "+name+"  "+cfg.Targets[name].Type, width-3, "…")))
 		if index == model.cursor && model.focus == focusContent {
 			for _, reason := range model.probe.Statuses[name].Reasons {
 				lines = appendWrappedLog(lines, p.warning, "! "+reason, width)
@@ -1810,7 +1916,7 @@ func (model dashboardModel) doctorLines(p palette) []string {
 	if model.probe.Rules.ToolchainError != "" {
 		lines = append(lines, p.warning.Render(model.probe.Rules.ToolchainError))
 	}
-	for _, name := range sortedTargetNames(model.config.Targets) {
+	for _, name := range sortedTargetNames(model.scopedConfig().Targets) {
 		if readiness, ok := model.probe.Statuses[name]; ok {
 			lines = append(lines, statusRow(p, readiness.Ready, name+": ready", name+": "+strings.Join(readiness.Reasons, "; ")))
 		}
@@ -1907,6 +2013,17 @@ func emptyState(p palette, title, detail string) []string {
 func keyValue(p palette, key, value string) string {
 	return fmt.Sprintf("  %-18s %s", p.muted.Render(key), p.text.Render(value))
 }
+
+// containsString reports whether values contains want.
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}
+
 func fallback(value, replacement string) string {
 	if strings.TrimSpace(value) == "" {
 		return replacement
@@ -1971,6 +2088,7 @@ var inputLabels = map[string]string{
 	"cuda":            "CUDA root",
 	"cuda-wsl":        "WSL CUDA root",
 	"test-group":      "Test group",
+	"switch-member":   "Switch member",
 }
 
 func (model dashboardModel) inputLabel() string {

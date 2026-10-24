@@ -1,0 +1,18 @@
+schema_version = 7
+
+[project]
+name = "hello-cli"
+
+[build]
+default_targets = ["hello"]
+
+[targets.hello]
+type = "executable"
+sources = ["src/main.cpp"]
+output_name = "hello-workspace"
+
+# Cross-member dependency: "member:target". The greeter's public include
+# directory and link artifact are folded into this target automatically.
+dependencies = [
+  { target = "core:greeter", scope = "public" },
+]

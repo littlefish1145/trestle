@@ -48,7 +48,7 @@ func checkToolchain(project model.ResolvedProject, options Options) error {
 // example ggml -> ggml-base), so computing outputs lazily would silently omit
 // those link inputs.
 func newBuildState(cfg config.Config, project model.ResolvedProject, options Options) (*buildState, error) {
-	buildDir := filepath.Join(options.BuildDir, cfg.Build.Profile)
+	buildDir := options.BuildDirFor(cfg)
 	state := &buildState{
 		cfg:      cfg,
 		project:  project,
@@ -341,6 +341,14 @@ func (s *buildState) linkOrArchive(target model.ResolvedTarget, linkInputs []str
 		for _, item := range target.LinkSelf.Items {
 			if item.Path != "" {
 				linkInputs = append(linkInputs, relative(s.options.Root, s.buildDir, item.Path))
+			} else if item.Kind == "workspace" {
+				// A cross-member dependency: prefer the artifact path computed
+				// during generation, falling back to name-based linking.
+				if output, ok := s.options.WorkspaceOutputs[item.Name]; ok {
+					linkInputs = append(linkInputs, relative(s.options.Root, s.buildDir, output))
+				} else {
+					libraries = append(libraries, item.Name)
+				}
 			} else {
 				libraries = append(libraries, item.Name)
 			}

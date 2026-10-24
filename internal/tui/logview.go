@@ -254,7 +254,7 @@ func (model dashboardModel) overlayContent(p palette, width int) (string, []stri
 	switch {
 	case model.help:
 		title := "Keyboard reference · ? / Esc close"
-		return title, wrapText("Tab / Shift+Tab: navigation, page, output\nF2: full output\nF3: complete error / item details\nF4: operation history\nF5: collapse or expand output\n↑↓ / j k: navigate focused panel\nPgUp/PgDn: page\nHome/End: first/last output (End resumes follow)\n/ in output: search · n next match\nb: build · r: refresh · p: profile\nEnter: selected action · 1…9 / 0: page\nEsc / Ctrl+C: cancel active operation\nq: stop operation and quit\nInputs: Enter save · Esc cancel · Ctrl+U clear\nTasks: Enter preview · y confirm · n cancel\nPackages: / search · Enter install · f features\nTargets: Enter build · f force · d default\nToolchains: Enter connect · c CUDA · v Vulkan\nTests: Enter selected · g group · a all\nSettings: Enter category / edit · / search all · Esc back · v rules", max(1, width-2))
+		return title, wrapText("Tab / Shift+Tab: navigation, page, output\nF2: full output\nF3: complete error / item details\nF4: operation history\nF5: collapse or expand output\n↑↓ / j k: navigate focused panel\nPgUp/PgDn: page\nHome/End: first/last output (End resumes follow)\n/ in output: search · n next match\nb: build · r: refresh · p: profile · w workspace member · workspaces: ↑↓ selects, digits jump\nEnter: selected action · 1…9 / 0: page\nEsc / Ctrl+C: cancel active operation\nq: stop operation and quit\nInputs: Enter save · Esc cancel · Ctrl+U clear\nTasks: Enter preview · y confirm · n cancel\nPackages: / search · Enter install · f features\nTargets: Enter build · f force · d default\nToolchains: Enter connect · c CUDA · v Vulkan\nTests: Enter selected · g group · a all\nSettings: Enter category / edit · / search all · Esc back · v rules", max(1, width-2))
 	case model.details:
 		return "Complete details · F3 / Esc close", wrapText(model.detailText, max(1, width-2))
 	case model.history:
@@ -286,6 +286,9 @@ func (model dashboardModel) workspaceMain(p palette, width, height, mainHeight i
 		nav = model.navigationPanel(p, navWidth, mainHeight)
 	}
 	title, subtitle := model.routeHeading()
+	if model.isWorkspace() && model.member != "" {
+		subtitle = "member " + model.member + " · " + subtitle
+	}
 	pageHeight := mainHeight
 	showLog := true
 	if showLog && height >= 20 {
@@ -320,6 +323,12 @@ func (model dashboardModel) navigationStrip(p palette, width int) string {
 }
 
 func (model dashboardModel) navigationPanel(p palette, width, height int) string {
+	if model.isWorkspace() {
+		lines := model.workspaceNavLines(p, width-2)
+		visible := max(1, height-3)
+		start := max(0, model.workspaceNavIndex()-visible+1)
+		return fittedPanel(p, "Workspace", sliceViewport(lines, start, visible), width, height, model.focus == focusNavigation)
+	}
 	var lines []string
 	for index, route := range routes {
 		line := navigationKey(index) + " " + navigationLabel(route)

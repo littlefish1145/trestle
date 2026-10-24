@@ -1,6 +1,8 @@
 package toolchain
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -47,6 +49,33 @@ func TestMSVCCompilerDriverLinkUsesFe(t *testing.T) {
 	}
 	if !strings.Contains(text, "/link /IMPLIB:bin/app.lib /LIBPATH:lib /DEBUG") {
 		t.Fatalf("linker-only flags must follow /link: %s", text)
+	}
+}
+
+func TestMSVCDriverLinkPrefersSiblingLinkExe(t *testing.T) {
+	dir := t.TempDir()
+	driver := filepath.Join(dir, "cl.exe")
+	if err := os.WriteFile(driver, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "link.exe"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	executable, args, err := (Toolchain{Kind: MSVC, CXX: driver, Linker: driver}).Link(LinkSpec{
+		Inputs: []string{"main.obj"}, Output: "bin/app.exe", LibraryDirs: []string{"lib"}, Libraries: []string{"user32"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := strings.Join(args, " ")
+	if executable != filepath.Join(dir, "link.exe") {
+		t.Fatalf("linker = %q", executable)
+	}
+	if !strings.Contains(text, "/OUT:bin/app.exe") || strings.Contains(text, "/Fe") || strings.Contains(text, "/link") {
+		t.Fatalf("native linker args = %s", text)
+	}
+	if !strings.Contains(text, "/LIBPATH:lib") || !strings.Contains(text, "user32.lib") {
+		t.Fatalf("native linker lost inputs: %s", text)
 	}
 }
 

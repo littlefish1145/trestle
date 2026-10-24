@@ -26,6 +26,13 @@ func (model dashboardModel) submitInput() (tea.Model, tea.Cmd) {
 		model.findLog(false)
 		return model, nil
 	}
+	if kind == "switch-member" {
+		return model.applyMemberSwitch(text)
+	}
+	if model.memberScopeLocked() && (kind == "install" || kind == "features" || kind == "version" || kind == "package") {
+		model.setMessage(model.memberScopeMessage(), true)
+		return model, nil
+	}
 	if text == "" && kind != "environment" && kind != "setting" {
 		model.setMessage("Nothing changed", false)
 		return model, nil
@@ -46,6 +53,32 @@ func (model dashboardModel) submitInput() (tea.Model, tea.Cmd) {
 	}
 	action, label := model.inputAction(kind, text, packageName)
 	return model.startMutation("Saving changes", label, action)
+}
+
+// applyMemberSwitch selects the workspace member subsequent operations target.
+// An empty value returns to building every member. The selection is session
+// state, so no configuration mutation runs.
+func (model dashboardModel) applyMemberSwitch(text string) (tea.Model, tea.Cmd) {
+	if text != "" {
+		found := false
+		for _, member := range model.workspaceMembers() {
+			if member == text {
+				found = true
+				break
+			}
+		}
+		if !found {
+			model.setMessage("Unknown member "+text+"; members: "+strings.Join(model.workspaceMembers(), ", "), true)
+			return model, nil
+		}
+	}
+	model.member = text
+	if text == "" {
+		model.setMessage("Workspace: operating on all members", false)
+		return model, nil
+	}
+	model.setMessage("Member: "+text, false)
+	return model, nil
 }
 
 // submitPackageSearch launches an asynchronous index search for the entered

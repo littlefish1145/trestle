@@ -1,0 +1,25 @@
+schema_version = 7
+
+[project]
+name = "hello-core"
+
+[build]
+default_targets = ["greeter"]
+
+# [toolchain], [vcpkg], [conan] and compiler presets are inherited from the
+# workspace root, so a member only declares them to override the root.
+
+# A static library other members link against as "core:greeter".
+[targets.greeter]
+type = "static"
+sources = ["src/greeter.cpp"]
+include_dirs = ["include"]
+
+# Tests live with the code they cover. Run them with: trestle test -p core
+[targets.greeter_test]
+type = "test"
+sources = ["tests/greeter_test.cpp"]
+test_group = "unit"
+dependencies = [
+  { target = "greeter", scope = "public" },
+]

@@ -141,6 +141,9 @@ func (model dashboardModel) applyProbe(probe probeMessage) (tea.Model, tea.Cmd) 
 	}
 	model.probe, model.config, model.baseConfig = probe, probe.Config, probe.BaseConfig
 	model.projectFingerprint = probe.Fingerprint
+	if model.member != "" && !containsString(model.workspaceMembers(), model.member) {
+		model.member = ""
+	}
 	if probe.Error != nil {
 		model.lastError = probe.Error
 		model.setMessage(probe.Error.Error(), true)

@@ -21,8 +21,14 @@ func Doctor(path string) error {
 }
 
 // DoctorWithContext runs the project diagnostics, reporting each check through
-// progress and returning the joined failures.
+// progress and returning the joined failures. A workspace root checks every
+// member of the workspace.
 func DoctorWithContext(ctx context.Context, path string, progress func(string)) error {
+	if _, member := ctx.Value(workspaceMemberKey{}).(string); !member {
+		if cfg, err := config.Load(path); err == nil && cfg.Workspace != nil {
+			return DoctorWorkspace(ctx, path, "", progress)
+		}
+	}
 	return runOperation(ctx, path, "doctor", progress, func(ctx context.Context, emit func(string)) error {
 		return doctorChecks(ctx, path, emit)
 	})
@@ -40,7 +46,7 @@ func doctorChecks(ctx context.Context, path string, emit func(string)) error {
 			emit(label + "\n  OK " + success)
 		}
 	}
-	cfg, configErr := config.Load(path)
+	cfg, configErr := operationConfig(ctx, path)
 	check("Configuration", configErr, path)
 	ninja, ninjaErr := exec.LookPath("ninja")
 	if ninjaErr != nil {

@@ -28,6 +28,7 @@ schema_version = 7
 [package]          # 发布归档设置
 [[rules]]          # 条件规则
 [tasks.<名称>]      # 显式任务
+[workspace]        # workspace 成员（可选）
 ```
 
 | 键 | 类型 | 默认 | 说明 |
@@ -160,9 +161,39 @@ schema_version = 7
 
 | 键 | 类型 | 说明 |
 | --- | --- | --- |
-| `target` | 字符串 | 依赖的项目目标。`target` 与 `package` **必须且只能设置一个**。 |
+| `target` | 字符串 | 依赖的项目目标。`target` 与 `package` **必须且只能设置一个**。workspace 中可写 `成员:目标` 表示其他成员的目标。 |
 | `package` | 字符串 | 依赖的已声明包。 |
 | `scope` | 字符串 | `private`（默认）、`public` 或 `interface`。 |
+
+## `[workspace]`
+
+把一个根 `trestle.toml` 变成多个成员项目的统一构建入口。没有该段时项目按单项目处理，行为不变。
+
+| 键 | 类型 | 说明 |
+| --- | --- | --- |
+| `members` | 字符串数组 | **必填且非空**。成员目录，相对 workspace 根；每个目录必须有自己的 `trestle.toml`。绝对路径与 `..` 逃逸会被拒绝。 |
+| `dependencies` | 内联表数组 | 所有成员共享的依赖包声明；每项必须设置 `port`，作为成员内引用名。 |
+
+合并规则：
+
+- `[toolchain]`、`[vcpkg]`、`[conan]` 按成员缺省值从根继承；`[compiler_presets]` 取并集（成员同名优先）。
+- `[build]` 的 profile、语言标准与 flags 以成员为准；`build_dir` 与 `compile_commands` 以根为准，成员产物写入 `build/<profile>/<成员>/`。
+- 根的 `[packages]` 与 `[workspace].dependencies` 对每个成员可见，成员同名优先。
+- 目标名在整个 workspace 内必须唯一；跨成员依赖按依赖顺序构建，根目标最后构建。
+- 根可以只做容器（没有 `[targets]`），也可以声明自己的聚合目标。
+
+```toml
+schema_version = 7
+[project]
+name = "myproj"
+
+[workspace]
+members = ["core", "cli"]
+
+[[workspace.dependencies]]
+provider = "vcpkg"
+port = "fmt"
+```
 
 ## `[packages.<名称>]`
 
@@ -250,6 +281,8 @@ cxx = "clang++"
 | `E_CONFIG_CONFLICT` | 保存前检测到并发编辑。 |
 | `E_CONFIG_BACKUP` | 无法把迁移前的原文件备份到旁边。 |
 | `E_DEP_CYCLE` | 目标依赖存在环。 |
+| `E_WORKSPACE_INVALID` | workspace 成员缺失、路径越界、成员重复或目标名冲突。 |
+| `E_WORKSPACE_CYCLE` | 成员之间的依赖成环。 |
 
 此外，`: unknown configuration fields: ...` 表示存在未识别的键。
 
@@ -257,3 +290,4 @@ cxx = "clang++"
 
 - [命令行参考](cli.zh-CN.md)
 - [从零构建带 fmt 依赖的 C++ 项目](tutorial.zh-CN.md)
+- [Workspace 指南](workspace.zh-CN.md)

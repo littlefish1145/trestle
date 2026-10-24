@@ -102,6 +102,7 @@ func run(command string, args []string) (result error) {
 type runFlags struct {
 	directory          string
 	name               string
+	member             string
 	compiler           string
 	c                  string
 	profile            string
@@ -183,11 +184,15 @@ func registerRunFlags(set *flag.FlagSet, command string, flags *runFlags) {
 		set.BoolVar(&flags.refresh, "refresh", false, "rescan installed toolchains and refresh the cache")
 	case "build":
 		set.BoolVar(&flags.dashboard, "ui", false, "open the project console")
+		set.StringVar(&flags.member, "p", "", "workspace member to build")
+		set.StringVar(&flags.member, "package", "", "workspace member to build")
 		set.StringVar(&flags.buildProfile, "profile", "", "debug or release")
 		set.StringVar(&flags.preset, "preset", "", "apply a compiler preset")
 		set.BoolVar(&flags.testAll, "all", false, "build every target")
 		set.BoolVar(&flags.force, "force", false, "attempt unavailable targets anyway")
 	case "test":
+		set.StringVar(&flags.member, "p", "", "workspace member to test")
+		set.StringVar(&flags.member, "package", "", "workspace member to test")
 		set.StringVar(&flags.testJob, "job", "", "run one test job")
 		set.StringVar(&flags.testGroup, "group", "", "run one test group")
 		set.StringVar(&flags.testFile, "file", "", "run the test job owning a source file")
@@ -210,6 +215,9 @@ func registerRunFlags(set *flag.FlagSet, command string, flags *runFlags) {
 	case "editor-config":
 		set.BoolVar(&flags.force, "force", false, "overwrite an existing .vscode/tasks.json")
 		set.BoolVar(&flags.merge, "merge", false, "update generated tasks in an existing .vscode/tasks.json")
+	case "doctor":
+		set.StringVar(&flags.member, "p", "", "workspace member to check")
+		set.StringVar(&flags.member, "package", "", "workspace member to check")
 	}
 }
 
@@ -230,6 +238,9 @@ func executeCommand(ctx context.Context, command, path string, args []string, fl
 			File:  flags.testFile,
 			All:   flags.testAll || (flags.testJob == "" && flags.testGroup == "" && flags.testFile == ""),
 		}
+		if flags.member != "" {
+			return app.RunWorkspaceTests(ctx, path, flags.member, selection, progressPrinter)
+		}
 		return app.RunTests(ctx, path, selection, progressPrinter)
 	case "import", "import-cmake":
 		return importProject(ctx, command, path)
@@ -247,6 +258,9 @@ func executeCommand(ctx context.Context, command, path string, args []string, fl
 	case "toolchain":
 		return app.Toolchains(ctx, path, flags.toolchainCache, flags.refresh)
 	case "doctor":
+		if flags.member != "" {
+			return app.DoctorWorkspace(ctx, path, flags.member, progressPrinter)
+		}
 		return app.DoctorWithContext(ctx, path, progressPrinter)
 	case "logs":
 		id := ""
@@ -333,7 +347,24 @@ func configureProject(path string, flags *runFlags) error {
 
 // buildProject applies the build subcommand's flags and then builds the selected
 // targets, opening the dashboard first when -ui was requested on a terminal.
+// Workspace roots fan out to their members, narrowed to one member by -p or by
+// "member:target" arguments.
 func buildProject(ctx context.Context, path string, args []string, flags *runFlags) error {
+	if flags.dashboard && term.IsTerminal(int(os.Stdin.Fd())) {
+		return tuimodel.RunDashboard(path, dashboardServices(path))
+	}
+	// Workspace roots fan out to their members, narrowed to one member by -p or
+	// by "member:target" arguments. Presets and profiles apply per member, so
+	// they are passed through instead of rewritten into the root file.
+	if cfg, err := config.Load(path); err == nil && cfg.Workspace != nil {
+		return app.BuildWorkspace(ctx, path, app.WorkspaceBuildOptions{
+			Member:  flags.member,
+			Targets: args,
+			All:     flags.testAll,
+			Force:   flags.force,
+			Profile: flags.buildProfile,
+		}, progressPrinter)
+	}
 	if flags.preset != "" {
 		if err := app.ApplyCompilerPreset(path, flags.preset); err != nil {
 			return err
@@ -343,9 +374,6 @@ func buildProject(ctx context.Context, path string, args []string, flags *runFla
 		if err := app.SetProfile(path, flags.buildProfile); err != nil {
 			return err
 		}
-	}
-	if flags.dashboard && term.IsTerminal(int(os.Stdin.Fd())) {
-		return tuimodel.RunDashboard(path, dashboardServices(path))
 	}
 	return app.BuildTargetsWithOptions(ctx, path, args, flags.testAll, flags.force, progressPrinter)
 }
@@ -398,6 +426,25 @@ func editorConfigProject(path string, flags *runFlags) error {
 
 func dashboardServices(path string) tuimodel.Services {
 	return tuimodel.Services{
+		BuildWorkspace: func(ctx context.Context, request tuimodel.WorkspaceBuildRequest, progress func(string)) error {
+			return app.BuildWorkspace(ctx, path, app.WorkspaceBuildOptions{
+				Member:  request.Member,
+				Targets: request.Targets,
+				All:     request.All,
+				Force:   request.Force,
+			}, progress)
+		},
+		TestWorkspace: func(ctx context.Context, member string, selection tuimodel.TestSelection, progress func(string)) error {
+			return app.RunWorkspaceTests(ctx, path, member, app.TestSelection{
+				Job:   selection.Job,
+				Group: selection.Group,
+				File:  selection.File,
+				All:   selection.All,
+			}, progress)
+		},
+		DoctorWorkspace: func(ctx context.Context, member string, progress func(string)) error {
+			return app.DoctorWorkspace(ctx, path, member, progress)
+		},
 		Doctor: func(ctx context.Context, progress func(string)) error {
 			return app.DoctorWithContext(ctx, path, progress)
 		},
@@ -501,8 +548,8 @@ func usage() {
 	fmt.Println("  trestle init [-C dir] [-name project]")
 	fmt.Println("  trestle configure [-C dir] [-toolchain clang++] [-msvc 14.3~14.5] [-mode native|wsl] [-wsl-distribution Ubuntu] [-cuda 12.0~12.9] [-cuda-execution native|wsl] [-vulkan path] [-vulkan-execution native|wsl]")
 	fmt.Println("  trestle analyze [-C dir]")
-	fmt.Println("  trestle build [-C dir] [--all] [--force] [--preset name] [target ...]")
-	fmt.Println("  trestle test [-C dir] [-job name | -group name | -file source | -all]")
+	fmt.Println("  trestle build [-C dir] [-p member] [--all] [--force] [--preset name] [--profile debug|release] [target ... | member:target ...]")
+	fmt.Println("  trestle test [-C dir] [-p member] [-job name | -group name | -file source | -all]")
 	fmt.Println("  trestle import [-C dir]          import CMake through the File API")
 	fmt.Println("  trestle import-xmake [-C dir]    import Xmake targets (new and legacy Xmake)")
 	fmt.Println("  trestle export-cmake [-C dir] [-output CMakeLists.txt] [-force]")
@@ -511,10 +558,13 @@ func usage() {
 	fmt.Println("  trestle release [-C dir] [-optimization balanced|speed|size|custom:name] [-targets app,tool] [-output dist/app.zip]")
 	fmt.Println("  trestle editor-config [-C dir] [-merge | -force]")
 	fmt.Println("                                 write .vscode/tasks.json (also generated by init)")
-	fmt.Println("  trestle doctor [-C dir]")
+	fmt.Println("  trestle doctor [-C dir] [-p member]")
 	fmt.Println("  trestle logs [-C dir] [operation-id]")
 	fmt.Println("  trestle toolchain [-C dir] [--refresh]")
 	fmt.Println("  trestle vcpkg [-C dir] [-root path] [-search query] | [-install -ports zlib,fmt]")
 	fmt.Println("  package references accept vcpkg ports (zlib) and conan references (fmt/10.2.1@x/stable)")
 	fmt.Println("  trestle version")
+	fmt.Println()
+	fmt.Println("  workspace roots ([workspace] in trestle.toml) build every member in dependency order;")
+	fmt.Println("  -p/--package narrows build, test and doctor to one member, and member:target names one target.")
 }

@@ -37,6 +37,13 @@ func EditorConfig(configPath string, options EditorConfigOptions) (vscode.WriteR
 	}
 	root := cfg.Root()
 	document := vscode.Generate(vscode.FromConfig(root, cfg))
+	if cfg.Workspace != nil {
+		workspace, err := config.ParseWorkspace(configPath)
+		if err != nil {
+			return vscode.WriteResult{}, err
+		}
+		document = vscode.Generate(vscode.FromWorkspace(root, workspace))
+	}
 	result, err := vscode.Write(filepath.Join(root, ".vscode", "tasks.json"), document, mode)
 	if err != nil {
 		if errors.Is(err, vscode.ErrExists) {

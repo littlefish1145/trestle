@@ -76,7 +76,7 @@ go vet ./...
 
 ## Quick start
 
-Start with [the complete C++ + fmt tutorial](docs/tutorial.en.md) for Windows, Linux, macOS and WSL, including logs and recovery. A runnable project is in [examples/hello-fmt](examples/hello-fmt/).
+Start with [the complete C++ + fmt tutorial](docs/tutorial.en.md) for Windows, Linux, macOS and WSL, including logs and recovery. A runnable project is in [examples/hello-fmt](examples/hello-fmt/). For multiple projects, see the runnable [examples/hello-workspace](examples/hello-workspace/) and the [workspace guide](docs/workspace.en.md).
 
 ```powershell
 trestle init -C hello -name hello
@@ -100,10 +100,13 @@ trestle configure               Configure compilers, environments, CUDA, WSL, an
 trestle analyze                 Analyze an existing source tree
 trestle build [target ...]      Build selected targets
 trestle build --all             Build every target
+trestle build -p MEMBER         Build one workspace member
+trestle build MEMBER:TARGET     Build one target of one member
 trestle test --job NAME         Run one test job
 trestle test --group NAME       Run a test group
 trestle test --file FILE        Run the test that owns a source file
 trestle test --all              Run the complete test suite
+trestle test -p MEMBER          Run one workspace member's tests
 trestle import                  Select Xmake or CMake import automatically
 trestle import-xmake            Import an Xmake project
 trestle export-cmake            Reverse-export trestle.toml to CMakeLists.txt (experimental; -force overwrites)
@@ -152,6 +155,7 @@ trestle build -preset dev app
 - [Command-line reference](docs/cli.en.md): every subcommand and option.
 - [`trestle.toml` reference](docs/configuration.en.md): the complete schema, defaults, condition expressions, and error codes.
 - [Build a C++ project with fmt from scratch](docs/tutorial.en.md): a full walkthrough for Windows, Linux, macOS, and WSL.
+- [Workspace guide](docs/workspace.en.md): one root configuration for several member projects, cross-member dependencies, and build order.
 - [Chinese documentation](README.md).
 
 ## Example `trestle.toml`
@@ -233,6 +237,61 @@ set = { "build.profile" = "release", "toolchain.cxx" = "clang++" }
 ```
 
 Targets can also declare `when`, `requires_tools`, and `requires_wsl`. The Targets and Build views explain unavailable targets. Press `f` to attempt the selected target despite failed checks, or use `trestle build --force`; missing tools or packages may still make the build fail. The TUI Tasks view displays every command and configuration change and requires explicit confirmation. Tasks from unknown projects can harm your device; commands run as argv, without an implicit shell.
+
+## Workspaces
+
+A root `trestle.toml` can reference member projects through `[workspace]`, giving one build and one dependency resolution across them:
+
+```toml
+# trestle.toml (root)
+schema_version = 7
+[project]
+name = "myproj"
+
+[build]
+profile = "debug"
+
+[toolchain]
+cxx = "clang++"
+
+[workspace]
+members = ["core", "cli"]
+```
+
+Every member keeps its own `trestle.toml`:
+
+```toml
+# cli/trestle.toml
+schema_version = 7
+[project]
+name = "cli"
+
+[targets.app]
+type = "executable"
+sources = ["src/main.cpp"]
+dependencies = [{ target = "core:util", scope = "public" }]
+```
+
+Rules:
+
+- `[toolchain]`, `[vcpkg]`, `[conan]`, and `[compiler_presets]` are inherited from the root; member values win. `[build]` profile, standards, and flags stay per member.
+- Root `[packages]` and `[workspace.dependencies]` entries (each must set `port`) are visible to every member; member declarations win on name conflicts.
+- Target names are unique across the workspace; a duplicate fails with `E_WORKSPACE_INVALID`.
+- Cross-member dependencies use `member:target`. Members build in dependency order, with artifacts under `build/<profile>/<member>/`.
+- The root may be a pure container or declare its own aggregate targets; root artifacts live in `build/<profile>/`.
+- `compile_commands.json` aggregates every member's compile commands (written both at the root and under `build/<profile>/`).
+- A standalone project (no `[workspace]` section) behaves exactly as before.
+
+```powershell
+trestle build                 # build every member in dependency order
+trestle build -p core         # build only core
+trestle build cli:app         # build cli's app target
+trestle test -p core --all    # run only core's tests
+trestle doctor                # check each member
+trestle editor-config         # VS Code tasks for member builds and runs
+```
+
+In a workspace the TUI turns the sidebar into a member tree: `Root` holds Overview, Toolchains, and a Build screen scoped to every member; each member lists its own Targets and Packages. Selection matches a standalone project: ↑↓ switches screens immediately (wrapping), digits jump directly, and Enter focuses the content pane; `b` on the Build screen builds every member. `w` quickly switches members (empty means all). Log lines carry a `[member]` prefix and the header shows `ws:` and `pkg:` context.
 
 ## Repository layout
 

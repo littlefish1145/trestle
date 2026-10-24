@@ -190,6 +190,12 @@ func (model dashboardModel) handleActionKeys(key tea.Key) (tea.Model, tea.Cmd, b
 	case "p":
 		updated, cmd := model.profileKey()
 		return updated, cmd, true
+	case "w":
+		if !model.isWorkspace() {
+			return model, nil, false
+		}
+		model.openInput("switch-member", "Switch member (empty = all; members: "+strings.Join(model.workspaceMembers(), ", ")+")")
+		return model, nil, true
 	}
 	return model, nil, false
 }
@@ -275,6 +281,10 @@ func (model dashboardModel) handleEnterKey() (tea.Model, tea.Cmd, bool) {
 // enterPackages handles enter on the packages screen: choosing a candidate
 // version installs it, while on the list level it drills into the versions.
 func (model dashboardModel) enterPackages() (tea.Model, tea.Cmd, bool) {
+	if model.memberScopeLocked() {
+		model.setMessage(model.memberScopeMessage(), true)
+		return model, nil, true
+	}
 	if model.packageLevel == packageCandidatesLevel {
 		pkg, candidate, ok := model.selectedCandidate()
 		if !ok {
@@ -358,6 +368,13 @@ func (model dashboardModel) enterPreset() (tea.Model, tea.Cmd, bool) {
 
 // enterDoctor runs the doctor checks when the host provides the service.
 func (model dashboardModel) enterDoctor() (tea.Model, tea.Cmd, bool) {
+	if model.isWorkspace() && model.services.DoctorWorkspace != nil {
+		member := model.member
+		updated, cmd := model.startWorkflow("Doctor", func(ctx context.Context, progress func(string)) error {
+			return model.services.DoctorWorkspace(ctx, member, progress)
+		})
+		return updated, cmd, true
+	}
 	if model.services.Doctor == nil {
 		return model, nil, true
 	}
@@ -368,6 +385,13 @@ func (model dashboardModel) enterDoctor() (tea.Model, tea.Cmd, bool) {
 // handleListKeys dispatches the per-screen list actions: install or search
 // packages, add or remove dependencies, and save presets.
 func (model dashboardModel) handleListKeys(key tea.Key) (tea.Model, tea.Cmd, bool) {
+	if model.memberScopeLocked() {
+		switch key.String() {
+		case "a", "i", "f", "/", "s", "d":
+			model.setMessage(model.memberScopeMessage(), true)
+			return model, nil, true
+		}
+	}
 	switch key.String() {
 	case "a":
 		return model.addKey()
@@ -676,11 +700,26 @@ func (model dashboardModel) handleSurfaceKeys(key tea.Key) (tea.Model, tea.Cmd, 
 }
 
 // selectRouteByNumber maps a digit key to a screen: 1-9 to the first nine routes
-// and 0 to the tenth. Any other key is ignored.
+// and 0 to the tenth. In a workspace the digits address the tree rows instead.
+// Any other key is ignored.
 func (model *dashboardModel) selectRouteByNumber(key tea.Key) {
+	index := -1
 	if key.String() == "0" {
-		model.selectRoute(9)
+		index = 9
 	} else if len(key.String()) == 1 && key.String()[0] >= '1' && key.String()[0] <= '9' {
-		model.selectRoute(int(key.String()[0] - '1'))
+		index = int(key.String()[0] - '1')
+	}
+	if index < 0 {
+		return
+	}
+	if model.isWorkspace() {
+		if index >= len(model.workspaceNavItems()) {
+			return
+		}
+		*model = model.activateWorkspaceNav(index)
+		return
+	}
+	if index < len(routes) {
+		model.selectRoute(index)
 	}
 }

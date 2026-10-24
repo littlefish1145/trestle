@@ -97,22 +97,26 @@ trestle analyze [-C dir]
 ## `trestle build`
 
 ```text
-trestle build [-C dir] [--all] [--force] [--preset name] [target ...]
+trestle build [-C dir] [-p member] [--all] [--force] [--preset name] [--profile debug|release] [target ... | member:target ...]
 ```
 
 | 选项 | 说明 |
 | --- | --- |
 | `[target ...]` | 要构建的目标；省略时使用 `build.default_targets`。 |
+| `member:target` | 构建指定 workspace 成员的指定目标（例如 `core:util`）。 |
+| `-p`, `--package <成员>` | 只构建该 workspace 成员；省略时按依赖顺序构建全部成员。 |
 | `--all` | 构建全部目标。 |
 | `--force` | 跳过预检，尝试构建不可用的目标（缺失工具或包仍可能失败）。 |
-| `--preset <名称>` | 构建前应用一个编译器预设。 |
-| `--profile <debug\|release>` | 覆盖构建配置。 |
+| `--preset <名称>` | 构建前应用一个编译器预设。workspace 中按成员生效，不写回根配置。 |
+| `--profile <debug\|release>` | 覆盖构建配置。workspace 中作用于本次构建的成员。 |
 | `--ui` | 在终端中先打开 Project Console。 |
+
+`[workspace]` 根还会在构建完成后生成聚合的 `compile_commands.json`。
 
 ## `trestle test`
 
 ```text
-trestle test [-C dir] [-job name | -group name | -file source | -all]
+trestle test [-C dir] [-p member] [-job name | -group name | -file source | -all]
 ```
 
 | 选项 | 说明 |
@@ -121,8 +125,9 @@ trestle test [-C dir] [-job name | -group name | -file source | -all]
 | `-group <名称>` | 运行一个测试组。 |
 | `-file <源文件>` | 运行拥有该源文件的测试。 |
 | `-all` | 运行全部测试。 |
+| `-p`, `--package <成员>` | 只运行该 workspace 成员的测试。 |
 
-不提供任何选择选项时等同于 `-all`。
+不提供任何选择选项时等同于 `-all`。workspace 根按成员依赖顺序逐个运行。
 
 ## `trestle import` 与 `trestle import-cmake`
 
@@ -175,6 +180,8 @@ trestle editor-config [-C dir] [-merge | -force]
 
 已存在的 `.vscode/tasks.json` 绝不会被静默覆盖：不带参数时命令直接报错，`-merge` 只替换 trestle 生成的任务和输入（你自定义的任务、输入及顶层设置都会保留），`-force` 才会整体替换。标签以 `Trestle: ` 开头的任务视为 trestle 生成的任务。`-merge` 要求文件是纯 JSON；含注释的文件会被拒绝，以免丢失内容。`trestle init` 会在文件缺失时自动生成；检测到 `launch.json` 时还会提示设置 `"preLaunchTask": "Trestle: Build"`，以便调试前先构建。
 
+在 workspace 根上运行时，生成的任务会为每个成员添加 `Trestle: Build <成员>` 与 `Trestle: Run <成员>:<目标>`，目标选择器使用 `成员:目标` 形式，运行任务依赖对应成员的构建任务。
+
 ## `trestle vcpkg`
 
 ```text
@@ -200,10 +207,10 @@ trestle toolchain [-C dir] [--cache-dir path] [--refresh]
 ## `trestle doctor`
 
 ```text
-trestle doctor [-C dir]
+trestle doctor [-C dir] [-p member]
 ```
 
-检查项目环境（工具、编译器 ABI、依赖、Vulkan/CUDA、WSL 等）并报告问题。
+检查项目环境（工具、编译器 ABI、依赖、Vulkan/CUDA、WSL 等）并报告问题。workspace 根会按依赖顺序逐个成员检查并汇总失败；`-p` 只检查一个成员。
 
 ## `trestle logs`
 
@@ -226,3 +233,4 @@ trestle --version
 
 - [`trestle.toml` 配置参考](configuration.zh-CN.md)
 - [从零构建带 fmt 依赖的 C++ 项目](tutorial.zh-CN.md)
+- [Workspace 指南](workspace.zh-CN.md)

@@ -76,7 +76,7 @@ go vet ./...
 
 ## 快速开始
 
-首次使用建议阅读 [从零构建带 fmt 依赖的 C++ 项目](docs/tutorial.zh-CN.md)，涵盖 Windows、Linux、macOS、WSL、完整日志及故障恢复；可运行示例见 [examples/hello-fmt](examples/hello-fmt/)。
+首次使用建议阅读 [从零构建带 fmt 依赖的 C++ 项目](docs/tutorial.zh-CN.md)，涵盖 Windows、Linux、macOS、WSL、完整日志及故障恢复；可运行示例见 [examples/hello-fmt](examples/hello-fmt/)。多项目 workspace 的完整示例见 [examples/hello-workspace](examples/hello-workspace/)，指南见 [Workspace 文档](docs/workspace.zh-CN.md)。
 
 ```powershell
 trestle init -C hello -name hello
@@ -100,10 +100,13 @@ trestle configure               配置编译器、环境、CUDA、WSL 和预设
 trestle analyze                 分析现有源码
 trestle build [target ...]      构建指定目标
 trestle build --all             构建全部目标
+trestle build -p MEMBER         只构建 workspace 成员 MEMBER
+trestle build MEMBER:TARGET     构建指定成员的指定目标
 trestle test --job NAME         运行一个测试 job
 trestle test --group NAME       运行一个测试组
 trestle test --file FILE        运行拥有该源文件的测试
 trestle test --all              运行全部测试
+trestle test -p MEMBER          只运行 workspace 成员 MEMBER 的测试
 trestle import                  自动选择 Xmake 或 CMake 导入
 trestle import-xmake            导入 Xmake
 trestle export-cmake            反向导出 trestle.toml 至 CMakeLists.txt（实验；-force 覆盖已存在文件）
@@ -152,6 +155,7 @@ trestle build -preset dev app
 - [命令行参考](docs/cli.zh-CN.md)：全部子命令与选项。
 - [`trestle.toml` 配置参考](docs/configuration.zh-CN.md)：完整的 schema、默认值、条件表达式与错误代码。
 - [从零构建带 fmt 依赖的 C++ 项目](docs/tutorial.zh-CN.md)：Windows、Linux、macOS 与 WSL 的完整演练。
+- [Workspace 指南](docs/workspace.zh-CN.md)：根配置管理多个成员项目、跨成员依赖与构建顺序。
 - [English documentation](README_EN.md)。
 
 ## `trestle.toml` 示例
@@ -243,6 +247,61 @@ set = { "build.profile" = "release", "toolchain.cxx" = "clang++" }
 `[[rules]]` 可设置 `c`、`cxx`、`mode`、`wsl_distribution`、各类 flags、`targets`（默认目标），以及为 `target` 添加 `packages`（外部包）、`depends_on`（项目目标）依赖。设置 `target` 后，`compile_flags`、`c_flags`、`cxx_flags`、`link_flags` 只影响该目标；不设置 `target` 时，它们影响整个项目。编译器、模式和默认目标仍属于项目级设置。Settings 页面按 `v` 可查看每条规则是否匹配、最终编译器与参数，以及配置相对 TOML 原值的变化。`targets.<name>` 还可设置 `requires_wsl`。Targets / Build 页面会列出不可构建原因；按 `f` 可跳过预检尝试编译，CLI 使用 `trestle build --force`。跳过预检不保证缺失工具或包时能成功。
 
 Tasks 页面按 Enter 预览完整命令、工作目录、超时和配置差异，再按 `y` 执行。`working_dir` 可填项目相对路径或绝对路径，默认项目目录；`timeout` 使用 `30s`、`5m` 等正时长，省略则不限制运行时间。运行中按 Esc 或 Ctrl+C 可取消任务，Trestle 会尝试终止任务进程及其子进程；取消、超时或命令失败时不会保存 `set` 指定的配置。命令自行修改的其他文件无法自动回滚。任务来自不可信项目时可能损害设备；任务命令是参数数组，不会隐式通过 shell 执行。
+
+## Workspace（多项目）
+
+一个根 `trestle.toml` 可以用 `[workspace]` 段引用多个成员项目，实现统一构建与统一依赖解析：
+
+```toml
+# trestle.toml（根）
+schema_version = 7
+[project]
+name = "myproj"
+
+[build]
+profile = "debug"
+
+[toolchain]
+cxx = "clang++"
+
+[workspace]
+members = ["core", "cli"]
+```
+
+每个成员目录有自己的 `trestle.toml`：
+
+```toml
+# cli/trestle.toml
+schema_version = 7
+[project]
+name = "cli"
+
+[targets.app]
+type = "executable"
+sources = ["src/main.cpp"]
+dependencies = [{ target = "core:util", scope = "public" }]
+```
+
+规则：
+
+- `[toolchain]`、`[vcpkg]`、`[conan]`、`[compiler_presets]` 从根继承，成员同名设置优先；`[build]` 的 profile、标准与 flags 按成员各自生效。
+- 根 `[packages]` 与 `[workspace.dependencies]`（每项需写 `port`）对所有成员可见，成员同名声明优先。
+- 目标名在整个 workspace 内唯一，重复会报 `E_WORKSPACE_INVALID`。
+- 跨成员依赖写成 `member:target`；成员按依赖顺序构建，产物位于 `build/<profile>/<member>/`。
+- 根可以只做容器，也可以声明自己的聚合目标；根目标的产物位于 `build/<profile>/`。
+- `compile_commands.json` 聚合所有成员的编译命令（同时写入根目录和 `build/<profile>/`）。
+- 单项目（没有 `[workspace]` 段）的行为与之前完全一致。
+
+```powershell
+trestle build                 # 按依赖顺序构建全部成员
+trestle build -p core         # 只构建 core
+trestle build cli:app         # 只构建 cli 的 app 目标
+trestle test -p core --all    # 只跑 core 的测试
+trestle doctor                # 逐个成员检查环境
+trestle editor-config         # 生成含成员构建/运行任务的 VS Code 配置
+```
+
+TUI 在 workspace 模式下把侧边栏变成成员树：`Root` 下有 Overview / Toolchains / 全员的 Build 页，每个成员下有自己的 Targets 与 Packages。选择手感与单项目一致——↑↓ 立即切换页面（循环）、数字键直接跳转、Enter 进入内容区；在 Build 页按 `b` 即构建全部成员。按 `w` 可快速切换成员（留空=全部）；日志行带 `[member]` 前缀，标题栏显示 `ws:` 与 `pkg:` 上下文。
 
 ## 项目结构
 

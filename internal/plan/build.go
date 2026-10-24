@@ -37,6 +37,22 @@ type Options struct {
 	Modules        map[string]ModuleInfo
 	ModuleBackend  modules.Support
 	ModuleBackends map[string]modules.Support
+	// WorkspaceOutputs maps a workspace target ID to the artifact another
+	// member links against. Entries resolve at generation time, when the
+	// toolchain that decides the artifact extension is known.
+	WorkspaceOutputs map[string]string
+	// ManifestDir overrides the output directory when it is not
+	// BuildDir/<profile>, as with workspace members whose artifacts live in
+	// build/<profile>/<member>.
+	ManifestDir string
+}
+
+// BuildDirFor returns the directory build outputs and object files live in.
+func (o Options) BuildDirFor(cfg config.Config) string {
+	if o.ManifestDir != "" {
+		return o.ManifestDir
+	}
+	return filepath.Join(o.BuildDir, cfg.Build.Profile)
 }
 
 // Build assembles the Ninja action graph for a resolved project: a compile
@@ -62,6 +78,20 @@ func Build(cfg config.Config, project model.ResolvedProject, options Options) (B
 		return BuildPlan{}, fmt.Errorf("E_PLAN_INVALID: %w", err)
 	}
 	return state.result, nil
+}
+
+// WorkspaceOutput returns the path of a workspace member's artifact as a
+// dependent member links it: the full target output including the platform
+// extension, using the MSVC import library for shared members.
+func WorkspaceOutput(target model.ResolvedTarget, buildDir string, tc toolchain.Toolchain) (string, error) {
+	output, err := targetOutput(target, buildDir, tc)
+	if err != nil {
+		return "", err
+	}
+	if target.Type == model.SharedLibrary && tc.Kind == toolchain.MSVC {
+		return strings.TrimSuffix(output, filepath.Ext(output)) + ".lib", nil
+	}
+	return output, nil
 }
 
 func containsPICOption(options []string) bool {

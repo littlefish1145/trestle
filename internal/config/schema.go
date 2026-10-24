@@ -29,6 +29,7 @@ type Config struct {
 	Packages          map[string]Package        `toml:"packages"`
 	Package           PackageOutput             `toml:"package"`
 	Rules             []Rule                    `toml:"rules"`
+	Workspace         *Workspace                `toml:"workspace,omitempty"`
 	Tasks             map[string]Task           `toml:"tasks"`
 }
 
@@ -36,6 +37,18 @@ type Config struct {
 // target when none is configured.
 type Project struct {
 	Name string `toml:"name"`
+}
+
+// Workspace groups member projects under a shared root. Each member is a
+// directory relative to the workspace root and must contain its own
+// trestle.toml. Building the workspace root builds every member (or the
+// members named on the command line).
+type Workspace struct {
+	Members []string `toml:"members"`
+	// Dependencies declares packages shared by every member. Each entry is
+	// named by its port and merged into every member's package set unless the
+	// member declares a package with the same name.
+	Dependencies []Package `toml:"dependencies,omitempty"`
 }
 
 // Build holds settings that apply to every target unless a rule or a target

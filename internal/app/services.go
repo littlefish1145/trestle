@@ -1628,9 +1628,24 @@ func generateWithConfig(ctx context.Context, path string, cfg config.Config) (Bu
 	if err := checkPackagePlatform(cfg); err != nil {
 		return BuildResult{}, err
 	}
-	project, err := graph.ResolveAt(ctx, cfg, filepath.Dir(path))
-	if err != nil {
-		return BuildResult{}, err
+	// A workspace member reuses the workspace-wide resolution so cross-member
+	// dependencies resolve, and keeps its manifest beside the other members'
+	// under build/<profile>/<member>.
+	var project model.ResolvedProject
+	memberBuildDir := ""
+	if workspace, ok := ctx.Value(workspaceProjectKey{}).(model.WorkspaceProject); ok {
+		memberName, _ := ctx.Value(workspaceMemberKey{}).(string)
+		member, found := workspace.Member(memberName)
+		if !found {
+			return BuildResult{}, fmt.Errorf("E_WORKSPACE_INVALID: member %q is not part of the resolved workspace", memberName)
+		}
+		project = member.Project
+		memberBuildDir = member.BuildDir
+	} else {
+		project, err = graph.ResolveAt(ctx, cfg, filepath.Dir(path))
+		if err != nil {
+			return BuildResult{}, err
+		}
 	}
 	hasNonShader := projectHasNonShader(project)
 	root, err := filepath.Abs(filepath.Dir(path))
@@ -1642,6 +1657,15 @@ func generateWithConfig(ctx context.Context, path string, cfg config.Config) (Bu
 		return BuildResult{}, err
 	}
 	manifestDir := filepath.Join(buildRoot, cfg.Build.Profile)
+	if memberBuildDir != "" {
+		// A workspace member keeps its artifacts and manifests under
+		// build/<profile>/<member>, beside the other members. plan.Build appends
+		// the profile itself, so its BuildDir option is the member directory's
+		// parent (build/<profile>), while the manifest lives in the member
+		// directory.
+		buildRoot = filepath.Dir(memberBuildDir)
+		manifestDir = memberBuildDir
+	}
 	if err := os.MkdirAll(manifestDir, 0o755); err != nil {
 		return BuildResult{}, err
 	}
@@ -1680,7 +1704,12 @@ func generateWithConfig(ctx context.Context, path string, cfg config.Config) (Bu
 	if err != nil {
 		return BuildResult{}, err
 	}
-	options := plan.Options{Root: root, BuildDir: buildRoot, Toolchain: tc, CUDA: cudaToolchain, Vulkan: vulkanSDK, Modules: moduleInfos, ModuleBackend: moduleBackend, ModuleBackends: moduleBackends}
+	options := plan.Options{Root: root, BuildDir: buildRoot, ManifestDir: manifestDir, Toolchain: tc, CUDA: cudaToolchain, Vulkan: vulkanSDK, Modules: moduleInfos, ModuleBackend: moduleBackend, ModuleBackends: moduleBackends}
+	if memberBuildDir != "" {
+		// Cross-member link inputs need the provider artifact paths, which the
+		// toolchain above has now pinned down.
+		options.WorkspaceOutputs = workspaceOutputPaths(ctx, tc)
+	}
 	buildPlan, err := plan.Build(cfg, project, options)
 	if err != nil {
 		return BuildResult{}, err

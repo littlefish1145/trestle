@@ -22,12 +22,13 @@ func validateSchemaVersion(cfg Config) error {
 }
 
 // validateProject checks the required project identity and requires at least one
-// target, since a project without a buildable unit is meaningless.
+// target, since a project without a buildable unit is meaningless. A workspace
+// root may be a pure container when its members provide the buildable units.
 func validateProject(cfg Config) error {
 	if strings.TrimSpace(cfg.Project.Name) == "" {
 		return fmt.Errorf("E_CONFIG_MISSING_REQUIRED: project.name is required")
 	}
-	if len(cfg.Targets) == 0 {
+	if len(cfg.Targets) == 0 && (cfg.Workspace == nil || len(cfg.Workspace.Members) == 0) {
 		return fmt.Errorf("E_CONFIG_MISSING_REQUIRED: at least one target is required")
 	}
 	return nil
@@ -111,8 +112,10 @@ func validateTargets(cfg Config) error {
 				return fmt.Errorf("target %q dependency has invalid scope %q", name, dep.Scope)
 			}
 			if dep.Target != "" {
-				if _, ok := cfg.Targets[dep.Target]; !ok {
-					return fmt.Errorf("target %q depends on unknown target %q", name, dep.Target)
+				if !strings.Contains(dep.Target, ":") {
+					if _, ok := cfg.Targets[dep.Target]; !ok {
+						return fmt.Errorf("target %q depends on unknown target %q", name, dep.Target)
+					}
 				}
 			} else if _, ok := cfg.Packages[dep.Package]; !ok {
 				return fmt.Errorf("target %q depends on undeclared package %q", name, dep.Package)

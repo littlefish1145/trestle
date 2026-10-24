@@ -97,22 +97,26 @@ Analyze an existing source tree and print the result to standard output.
 ## `trestle build`
 
 ```text
-trestle build [-C dir] [--all] [--force] [--preset name] [target ...]
+trestle build [-C dir] [-p member] [--all] [--force] [--preset name] [--profile debug|release] [target ... | member:target ...]
 ```
 
 | Option | Description |
 | --- | --- |
 | `[target ...]` | Targets to build; when omitted, `build.default_targets` is used. |
+| `member:target` | Build a target belonging to a specific workspace member, such as `core:util`. |
+| `-p`, `--package <member>` | Build only that workspace member; omitted builds every member in dependency order. |
 | `--all` | Build every target. |
 | `--force` | Skip prechecks and attempt unavailable targets (missing tools or packages may still fail). |
-| `--preset <name>` | Apply a compiler preset before building. |
-| `--profile <debug\|release>` | Override the build profile. |
+| `--preset <name>` | Apply a compiler preset before building. In a workspace the preset applies per member and is not written back to the root. |
+| `--profile <debug\|release>` | Override the build profile. In a workspace it applies to the members built by this invocation. |
 | `--ui` | Open the Project Console first. |
+
+A `[workspace]` root also publishes an aggregated `compile_commands.json` after the build.
 
 ## `trestle test`
 
 ```text
-trestle test [-C dir] [-job name | -group name | -file source | -all]
+trestle test [-C dir] [-p member] [-job name | -group name | -file source | -all]
 ```
 
 | Option | Description |
@@ -121,8 +125,9 @@ trestle test [-C dir] [-job name | -group name | -file source | -all]
 | `-group <name>` | Run one test group. |
 | `-file <source>` | Run the test that owns a source file. |
 | `-all` | Run the complete test suite. |
+| `-p`, `--package <member>` | Run only that workspace member's tests. |
 
-With no selection option, the behavior is the same as `-all`.
+With no selection option, the behavior is the same as `-all`. A workspace root runs members one by one in dependency order.
 
 ## `trestle import` and `trestle import-cmake`
 
@@ -175,6 +180,8 @@ Write `.vscode/tasks.json` with `Trestle: Build`, `Trestle: Build All`, `Trestle
 
 An existing `.vscode/tasks.json` is never overwritten silently. Without flags the command fails, `-merge` replaces only the tasks and inputs trestle generates (your own tasks, inputs, and top-level settings are kept), and `-force` replaces the whole file. Tasks whose label starts with `Trestle: ` count as generated. `-merge` requires plain JSON; files containing comments are rejected so nothing is lost. `trestle init` writes the file automatically when it is missing, and prints a hint when a `launch.json` exists: set `"preLaunchTask": "Trestle: Build"` to build before debugging.
 
+On a workspace root the generated tasks add `Trestle: Build <member>` and `Trestle: Run <member>:<target>` for every member, the target picker uses `member:target` values, and each run task depends on its member's build task.
+
 ## `trestle vcpkg`
 
 ```text
@@ -200,10 +207,10 @@ List detected toolchains. `--refresh` rescans installed toolchains and refreshes
 ## `trestle doctor`
 
 ```text
-trestle doctor [-C dir]
+trestle doctor [-C dir] [-p member]
 ```
 
-Check the project environment (tools, compiler ABI, dependencies, Vulkan/CUDA, WSL, and more) and report problems.
+Check the project environment (tools, compiler ABI, dependencies, Vulkan/CUDA, WSL, and more) and report problems. A workspace root checks each member in dependency order and joins the failures; `-p` checks one member.
 
 ## `trestle logs`
 
@@ -226,3 +233,4 @@ Print `trestle <version> (<commit>, <build date>)`.
 
 - [`trestle.toml` reference](configuration.en.md)
 - [Build a C++ project with fmt from scratch](tutorial.en.md)
+- [Workspace guide](workspace.en.md)

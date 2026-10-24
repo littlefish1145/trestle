@@ -158,15 +158,29 @@ func buildResources(ctx context.Context, cfg config.Config, label string) (conte
 }
 
 // BuildTargetsWithOptions generates and builds the selected targets, optionally
-// building every target and bypassing availability checks.
+// building every target and bypassing availability checks. A workspace root
+// fans out to every member in dependency order.
 func BuildTargetsWithOptions(ctx context.Context, path string, targets []string, all, force bool, progress func(string)) error {
+	if _, member := ctx.Value(workspaceMemberKey{}).(string); !member {
+		if cfg, err := config.Load(path); err == nil && cfg.Workspace != nil {
+			return BuildWorkspace(ctx, path, WorkspaceBuildOptions{Targets: targets, All: all, Force: force}, progress)
+		}
+	}
 	return runOperation(ctx, path, "build", progress, func(ctx context.Context, emit func(string)) error {
 		return buildTargetsWithOptions(ctx, path, targets, all, force, emit)
 	})
 }
 
-// RunTests builds and runs the test jobs matching selection.
+// RunTests builds and runs the test jobs matching selection. A workspace root
+// fans out to each member in dependency order.
 func RunTests(ctx context.Context, path string, selection TestSelection, progress func(string)) error {
+	if cfg, err := config.Load(path); err == nil && cfg.Workspace != nil {
+		if _, member := ctx.Value(workspaceMemberKey{}).(string); member {
+			// Already running inside one member build.
+			return runTests(ctx, path, selection, progress)
+		}
+		return RunWorkspaceTests(ctx, path, "", selection, progress)
+	}
 	return runOperation(ctx, path, "test", progress, func(ctx context.Context, emit func(string)) error { return runTests(ctx, path, selection, emit) })
 }
 

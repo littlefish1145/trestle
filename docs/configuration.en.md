@@ -28,6 +28,7 @@ schema_version = 7
 [package]          # release archive settings
 [[rules]]          # conditional rules
 [tasks.<name>]     # explicit tasks
+[workspace]        # workspace members (optional)
 ```
 
 | Key | Type | Default | Description |
@@ -160,9 +161,39 @@ Used by packages with `provider = "conan"`.
 
 | Key | Type | Description |
 | --- | --- | --- |
-| `target` | string | A project target dependency. Exactly one of `target` and `package` must be set. |
+| `target` | string | A project target dependency. Exactly one of `target` and `package` must be set. In a workspace, `member:target` refers to another member's target. |
 | `package` | string | A declared package dependency. |
 | `scope` | string | `private` (default), `public`, or `interface`. |
+
+## `[workspace]`
+
+Turns a root `trestle.toml` into the single build entry point for several member projects. Without this section the project stays a standalone project with unchanged behavior.
+
+| Key | Type | Description |
+| --- | --- | --- |
+| `members` | string array | **Required, non-empty.** Member directories relative to the workspace root; each must contain its own `trestle.toml`. Absolute paths and `..` escapes are rejected. |
+| `dependencies` | array of inline tables | Dependencies shared by every member. Each entry must set `port`, which becomes the reference name inside members. |
+
+Merge rules:
+
+- `[toolchain]`, `[vcpkg]`, and `[conan]` are inherited from the root field by field; `[compiler_presets]` are unioned with member definitions winning.
+- `[build]` profile, language standards, and flags stay per member; `build_dir` and `compile_commands` come from the root, with member artifacts under `build/<profile>/<member>/`.
+- Root `[packages]` and `[workspace].dependencies` are visible to every member, with member declarations winning on conflicts.
+- Target names must be unique across the workspace. Cross-member dependencies build in dependency order; root targets build last.
+- The root may be a pure container (no `[targets]`) or declare aggregate targets.
+
+```toml
+schema_version = 7
+[project]
+name = "myproj"
+
+[workspace]
+members = ["core", "cli"]
+
+[[workspace.dependencies]]
+provider = "vcpkg"
+port = "fmt"
+```
 
 ## `[packages.<name>]`
 
@@ -250,6 +281,8 @@ cxx = "clang++"
 | `E_CONFIG_CONFLICT` | A concurrent edit was detected before saving. |
 | `E_CONFIG_BACKUP` | The pre-migration original could not be preserved. |
 | `E_DEP_CYCLE` | The target dependency graph has a cycle. |
+| `E_WORKSPACE_INVALID` | A workspace member is missing, escapes the root, is listed twice, or two members share a target name. |
+| `E_WORKSPACE_CYCLE` | Members depend on each other. |
 
 In addition, `: unknown configuration fields: ...` reports an unrecognized key.
 
@@ -257,3 +290,4 @@ In addition, `: unknown configuration fields: ...` reports an unrecognized key.
 
 - [Command-line reference](cli.en.md)
 - [Build a C++ project with fmt from scratch](tutorial.en.md)
+- [Workspace guide](workspace.en.md)

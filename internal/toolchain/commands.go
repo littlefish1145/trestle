@@ -2,6 +2,7 @@ package toolchain
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 )
@@ -75,7 +76,11 @@ func gnuCompileArgs(spec CompileSpec) []string {
 }
 
 // Link builds the argument vector that links the inputs into an executable or a
-// shared library.
+// shared library. For MSVC, a compiler driver such as cl.exe is replaced by the
+// link.exe installed beside it when present: the driver shells out to the
+// linker through a temporary response file, which fails with D8018 on machines
+// where that file cannot be created. Invoking the linker directly avoids the
+// intermediate file and the same objects, libraries and options are used.
 func (t Toolchain) Link(spec LinkSpec) (string, []string, error) {
 	linker := t.Linker
 	if linker == "" {
@@ -84,7 +89,12 @@ func (t Toolchain) Link(spec LinkSpec) (string, []string, error) {
 	var args []string
 	if t.Kind == MSVC {
 		if msvcDriverLinker(linker) {
-			args = msvcDriverLinkArgs(spec)
+			if native := msvcNativeLinker(linker); native != "" {
+				linker = native
+				args = msvcNativeLinkArgs(spec)
+			} else {
+				args = msvcDriverLinkArgs(spec)
+			}
 		} else {
 			args = msvcNativeLinkArgs(spec)
 		}
@@ -93,6 +103,23 @@ func (t Toolchain) Link(spec LinkSpec) (string, []string, error) {
 	}
 	exe, args := t.Wrap(linker, args)
 	return exe, args, nil
+}
+
+// msvcNativeLinker returns link.exe from the compiler driver's own toolset
+// directory. Only an absolute driver path is considered, so a bare "cl" that
+// resolves through PATH is left to the driver form.
+func msvcNativeLinker(driver string) string {
+	if !filepath.IsAbs(driver) {
+		return ""
+	}
+	dir := filepath.Dir(driver)
+	for _, name := range []string{"link.exe", "lld-link.exe"} {
+		candidate := filepath.Join(dir, name)
+		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
+			return candidate
+		}
+	}
+	return ""
 }
 
 // msvcDriverLinker reports whether linker is the MSVC compiler driver (cl or

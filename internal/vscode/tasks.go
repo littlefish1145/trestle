@@ -82,12 +82,16 @@ type Input struct {
 
 // Target is one buildable target reduced to the facts tasks.json needs.
 type Target struct {
-	// Name is the configuration key shown in the target picker.
+	// Name is the configuration key shown in the target picker. Workspace
+	// targets are qualified as "member:target".
 	Name string
 	// OutputName is the artifact name without directory or extension.
 	OutputName string
 	// Executable targets get a run task.
 	Executable bool
+	// BinDir overrides Project.BinDir, so workspace members can run their
+	// artifacts from their own build directory.
+	BinDir string
 }
 
 // Project carries the project facts the generator works from.
@@ -103,6 +107,10 @@ type Project struct {
 	// Native reports whether the toolchain runs natively. WSL builds produce
 	// Linux binaries, so their run tasks get no Windows override.
 	Native bool
+	// Members lists the workspace members in declaration order. Members get
+	// their own build task, and run tasks depend on it. Standalone projects
+	// leave it empty and keep the original task set.
+	Members []string
 }
 
 // FromConfig reduces a loaded configuration to the generator's view of the
@@ -144,6 +152,61 @@ func FromConfig(root string, cfg config.Config) Project {
 	return project
 }
 
+// FromWorkspace reduces a workspace to the generator's view: every member's
+// targets are qualified as "member:target" so the target picker and build
+// arguments address the right member, and each target carries its member's bin
+// directory for run tasks.
+func FromWorkspace(root string, wc *config.WorkspaceContext) Project {
+	project := Project{Native: !strings.EqualFold(wc.RootConfig.Toolchain.Mode, "wsl")}
+	absoluteRoot, rootErr := filepath.Abs(root)
+	for _, name := range wc.MemberOrder {
+		member := wc.Member(name)
+		if member == nil {
+			continue
+		}
+		project.Members = append(project.Members, name)
+		profile := member.Build.Profile
+		if profile == "" {
+			profile = "debug"
+		}
+		buildDir := member.Build.BuildDir
+		if buildDir == "" {
+			buildDir = "build"
+		}
+		memberBin := filepath.Join(buildDir, profile, name, "bin")
+		binDir := ""
+		if rootErr == nil {
+			if relative, err := filepath.Rel(absoluteRoot, memberBin); err == nil {
+				binDir = filepath.ToSlash(relative)
+			}
+		}
+		names := make([]string, 0, len(member.Targets))
+		for targetName := range member.Targets {
+			names = append(names, targetName)
+		}
+		sort.Strings(names)
+		for _, targetName := range names {
+			target := member.Targets[targetName]
+			output := target.OutputName
+			if output == "" {
+				output = targetName
+			}
+			project.Targets = append(project.Targets, Target{
+				Name:       name + ":" + targetName,
+				OutputName: strings.ReplaceAll(output, "\\", "/"),
+				Executable: target.Type == "executable",
+				BinDir:     binDir,
+			})
+		}
+	}
+	sort.Slice(project.Targets, func(i, j int) bool { return project.Targets[i].Name < project.Targets[j].Name })
+	project.DefaultTarget = project.Targets[0].Name
+	if len(project.Targets) == 0 {
+		project.DefaultTarget = ""
+	}
+	return project
+}
+
 // defaultTarget picks the configured default target when it exists, falling
 // back to the first target in sorted order.
 func defaultTarget(configured []string, targets []Target) string {
@@ -171,17 +234,21 @@ func Generate(project Project) Document {
 		shellTask(BuildTaskLabel, []string{"build"}, &Group{Kind: "build", IsDefault: true}),
 		shellTask("Trestle: Build All", []string{"build", "--all"}, nil),
 	}}
+	for _, member := range project.Members {
+		document.Tasks = append(document.Tasks, shellTask("Trestle: Build "+member, []string{"build", "-p", member}, nil))
+	}
 	if len(project.Targets) > 0 {
 		document.Tasks = append(document.Tasks, shellTask("Trestle: Build Current Target", []string{"build", "${input:" + targetInputID + "}"}, nil))
 		document.Inputs = append(document.Inputs, targetInput(project))
 	}
-	if project.BinDir != "" {
-		for _, target := range project.Targets {
-			if !target.Executable {
-				continue
-			}
-			document.Tasks = append(document.Tasks, runTask(project, target))
+	for _, target := range project.Targets {
+		if !target.Executable {
+			continue
 		}
+		if target.BinDir == "" && project.BinDir == "" {
+			continue
+		}
+		document.Tasks = append(document.Tasks, runTask(project, target))
 	}
 	document.Tasks = append(document.Tasks,
 		shellTask("Trestle: Test", []string{"test", "--all"}, &Group{Kind: "test", IsDefault: true}),
@@ -209,12 +276,20 @@ func shellTask(label string, args []string, group *Group) Task {
 // task so a workspace path containing spaces survives without quoting, and the
 // Windows override appends the .exe suffix for native toolchains.
 func runTask(project Project, target Target) Task {
-	binary := "${workspaceFolder}/" + project.BinDir + "/" + target.OutputName
+	binDir := target.BinDir
+	if binDir == "" {
+		binDir = project.BinDir
+	}
+	binary := "${workspaceFolder}/" + binDir + "/" + target.OutputName
+	dependsOn := BuildTaskLabel
+	if member, _, qualified := strings.Cut(target.Name, ":"); qualified && len(project.Members) > 0 {
+		dependsOn = "Trestle: Build " + member
+	}
 	task := Task{
 		Label:          "Trestle: Run " + target.Name,
 		Type:           "process",
 		Command:        binary,
-		DependsOn:      BuildTaskLabel,
+		DependsOn:      dependsOn,
 		ProblemMatcher: []string{},
 		Presentation:   &Presentation{Reveal: "always", Panel: "dedicated", Focus: true},
 		Options:        &TaskOptions{Cwd: "${workspaceFolder}"},
