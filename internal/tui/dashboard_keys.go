@@ -196,6 +196,12 @@ func (model dashboardModel) handleActionKeys(key tea.Key) (tea.Model, tea.Cmd, b
 		}
 		model.openInput("switch-member", "Switch member (empty = all; members: "+strings.Join(model.workspaceMembers(), ", ")+")")
 		return model, nil, true
+	case "z":
+		if !model.isWorkspace() {
+			return model, nil, false
+		}
+		model.toggleWorkspaceCollapse()
+		return model, nil, true
 	}
 	return model, nil, false
 }

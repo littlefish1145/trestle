@@ -139,6 +139,55 @@ func TestWorkspaceBuildBuildsEveryMemberFromRootScope(t *testing.T) {
 	}
 }
 
+func TestWorkspaceTreeCollapsesMemberSections(t *testing.T) {
+	model, _ := workspaceConsole(t)
+	model.member = "core"
+	model.route = TargetsRoute
+	updated, _ := tap(model, "z")
+	model = updated
+	if !model.collapsed["core"] {
+		t.Fatal("z did not collapse the active member section")
+	}
+	if model.workspaceNavIndex() != -1 {
+		t.Fatalf("collapsed row should be hidden, index=%d", model.workspaceNavIndex())
+	}
+	side := ansi.Strip(model.sidebar(newPalette(false), 40, 60))
+	if !strings.Contains(side, "▶ core") {
+		t.Fatalf("collapsed header not rendered:\n%s", side)
+	}
+	if model.member != "core" || model.route != TargetsRoute {
+		t.Fatalf("collapse changed the active scope: member=%q route=%q", model.member, model.route)
+	}
+	updated, _ = tap(model, "z")
+	model = updated
+	if model.collapsed["core"] {
+		t.Fatal("z did not expand the section again")
+	}
+	side = ansi.Strip(model.sidebar(newPalette(false), 40, 60))
+	if !strings.Contains(side, "▼ core") || !strings.Contains(side, "Targets (2)") {
+		t.Fatalf("expanded tree not rendered:\n%s", side)
+	}
+}
+
+func TestWorkspaceTreeCollapsesAllFromRootScope(t *testing.T) {
+	model, _ := workspaceConsole(t)
+	expanded := len(model.workspaceNavItems())
+	updated, _ := tap(model, "z")
+	model = updated
+	if got := len(model.workspaceNavItems()); got != 8 {
+		t.Fatalf("collapsed tree should keep only the 8 root rows, got %d", got)
+	}
+	side := ansi.Strip(model.sidebar(newPalette(false), 40, 60))
+	if !strings.Contains(side, "▶ core") || !strings.Contains(side, "▶ cli") {
+		t.Fatalf("members not collapsed:\n%s", side)
+	}
+	updated, _ = tap(model, "z")
+	model = updated
+	if got := len(model.workspaceNavItems()); got != expanded {
+		t.Fatalf("sections not restored: %d != %d", got, expanded)
+	}
+}
+
 func TestWorkspaceScopeFollowsSelectedMember(t *testing.T) {
 	model, _ := workspaceConsole(t)
 	scopes := []string{}

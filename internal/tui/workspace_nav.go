@@ -18,14 +18,16 @@ type workspaceNavItem struct {
 // workspaceNavSection is one collapsible group in the workspace tree: the root
 // section or one member.
 type workspaceNavSection struct {
-	name  string // "" for the root section
-	items []workspaceNavItem
+	name      string // "" for the root section
+	items     []workspaceNavItem
+	collapsed bool
 }
 
 // workspaceNavSections builds the tree groups. The root group holds the
 // workspace-wide screens (aggregate targets, shared packages, toolchains,
 // presets, tasks, doctor, settings); every member group holds the screens that
-// edit that member's own trestle.toml.
+// edit that member's own trestle.toml. Collapsed member groups are represented
+// by their header only.
 func (model dashboardModel) workspaceNavSections() []workspaceNavSection {
 	if !model.isWorkspace() {
 		return nil
@@ -41,6 +43,11 @@ func (model dashboardModel) workspaceNavSections() []workspaceNavSection {
 		{label: "Settings", route: SettingsRoute},
 	}}}
 	for _, name := range model.workspaceMembers() {
+		section := workspaceNavSection{name: name, collapsed: model.collapsed[name]}
+		if section.collapsed {
+			sections = append(sections, section)
+			continue
+		}
 		member, ok := model.probe.MemberConfigs[name]
 		targets, tests, packages := 0, 0, 0
 		if ok {
@@ -52,7 +59,7 @@ func (model dashboardModel) workspaceNavSections() []workspaceNavSection {
 				}
 			}
 		}
-		sections = append(sections, workspaceNavSection{name: name, items: []workspaceNavItem{
+		section.items = []workspaceNavItem{
 			{label: fmt.Sprintf("Targets (%d)", targets), route: TargetsRoute, member: name},
 			{label: fmt.Sprintf("Packages (%d)", packages), route: PackagesRoute, member: name},
 			{label: fmt.Sprintf("Tests (%d)", tests), route: TestsRoute, member: name},
@@ -61,7 +68,8 @@ func (model dashboardModel) workspaceNavSections() []workspaceNavSection {
 			{label: "Release", route: ReleaseRoute, member: name},
 			{label: "Doctor", route: DoctorRoute, member: name},
 			{label: "Settings", route: SettingsRoute, member: name},
-		}})
+		}
+		sections = append(sections, section)
 	}
 	return sections
 }
@@ -75,8 +83,8 @@ func (model dashboardModel) workspaceNavItems() []workspaceNavItem {
 	return items
 }
 
-// workspaceNavIndex returns the row matching the active screen, defaulting to the
-// first row when the active screen is not part of the tree.
+// workspaceNavIndex returns the leaf row matching the active screen, or -1 when
+// that row is hidden inside a collapsed member section.
 func (model dashboardModel) workspaceNavIndex() int {
 	items := model.workspaceNavItems()
 	for index, item := range items {
@@ -93,10 +101,40 @@ func (model dashboardModel) workspaceNavIndex() int {
 			}
 		}
 	}
+	if model.member != "" && model.collapsed[model.member] {
+		// The active member's rows are folded away; its header carries the
+		// highlight instead.
+		return -1
+	}
 	if len(items) > 0 {
 		return 0
 	}
 	return -1
+}
+
+// toggleWorkspaceCollapse folds the active member section, or every member
+// section when the root scope is active.
+func (model *dashboardModel) toggleWorkspaceCollapse() {
+	if !model.isWorkspace() {
+		return
+	}
+	if model.collapsed == nil {
+		model.collapsed = map[string]bool{}
+	}
+	if model.member != "" {
+		model.collapsed[model.member] = !model.collapsed[model.member]
+		return
+	}
+	anyExpanded := false
+	for _, name := range model.workspaceMembers() {
+		if !model.collapsed[name] {
+			anyExpanded = true
+			break
+		}
+	}
+	for _, name := range model.workspaceMembers() {
+		model.collapsed[name] = anyExpanded
+	}
 }
 
 // activateWorkspaceNav opens the tree row at index, carrying the row's member
@@ -113,7 +151,9 @@ func (model *dashboardModel) activateWorkspaceNav(index int) dashboardModel {
 	return *model
 }
 
-// workspaceNavLines renders the workspace tree section by section.
+// workspaceNavLines renders the workspace tree section by section. A collapsed
+// member keeps its header visible; when that member is the active scope the
+// header carries the selection highlight.
 func (model dashboardModel) workspaceNavLines(p palette, width int) []string {
 	active := model.workspaceNavIndex()
 	var lines []string
@@ -123,7 +163,16 @@ func (model dashboardModel) workspaceNavLines(p palette, width int) []string {
 		if name == "" {
 			name = "Root"
 		}
-		lines = append(lines, p.faint.Render("▼ "+name))
+		glyph := "▼"
+		if section.collapsed {
+			glyph = "▶"
+		}
+		header := glyph + " " + name
+		if section.collapsed && section.name != "" && section.name == model.member {
+			lines = append(lines, p.selected.Copy().Width(max(1, width-4)).Render(" "+header))
+		} else {
+			lines = append(lines, p.faint.Render(header))
+		}
 		for _, item := range section.items {
 			lines = append(lines, model.workspaceNavRow(p, width, index, item, index == active))
 			index++
