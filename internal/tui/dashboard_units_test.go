@@ -117,7 +117,7 @@ func TestStartReleaseAndBuild(t *testing.T) {
 	if refuseCmd != nil || !strings.Contains(refused.(dashboardModel).message, "No target is selected") {
 		t.Fatal("missing target must refuse the build")
 	}
-	forced, forceCmd := build.startForcedTargetBuild("app")
+	forced, forceCmd := build.startForcedTargetBuild(targetRow{name: "app"})
 	if !forced.(dashboardModel).mutating || forceCmd == nil {
 		t.Fatal("force build did not arm")
 	}
@@ -127,7 +127,7 @@ func TestStartReleaseAndBuild(t *testing.T) {
 		t.Fatal("BuildTargetsForce never ran")
 	}
 	quietBuild := quietConsole(build)
-	quietRefused, quietCmd := quietBuild.startForcedTargetBuild("app")
+	quietRefused, quietCmd := quietBuild.startForcedTargetBuild(targetRow{name: "app"})
 	if quietCmd != nil || !strings.Contains(quietRefused.(dashboardModel).message, "Force-build service is unavailable") {
 		t.Fatal("quiet console must refuse force builds")
 	}

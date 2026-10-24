@@ -188,6 +188,87 @@ func TestWorkspaceTreeCollapsesAllFromRootScope(t *testing.T) {
 	}
 }
 
+func TestWorkspaceRootTargetsAggregateAllMembers(t *testing.T) {
+	model, _ := workspaceConsole(t)
+	model.route = TargetsRoute
+	model.member = ""
+	rows := model.targetRows()
+	labels := make([]string, 0, len(rows))
+	for _, row := range rows {
+		labels = append(labels, row.label())
+	}
+	joined := strings.Join(labels, ",")
+	for _, expected := range []string{"core:greeter", "core:greeter_test", "cli:hello"} {
+		if !strings.Contains(joined, expected) {
+			t.Fatalf("aggregate targets missing %q: %s", expected, joined)
+		}
+	}
+	view := ansi.Strip(strings.Join(model.contentLines(newPalette(false), 90), "\n"))
+	for _, expected := range []string{"core:greeter", "cli:hello", "filter: all targets", "/ search"} {
+		if !strings.Contains(view, expected) {
+			t.Fatalf("targets page missing %q:\n%s", expected, view)
+		}
+	}
+}
+
+func TestWorkspaceRootTargetBuildSelectsOwningMember(t *testing.T) {
+	model, _ := workspaceConsole(t)
+	var requested WorkspaceBuildRequest
+	model.services = Services{
+		BuildWorkspace: func(_ context.Context, request WorkspaceBuildRequest, progress func(string)) error {
+			requested = request
+			return nil
+		},
+	}
+	model.route = TargetsRoute
+	model.member = ""
+	model.cursor = 0
+	updated, cmd := model.startSelectedTargetBuild()
+	model = updated.(dashboardModel)
+	if cmd == nil {
+		t.Fatal("build did not start")
+	}
+	model = feed(t, model, cmd, 8)
+	if requested.Member != "core" || len(requested.Targets) != 1 || requested.Targets[0] != "greeter" {
+		t.Fatalf("aggregate build request = %#v", requested)
+	}
+}
+
+func TestWorkspaceRootTargetSearchFiltersMembersAndTargets(t *testing.T) {
+	model, _ := workspaceConsole(t)
+	model.route = TargetsRoute
+	model.member = ""
+	model.targetQuery = "cli"
+	rows := model.targetRows()
+	if len(rows) != 1 || rows[0].label() != "cli:hello" {
+		t.Fatalf("member search rows = %#v", rows)
+	}
+	model.targetQuery = "greeter"
+	if rows := model.targetRows(); len(rows) != 2 {
+		t.Fatalf("target search rows = %#v", rows)
+	}
+}
+
+func TestTargetSearchFiltersStandaloneTargets(t *testing.T) {
+	model, _ := freshConsole(t)
+	model.route = TargetsRoute
+	model.openInput("target-search", "Filter targets")
+	model.inputText = "unit"
+	updated, _ := model.submitInput()
+	model = updated.(dashboardModel)
+	rows := model.targetRows()
+	if len(rows) != 1 || rows[0].name != "unit" {
+		t.Fatalf("filtered standalone targets = %#v", rows)
+	}
+	model.openInput("target-search", "Filter targets")
+	model.inputText = ""
+	updated, _ = model.submitInput()
+	model = updated.(dashboardModel)
+	if len(model.targetRows()) != 2 {
+		t.Fatalf("clearing the filter did not restore every target: %#v", model.targetRows())
+	}
+}
+
 func TestWorkspaceScopeFollowsSelectedMember(t *testing.T) {
 	model, _ := workspaceConsole(t)
 	scopes := []string{}

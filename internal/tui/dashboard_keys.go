@@ -387,6 +387,11 @@ func (model dashboardModel) enterDoctor() (tea.Model, tea.Cmd, bool) {
 // handleListKeys dispatches the per-screen list actions: install or search
 // packages, add or remove dependencies, and save presets.
 func (model dashboardModel) handleListKeys(key tea.Key) (tea.Model, tea.Cmd, bool) {
+	if (model.route == TargetsRoute || model.route == BuildRoute) && key.String() == "/" {
+		model.openInput("target-search", "Filter targets by name (member:target; empty clears)")
+		model.inputText = model.targetQuery
+		return model, nil, true
+	}
 	switch key.String() {
 	case "a":
 		return model.addKey()
@@ -484,8 +489,8 @@ func (model dashboardModel) installKey() (tea.Model, tea.Cmd, bool) {
 // or opens the feature prompt for the selected package.
 func (model dashboardModel) featuresKey() (tea.Model, tea.Cmd, bool) {
 	if model.route == TargetsRoute || model.route == BuildRoute {
-		if name, ok := model.selectedTarget(); ok {
-			updated, cmd := model.startForcedTargetBuild(name)
+		if row, ok := model.selectedTargetRow(); ok {
+			updated, cmd := model.startForcedTargetBuild(row)
 			return updated, cmd, true
 		}
 	} else if model.route == TestsRoute {
@@ -526,12 +531,18 @@ func (model dashboardModel) deleteKey() (tea.Model, tea.Cmd, bool) {
 		}
 		model.openInput("remove", "Remove configured package")
 	case model.route == TargetsRoute:
-		if name, ok := model.selectedTarget(); ok {
-			updated, cmd := model.startMutation("Setting default target", "Default target: "+name, func() error {
+		if row, ok := model.selectedTargetRow(); ok {
+			if row.member != "" && row.member != model.member {
+				// An aggregate row from another member: make that member the
+				// scope so the default target is written to its file.
+				model.member = row.member
+				model.applyScope()
+			}
+			updated, cmd := model.startMutation("Setting default target", "Default target: "+row.name, func() error {
 				if model.services.SetDefaultTargets == nil {
 					return fmt.Errorf("default target service is unavailable")
 				}
-				return model.services.SetDefaultTargets([]string{name})
+				return model.services.SetDefaultTargets([]string{row.name})
 			})
 			return updated, cmd, true
 		}

@@ -266,6 +266,7 @@ type dashboardModel struct {
 	workflowLog        []string
 	workflowErrors     []string
 	member             string
+	targetQuery        string
 	collapsed          map[string]bool
 	testFileMode       bool
 	rulesView          bool
@@ -476,6 +477,10 @@ func (model dashboardModel) handleInput(key tea.Key) (tea.Model, tea.Cmd) {
 		model.settingsCategory = ""
 		model.cursor, model.scroll = 0, 0
 	}
+	if model.inputMode && model.inputKind == "target-search" {
+		model.targetQuery = model.inputText
+		model.cursor, model.scroll = 0, 0
+	}
 	return model, nil
 }
 
@@ -505,11 +510,11 @@ func (model dashboardModel) startBuild() (tea.Model, tea.Cmd) {
 }
 
 func (model dashboardModel) selectedTarget() (string, bool) {
-	names := sortedTargetNames(model.scopedConfig().Targets)
-	if model.cursor < 0 || model.cursor >= len(names) {
+	row, ok := model.selectedTargetRow()
+	if !ok {
 		return "", false
 	}
-	return names[model.cursor], true
+	return row.name, true
 }
 
 func (model dashboardModel) selectedTask() (string, bool) {
@@ -627,33 +632,30 @@ func splitList(value string) []string {
 }
 
 func (model dashboardModel) startSelectedTargetBuild() (tea.Model, tea.Cmd) {
-	if model.isWorkspace() && model.member == "" {
-		// The workspace Build screen aggregates members, so Enter builds them all.
+	if model.isWorkspace() && model.member == "" && model.route == BuildRoute {
+		// The root Build screen aggregates members, so Enter builds them all.
 		return model.startBuild()
 	}
-	name, ok := model.selectedTarget()
+	row, ok := model.selectedTargetRow()
 	if !ok {
 		model.setMessage("No target is selected", true)
 		return model, nil
 	}
-	return model.startTargetBuild([]string{name}, false, "Build "+name)
+	return model.startTargetRowBuild(row, false)
 }
 
-func (model dashboardModel) startForcedTargetBuild(name string) (tea.Model, tea.Cmd) {
+func (model dashboardModel) startForcedTargetBuild(row targetRow) (tea.Model, tea.Cmd) {
 	if model.isWorkspace() && model.services.BuildWorkspace != nil {
 		model.route, model.focus = BuildRoute, focusContent
-		member := model.member
-		return model.startWorkflow("Force build "+name, func(ctx context.Context, progress func(string)) error {
-			return model.services.BuildWorkspace(ctx, WorkspaceBuildRequest{Member: member, Targets: []string{name}, Force: true}, progress)
-		})
+		return model.startTargetRowBuild(row, true)
 	}
 	if model.services.BuildTargetsForce == nil {
 		model.setMessage("Force-build service is unavailable", true)
 		return model, nil
 	}
 	model.route, model.focus = BuildRoute, focusContent
-	return model.startWorkflow("Force build "+name, func(ctx context.Context, progress func(string)) error {
-		return model.services.BuildTargetsForce(ctx, []string{name}, false, progress)
+	return model.startWorkflow("Force build "+row.name, func(ctx context.Context, progress func(string)) error {
+		return model.services.BuildTargetsForce(ctx, []string{row.name}, false, progress)
 	})
 }
 
@@ -1077,14 +1079,14 @@ func (model *dashboardModel) keepCursorVisible() {
 // itemCounters maps each screen to the function that counts its selectable
 // rows, so itemCount stays a single lookup.
 var itemCounters = map[Route]func(dashboardModel) int{
-	TargetsRoute:      func(model dashboardModel) int { return len(model.scopedConfig().Targets) },
+	TargetsRoute:      func(model dashboardModel) int { return len(model.targetRows()) },
 	TasksRoute:        func(model dashboardModel) int { return len(model.scopedTasks()) },
 	DependenciesRoute: dashboardModel.dependencyCount,
 	ToolchainsRoute:   func(model dashboardModel) int { return len(model.probe.Components) },
 	PresetsRoute:      func(model dashboardModel) int { return len(model.scopedPresets()) },
 	PackagesRoute:     dashboardModel.packageItemCount,
 	TestsRoute:        dashboardModel.testItemCount,
-	BuildRoute:        func(model dashboardModel) int { return len(model.scopedConfig().Targets) },
+	BuildRoute:        func(model dashboardModel) int { return len(model.targetRows()) },
 	ReleaseRoute:      func(model dashboardModel) int { return len(model.optimizationNames()) },
 	SettingsRoute:     dashboardModel.settingsItemCount,
 }
@@ -1460,51 +1462,38 @@ func statusRow(p palette, ok bool, success, failure string) string {
 }
 
 func (model dashboardModel) targetLines(p palette, width int) []string {
-	cfg := model.scopedConfig()
-	names := sortedTargetNames(cfg.Targets)
-	if len(names) == 0 {
+	rows := model.targetRows()
+	if len(rows) == 0 {
+		if strings.TrimSpace(model.targetQuery) != "" {
+			return emptyState(p, `No targets match "`+model.targetQuery+`"`, "Press / and clear the filter to see every target.")
+		}
 		return emptyState(p, "No targets configured", "Add a [targets.<name>] section to trestle.toml.")
 	}
 	var lines []string
-	for index, name := range names {
-		target := cfg.Targets[name]
-		row := fmt.Sprintf("%s %s %-18s  %-12s  %3d sources", model.targetAvailability(name), model.defaultTargetMark(name), name, target.Type, len(target.Sources))
-		lines = append(lines, model.selectableRow(p, index, ansi.Truncate(row, width-3, "…")))
+	for index, row := range rows {
+		text := fmt.Sprintf("%s %s %-24s  %-12s  %3d sources", model.targetAvailability(row), model.defaultTargetMark(row), row.label(), row.target.Type, len(row.target.Sources))
+		lines = append(lines, model.selectableRow(p, index, ansi.Truncate(text, width-3, "…")))
 		if index == model.cursor && model.focus == focusContent {
-			lines = append(lines, model.targetDetailLines(p, width, name, target)...)
+			lines = append(lines, model.targetDetailLines(p, width, row)...)
 		}
 	}
-	return append(lines, "", p.faint.Render("enter build selected   f force selected   d make default   a build all"))
-}
-
-// targetAvailability marks a target row with a check, or a warning when the
-// policy probe reported it as not ready.
-func (model dashboardModel) targetAvailability(name string) string {
-	if status, ok := model.probe.Statuses[name]; ok && !status.Ready {
-		return "!"
-	}
-	return "✓"
-}
-
-// defaultTargetMark stars a target when it is one of the default build targets.
-func (model dashboardModel) defaultTargetMark(name string) string {
-	for _, item := range model.scopedConfig().Build.DefaultTargets {
-		if item == name {
-			return "★"
-		}
-	}
-	return " "
+	lines = append(lines, "", p.faint.Render("filter: "+model.targetQueryLabel()+"   / search   enter build selected   f force   d default   a build all"))
+	return lines
 }
 
 // targetDetailLines describes the selected target: its output name, dependency
 // count, and every reason a policy check failed.
-func (model dashboardModel) targetDetailLines(p palette, width int, name string, target config.Target) []string {
-	output := target.OutputName
+func (model dashboardModel) targetDetailLines(p palette, width int, row targetRow) []string {
+	output := row.target.OutputName
 	if output == "" {
-		output = name
+		output = row.name
 	}
-	lines := []string{p.faint.Render("     output " + output + " · " + fmt.Sprint(len(target.Dependencies)) + " dependencies")}
-	for _, reason := range model.probe.Statuses[name].Reasons {
+	origin := ""
+	if row.member != "" {
+		origin = " · member " + row.member
+	}
+	lines := []string{p.faint.Render("     output " + output + " · " + fmt.Sprint(len(row.target.Dependencies)) + " dependencies" + origin)}
+	for _, reason := range model.probe.Statuses[row.name].Reasons {
 		lines = appendWrappedLog(lines, p.warning, "! "+reason, width)
 	}
 	return lines
@@ -1879,11 +1868,11 @@ func (model dashboardModel) buildStateLabel(p palette) string {
 // selected one.
 func (model dashboardModel) buildTargetLines(p palette, width int) []string {
 	var lines []string
-	cfg := model.scopedConfig()
-	for index, name := range sortedTargetNames(cfg.Targets) {
-		lines = append(lines, model.selectableRow(p, index, ansi.Truncate(model.targetAvailability(name)+" "+name+"  "+cfg.Targets[name].Type, width-3, "…")))
+	for index, row := range model.targetRows() {
+		text := model.targetAvailability(row) + " " + row.label() + "  " + row.target.Type
+		lines = append(lines, model.selectableRow(p, index, ansi.Truncate(text, width-3, "…")))
 		if index == model.cursor && model.focus == focusContent {
-			for _, reason := range model.probe.Statuses[name].Reasons {
+			for _, reason := range model.probe.Statuses[row.name].Reasons {
 				lines = appendWrappedLog(lines, p.warning, "! "+reason, width)
 			}
 		}
@@ -2107,6 +2096,7 @@ var inputLabels = map[string]string{
 	"cuda-wsl":        "WSL CUDA root",
 	"test-group":      "Test group",
 	"switch-member":   "Switch member",
+	"target-search":   "Filter targets",
 }
 
 func (model dashboardModel) inputLabel() string {

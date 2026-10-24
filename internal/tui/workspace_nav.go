@@ -1,8 +1,11 @@
 package tui
 
 import (
+	"context"
 	"fmt"
+	"strings"
 
+	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 	"trestle/internal/config"
 )
@@ -286,4 +289,122 @@ func (model dashboardModel) workspaceBuildLines(p palette, width int) []string {
 		lines = append(lines, "", p.faint.Render(" LAST RUN"), p.text.Render(model.lastRun))
 	}
 	return lines
+}
+
+// targetRow is one row of the Targets/Build screens: a target belonging to the
+// active member, or - at the workspace root - a target of any member, addressed
+// as "member:target".
+type targetRow struct {
+	member string // "" for a standalone project or the active member's own scope
+	name   string
+	target config.Target
+}
+
+// label is how the row is shown: qualified with the member at the workspace
+// root, plain inside a member scope.
+func (row targetRow) label() string {
+	if row.member == "" {
+		return row.name
+	}
+	return row.member + ":" + row.name
+}
+
+// targetRows returns the rows the Targets and Build screens show, filtered by
+// the active target search. A workspace root aggregates every member's targets
+// so one screen can search and build the whole workspace.
+func (model dashboardModel) targetRows() []targetRow {
+	query := strings.ToLower(strings.TrimSpace(model.targetQuery))
+	match := func(label string) bool {
+		return query == "" || strings.Contains(strings.ToLower(label), query)
+	}
+	var rows []targetRow
+	if model.isWorkspace() && model.member == "" {
+		for _, memberName := range model.workspaceMembers() {
+			member, ok := model.probe.MemberConfigs[memberName]
+			if !ok {
+				continue
+			}
+			for _, name := range sortedTargetNames(member.Targets) {
+				row := targetRow{member: memberName, name: name, target: member.Targets[name]}
+				if match(row.label()) {
+					rows = append(rows, row)
+				}
+			}
+		}
+		return rows
+	}
+	cfg := model.scopedConfig()
+	for _, name := range sortedTargetNames(cfg.Targets) {
+		row := targetRow{member: model.member, name: name, target: cfg.Targets[name]}
+		if match(row.label()) {
+			rows = append(rows, row)
+		}
+	}
+	return rows
+}
+
+// selectedTargetRow returns the row under the content cursor.
+func (model dashboardModel) selectedTargetRow() (targetRow, bool) {
+	rows := model.targetRows()
+	if model.cursor < 0 || model.cursor >= len(rows) {
+		return targetRow{}, false
+	}
+	return rows[model.cursor], true
+}
+
+// targetQueryLabel names the active filter for the page header hints.
+func (model dashboardModel) targetQueryLabel() string {
+	if strings.TrimSpace(model.targetQuery) == "" {
+		return "all targets"
+	}
+	return "filter: " + model.targetQuery
+}
+
+// defaultTargetMark stars a target when it is one of the scope's default build
+// targets.
+func (model dashboardModel) defaultTargetMark(row targetRow) string {
+	defaults := model.scopedConfig().Build.DefaultTargets
+	if row.member != "" {
+		if member, ok := model.probe.MemberConfigs[row.member]; ok {
+			defaults = member.Build.DefaultTargets
+		}
+	}
+	for _, item := range defaults {
+		if item == row.name {
+			return "★"
+		}
+	}
+	return " "
+}
+
+// targetAvailability marks a target row with a check, or a warning when the
+// policy probe reported it as not ready.
+func (model dashboardModel) targetAvailability(row targetRow) string {
+	if status, ok := model.probe.Statuses[row.name]; ok && !status.Ready {
+		return "!"
+	}
+	return "✓"
+}
+
+// startTargetRowBuild builds one row, carrying its member when the row belongs
+// to another member than the active scope.
+func (model dashboardModel) startTargetRowBuild(row targetRow, force bool) (tea.Model, tea.Cmd) {
+	member := model.member
+	if row.member != "" {
+		member = row.member
+	}
+	if model.isWorkspace() && model.services.BuildWorkspace != nil {
+		model.route, model.focus = BuildRoute, focusContent
+		label := "Build " + row.label()
+		if force {
+			label = "Force build " + row.label()
+		}
+		return model.startWorkflow(label, func(ctx context.Context, progress func(string)) error {
+			return model.services.BuildWorkspace(ctx, WorkspaceBuildRequest{Member: member, Targets: []string{row.name}, Force: force}, progress)
+		})
+	}
+	if force {
+		return model.startForcedTargetBuild(row)
+	}
+	return model.startTargetBuild([]string{row.name}, false, "Build "+row.name)
 }

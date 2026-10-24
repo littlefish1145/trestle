@@ -26,6 +26,16 @@ func (model dashboardModel) submitInput() (tea.Model, tea.Cmd) {
 		model.findLog(false)
 		return model, nil
 	}
+	if kind == "target-search" {
+		model.targetQuery = text
+		model.cursor, model.scroll = 0, 0
+		if text == "" {
+			model.setMessage("Target filter cleared", false)
+		} else {
+			model.setMessage("Filtering targets: "+text, false)
+		}
+		return model, nil
+	}
 	if kind == "switch-member" {
 		return model.applyMemberSwitch(text)
 	}
