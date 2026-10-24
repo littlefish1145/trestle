@@ -25,7 +25,10 @@ func workspaceConsole(t *testing.T) (dashboardModel, *callJournal) {
 				"greeter":      {Type: "static", Sources: []string{"src/greeter.cpp"}},
 				"greeter_test": {Type: "test", Sources: []string{"tests/greeter_test.cpp"}, TestGroup: "unit"},
 			},
-			Packages: map[string]config.Package{"fmt": {Provider: "vcpkg"}},
+			Packages: map[string]config.Package{
+				"fmt":  {Provider: "vcpkg", Version: "11.2.0"},
+				"yaml": {Provider: "vcpkg"},
+			},
 		},
 		"cli": {
 			Project: config.Project{Name: "cli"},
@@ -45,7 +48,7 @@ func TestWorkspaceTreeRendersRootAndMemberScreens(t *testing.T) {
 	side := ansi.Strip(model.sidebar(p, 40, 60))
 	for _, expected := range []string{
 		"▼ Root", "Overview", "Targets (all)", "Packages", "Tasks", "Toolchains", "Presets", "Doctor", "Settings",
-		"▼ core", "Targets (2)", "Packages (1)", "Tests (1)", "Release",
+		"▼ core", "Targets (2)", "Packages (2)", "Tests (1)", "Release",
 		"▼ cli", "Targets (1)",
 	} {
 		if !strings.Contains(side, expected) {
@@ -283,6 +286,19 @@ func TestWorkspaceScopeFollowsSelectedMember(t *testing.T) {
 	}
 	if len(scopes) < 2 || scopes[len(scopes)-2] != "core" || scopes[len(scopes)-1] != "" {
 		t.Fatalf("scope changes = %#v", scopes)
+	}
+}
+
+func TestWorkspaceMemberPackagesShowOrigin(t *testing.T) {
+	model, _ := workspaceConsole(t)
+	model.member = "core"
+	model.route = PackagesRoute
+	view := ansi.Strip(strings.Join(model.contentLines(newPalette(false), 100), "\n"))
+	if !strings.Contains(view, "shared from root") {
+		t.Fatalf("inherited package not marked as shared:\n%s", view)
+	}
+	if !strings.Contains(view, "· member") {
+		t.Fatalf("member-only package not marked:\n%s", view)
 	}
 }
 

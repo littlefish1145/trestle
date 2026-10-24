@@ -153,30 +153,53 @@ trestle editor-config -C examples/hello-workspace
 trestle -C examples/hello-workspace
 ```
 
-workspace 模式下侧边栏是一棵成员树，数字键直接打开对应行：
+workspace 模式下侧边栏是一棵可折叠的成员树：Root 承载 workspace 级页面，每个成员承载自己的页面。
 
 ```text
 ▼ Root
   1 Overview
-  2 Toolchains
-  3 Build All
+  2 Targets (all)
+  3 Packages
+  4 Tasks
+  5 Toolchains
+  6 Presets
+  7 Doctor
+  8 Settings
 ▼ core
-  4 Targets (2)
-  5 Packages
+  9 Targets (2)
+  0 Packages (2)
+  · Tests (1)
+  · Tasks
+  · Presets
+  · Release
+  · Doctor
+  · Settings
 ▼ cli
-  6 Targets (1)
-  7 Packages
+  · Targets (1)
+  ...
 ```
 
-`Build All` 行打开的是面向全部成员的 Build 页面：页面会列出各成员及其目标数，按 `b` 或 Enter（焦点在内容区时）即构建全部成员。
+↑↓ 立即切换页面（循环），数字键直接跳转，Enter 进入内容区，`z` 折叠当前成员分组（在 Root 作用域按 `z` 折叠/展开全部成员），`w` 输入成员名快速切换。超过 9 行后行号为 `·`，用 ↑↓ + Enter。
 
-- `Root` 分组是 workspace 级页面：Overview、Toolchains，以及面向全部成员的 Build 页面。
-- 每个成员分组下只显示该成员的 Targets 与 Packages；Targets 页显示该成员的目标，测试页也只列该成员的测试。
-- 与非 workspace 模式一致：↑↓ 立即切换页面（循环），数字键直接跳转，Enter 把焦点移到内容区；`b` 构建当前选择（Build 页且未选成员时即构建全部成员）。
-- 标题栏显示 `ws: <名称>` 与 `pkg: <成员|all>`。
-- 按 `w` 打开成员输入框可以快速切换（留空=全部成员）；之后 `b` 构建、Tests 页面、Doctor 都作用于所选成员。
-- 成员 Packages 页面为只读：包声明写在该成员自己的 `trestle.toml` 中；清空成员选择后可在 Root 上照常管理共享包。
-- 构建日志以 `[成员]` 为前缀，例如 `[core] Building CXX object ...`。
+Root 与成员的分工：
+
+| 页面 | Root | 成员 |
+| --- | --- | --- |
+| Overview | workspace 概览 | — |
+| Targets | 聚合所有成员的目标（`member:target`），`/` 搜索 | 该成员的目标 |
+| Packages | 共享包，所有成员继承 | 该成员的包（含继承的根包） |
+| Tests | — | 该成员的测试 |
+| Tasks | 根任务 | 成员任务 |
+| Toolchains | 共享工具链 | — |
+| Presets | 共享预设 | 合并后的预设 |
+| Release | — | 该成员打包 |
+| Doctor | 检查全部成员 | 检查该成员 |
+| Settings | 根设置（toolchain / vcpkg / conan / build_dir） | 成员设置（profile、标准、flags 等） |
+
+- Root Targets 聚合视图用 `member:target` 展示，按 `/` 可按成员名或目标名过滤（非 workspace 项目的 Targets 页同样支持 `/` 搜索）。选中后 Enter 只构建该成员的该目标；`b`/`a` 作用于当前作用域。
+- 成员页面中的修改写入该成员自己的 `trestle.toml`；Root 页面的修改写入根配置。
+- Root Packages 的声明自动被所有成员继承（`[workspace.dependencies]` 同理）。成员 Packages 页会把继承的包标为 `shared from root`，成员自己声明或覆盖的标为 `member` / `overrides root`。
+- 标题栏显示 `ws: <名称>` 与 `pkg: <成员|all>`；构建日志以 `[成员]` 为前缀，例如 `[core] Building CXX object ...`。
 
 ## 7. 输出布局与依赖顺序
 

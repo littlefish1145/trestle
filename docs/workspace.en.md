@@ -153,30 +153,53 @@ After a build, all member compile commands are merged into:
 trestle -C examples/hello-workspace
 ```
 
-In a workspace the sidebar is a member tree, and the digits open the matching row:
+In a workspace the sidebar is a collapsible member tree: the Root section holds workspace-wide screens, and each member holds its own.
 
 ```text
 ▼ Root
   1 Overview
-  2 Toolchains
-  3 Build All
+  2 Targets (all)
+  3 Packages
+  4 Tasks
+  5 Toolchains
+  6 Presets
+  7 Doctor
+  8 Settings
 ▼ core
-  4 Targets (2)
-  5 Packages
+  9 Targets (2)
+  0 Packages (2)
+  · Tests (1)
+  · Tasks
+  · Presets
+  · Release
+  · Doctor
+  · Settings
 ▼ cli
-  6 Targets (1)
-  7 Packages
+  · Targets (1)
+  ...
 ```
 
-`Build All` opens the Build screen scoped to every member: it lists each member with its target count, and `b` (or Enter with the content focused) builds them all.
+↑↓ switches screens immediately (wrapping), digits jump directly, Enter focuses the content pane, `z` folds the active member section (from the root scope it folds or unfolds every member), and `w` opens a member prompt. Rows past the tenth use `·` as their marker; use ↑↓ + Enter for those.
 
-- The `Root` group holds workspace-wide screens: Overview, Toolchains, and a Build screen scoped to every member.
-- A member group shows that member's Targets and Packages; the Targets and Tests screens are scoped to the selected member.
-- Selection behaves exactly like a standalone project: ↑↓ switches the screen immediately (wrapping around), digits jump directly, and Enter moves focus into the content pane. `b` builds the current scope, which means every member on the Build screen.
-- The header shows `ws: <name>` and `pkg: <member|all>`.
-- `w` opens a member prompt for quick switching (empty means all members); `b`, the Tests screen, and Doctor then apply to that member.
-- A member's Packages screen is read-only: declare packages in that member's own `trestle.toml`. Clear the member selection to manage shared packages on the Root.
-- Build output is prefixed per member, such as `[core] Building CXX object ...`.
+Root and member responsibilities:
+
+| Screen | Root | Member |
+| --- | --- | --- |
+| Overview | workspace summary | — |
+| Targets | every member's targets as `member:target`, `/` to search | that member's targets |
+| Packages | shared packages, inherited by every member | that member's packages (root inherits included) |
+| Tests | — | that member's tests |
+| Tasks | root tasks | member tasks |
+| Toolchains | shared toolchain | — |
+| Presets | shared presets | merged presets |
+| Release | — | package that member |
+| Doctor | check every member | check that member |
+| Settings | root settings (toolchain / vcpkg / conan / build_dir) | member settings (profile, standards, flags) |
+
+- The root Targets view shows `member:target` rows; `/` filters by member or target name (the Targets screen of a standalone project supports the same search). Enter builds just that member's target; `b`/`a` act on the current scope.
+- Edits made from a member screen are written to that member's `trestle.toml`; edits from a root screen change the root configuration.
+- Root Packages are declared once and inherited by every member (so is `[workspace.dependencies]`). A member's Packages screen marks inherited rows `shared from root` and its own or overriding rows `member` / `overrides root`.
+- The header shows `ws: <name>` and `pkg: <member|all>`; build output is prefixed per member, such as `[core] Building CXX object ...`.
 
 ## 7. Output layout and ordering
 

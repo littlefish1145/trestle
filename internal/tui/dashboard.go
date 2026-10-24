@@ -1735,6 +1735,9 @@ func (model dashboardModel) packageLines(p palette, width int) []string {
 	}
 	names := sortedPackageNames(model.scopedConfig().Packages)
 	lines := model.packageSearchHeader(p)
+	if model.isWorkspace() && model.member == "" {
+		lines = append(lines, p.faint.Render("Root packages are declared once and inherited by every member."), "")
+	}
 	if len(names) == 0 {
 		lines = append(lines, p.muted.Render("No packages configured."))
 	} else {
@@ -1779,9 +1782,26 @@ func (model dashboardModel) configuredPackageLines(p palette, width int, names [
 		if detail == "" {
 			detail = fallback(providerOf(cfg.Packages, name), "vcpkg")
 		}
+		if model.isWorkspace() && model.member != "" {
+			detail += model.packageOrigin(name, pkg)
+		}
 		lines = append(lines, model.selectableRow(p, index, ansi.Truncate(fmt.Sprintf("%-22s %-18s %s", name+featureText, version, detail), width-3, "…")))
 	}
 	return lines
+}
+
+// packageOrigin labels a member package row with where its declaration lives:
+// inherited from the workspace root, overriding the root's declaration, or
+// declared by the member alone.
+func (model dashboardModel) packageOrigin(name string, pkg config.Package) string {
+	root, shared := model.config.Packages[name]
+	if !shared {
+		return " · member"
+	}
+	if root.Provider == pkg.Provider && root.Version == pkg.Version && root.Triplet == pkg.Triplet {
+		return " · shared from root"
+	}
+	return " · overrides root"
 }
 
 // searchedPackageLines renders the merged search results below the configured

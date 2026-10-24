@@ -301,7 +301,7 @@ trestle doctor                # 逐个成员检查环境
 trestle editor-config         # 生成含成员构建/运行任务的 VS Code 配置
 ```
 
-TUI 在 workspace 模式下把侧边栏变成成员树：`Root` 下有 Overview / Toolchains / 全员的 Build 页，每个成员下有自己的 Targets 与 Packages。选择手感与单项目一致——↑↓ 立即切换页面（循环）、数字键直接跳转、Enter 进入内容区；在 Build 页按 `b` 即构建全部成员。按 `w` 可快速切换成员（留空=全部）；日志行带 `[member]` 前缀，标题栏显示 `ws:` 与 `pkg:` 上下文。
+TUI 在 workspace 模式下把侧边栏变成可折叠的成员树：`Root` 分组承载 workspace 级页面（Overview、聚合 Targets、共享 Packages、Tasks、Toolchains、Presets、Doctor、Settings），每个成员分组承载自己的 Targets / Packages / Tests / Tasks / Presets / Release / Doctor / Settings。↑↓ 立即切换页面（循环）、数字键跳转、Enter 进入内容区、`z` 折叠分组、`w` 切换成员；Root Targets 聚合所有成员目标（`member:target`）并支持 `/` 搜索（单项目 Targets 页同样支持）。成员页的修改写入该成员 `trestle.toml`，Root 的包自动被所有成员继承并标注 `shared from root`。日志行带 `[member]` 前缀，标题栏显示 `ws:` 与 `pkg:` 上下文。
 
 ## 项目结构
 

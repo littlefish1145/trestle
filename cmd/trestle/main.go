@@ -11,6 +11,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 
 	"golang.org/x/term"
@@ -428,15 +429,30 @@ func dashboardServices(path string) tuimodel.Services {
 	// The console tells the host which scope it is editing; single-config
 	// operations then read and write that file. Workspace-wide operations keep
 	// using the root path and carry the member themselves.
-	scopeMember := ""
+	var scope struct {
+		sync.RWMutex
+		member string
+	}
 	configPath := func() string {
-		if scopeMember == "" {
+		scope.RLock()
+		member := scope.member
+		scope.RUnlock()
+		if member == "" {
 			return path
 		}
-		return filepath.Join(filepath.Dir(path), filepath.FromSlash(scopeMember), config.DefaultFileName)
+		return filepath.Join(filepath.Dir(path), filepath.FromSlash(member), config.DefaultFileName)
+	}
+	scopedMember := func() string {
+		scope.RLock()
+		defer scope.RUnlock()
+		return scope.member
 	}
 	return tuimodel.Services{
-		SetScope: func(member string) { scopeMember = member },
+		SetScope: func(member string) {
+			scope.Lock()
+			scope.member = member
+			scope.Unlock()
+		},
 		BuildWorkspace: func(ctx context.Context, request tuimodel.WorkspaceBuildRequest, progress func(string)) error {
 			return app.BuildWorkspace(ctx, path, app.WorkspaceBuildOptions{
 				Member:  request.Member,
@@ -457,8 +473,8 @@ func dashboardServices(path string) tuimodel.Services {
 			return app.DoctorWorkspace(ctx, path, member, progress)
 		},
 		Doctor: func(ctx context.Context, progress func(string)) error {
-			if scopeMember != "" {
-				return app.DoctorWorkspace(ctx, path, scopeMember, progress)
+			if member := scopedMember(); member != "" {
+				return app.DoctorWorkspace(ctx, path, member, progress)
 			}
 			return app.DoctorWithContext(ctx, path, progress)
 		},

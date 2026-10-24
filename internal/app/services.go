@@ -1150,6 +1150,33 @@ func addProviderPackageToConfig(cfg *config.Config, name, targetName, provider s
 	if name == "" {
 		return fmt.Errorf("package name is required")
 	}
+	upsert := func() {
+		if _, exists := cfg.Packages[name]; !exists {
+			pkg := config.Package{Provider: provider, Port: name, Version: version, Features: features}
+			if provider != "conan" {
+				pkg.Triplet = cfg.Vcpkg.Triplet
+			}
+			cfg.Packages[name] = pkg
+		} else if version != "" {
+			pkg := cfg.Packages[name]
+			pkg.Version = version
+			if len(features) > 0 {
+				pkg.Features = features
+			}
+			cfg.Packages[name] = pkg
+		} else if len(features) > 0 {
+			pkg := cfg.Packages[name]
+			pkg.Features = features
+			cfg.Packages[name] = pkg
+		}
+	}
+	// A workspace root may be a pure container with no targets of its own:
+	// packages declared there are shared with every member, so there is no
+	// target dependency to wire.
+	if len(cfg.Targets) == 0 && strings.TrimSpace(targetName) == "" {
+		upsert()
+		return nil
+	}
 	if targetName == "" {
 		targetName = packageTarget(*cfg, name)
 	}
@@ -1157,24 +1184,7 @@ func addProviderPackageToConfig(cfg *config.Config, name, targetName, provider s
 	if !ok {
 		return fmt.Errorf("target %q not found", targetName)
 	}
-	if _, exists := cfg.Packages[name]; !exists {
-		pkg := config.Package{Provider: provider, Port: name, Version: version, Features: features}
-		if provider != "conan" {
-			pkg.Triplet = cfg.Vcpkg.Triplet
-		}
-		cfg.Packages[name] = pkg
-	} else if version != "" {
-		pkg := cfg.Packages[name]
-		pkg.Version = version
-		if len(features) > 0 {
-			pkg.Features = features
-		}
-		cfg.Packages[name] = pkg
-	} else if len(features) > 0 {
-		pkg := cfg.Packages[name]
-		pkg.Features = features
-		cfg.Packages[name] = pkg
-	}
+	upsert()
 	for _, dependency := range target.Dependencies {
 		if dependency.Package == name {
 			return nil

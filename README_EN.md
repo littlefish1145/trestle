@@ -291,7 +291,7 @@ trestle doctor                # check each member
 trestle editor-config         # VS Code tasks for member builds and runs
 ```
 
-In a workspace the TUI turns the sidebar into a member tree: `Root` holds Overview, Toolchains, and a Build screen scoped to every member; each member lists its own Targets and Packages. Selection matches a standalone project: ↑↓ switches screens immediately (wrapping), digits jump directly, and Enter focuses the content pane; `b` on the Build screen builds every member. `w` quickly switches members (empty means all). Log lines carry a `[member]` prefix and the header shows `ws:` and `pkg:` context.
+In a workspace the TUI turns the sidebar into a collapsible member tree: the `Root` section carries the workspace-wide screens (Overview, aggregate Targets, shared Packages, Tasks, Toolchains, Presets, Doctor, Settings) and every member carries its own Targets / Packages / Tests / Tasks / Presets / Release / Doctor / Settings. ↑↓ switches screens immediately (wrapping), digits jump, Enter focuses the content pane, `z` folds a section, and `w` switches members. Root Targets aggregates every member's targets as `member:target` and supports `/` search (standalone Targets screens do too). Member edits are written to that member's `trestle.toml`; root packages are inherited by every member and marked `shared from root`. Log lines carry a `[member]` prefix and the header shows `ws:` and `pkg:` context.
 
 ## Repository layout
 

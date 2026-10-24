@@ -160,6 +160,84 @@ dependencies = [{ target = "core:util" }]
 	}
 }
 
+func TestRootPackageAdditionReachesEveryMember(t *testing.T) {
+	dir := t.TempDir()
+	root := writeWorkspace(t, dir, map[string]string{
+		"core": `
+schema_version = 7
+[project]
+name = "core"
+[targets.util]
+type = "static"
+sources = ["src/main.cpp"]
+`,
+		"cli": `
+schema_version = 7
+[project]
+name = "cli"
+[targets.app]
+type = "executable"
+sources = ["src/main.cpp"]
+`,
+	}, "")
+	if err := AddPackage(root, "fmt", ""); err != nil {
+		t.Fatal(err)
+	}
+	wc, err := config.ParseWorkspace(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range wc.MemberNames() {
+		member := wc.Member(name)
+		pkg, ok := member.Packages["fmt"]
+		if !ok {
+			t.Fatalf("member %s did not inherit the root package: %#v", name, member.Packages)
+		}
+		if pkg.Provider != "vcpkg" {
+			t.Fatalf("member %s package provider = %q", name, pkg.Provider)
+		}
+	}
+}
+
+func TestMemberPackageAdditionDoesNotChangeRootOrSiblings(t *testing.T) {
+	dir := t.TempDir()
+	root := writeWorkspace(t, dir, map[string]string{
+		"core": `
+schema_version = 7
+[project]
+name = "core"
+[targets.util]
+type = "static"
+sources = ["src/main.cpp"]
+`,
+		"cli": `
+schema_version = 7
+[project]
+name = "cli"
+[targets.app]
+type = "executable"
+sources = ["src/main.cpp"]
+`,
+	}, "")
+	memberPath := filepath.Join(dir, "core", config.DefaultFileName)
+	if err := AddPackage(memberPath, "yaml-cpp", ""); err != nil {
+		t.Fatal(err)
+	}
+	wc, err := config.ParseWorkspace(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := wc.Member("core").Packages["yaml-cpp"]; !ok {
+		t.Fatal("member package not written")
+	}
+	if _, ok := wc.Member("cli").Packages["yaml-cpp"]; ok {
+		t.Fatal("member package leaked into a sibling")
+	}
+	if _, ok := wc.RootConfig.Packages["yaml-cpp"]; ok {
+		t.Fatal("member package leaked into the workspace root")
+	}
+}
+
 func TestWorkspaceMemberContextCarriesMergedConfig(t *testing.T) {
 	dir := t.TempDir()
 	root := writeWorkspace(t, dir, map[string]string{"core": simpleMember},
