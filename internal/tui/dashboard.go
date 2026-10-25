@@ -50,6 +50,9 @@ type WorkspaceTestFunc func(context.Context, string, TestSelection, func(string)
 // member name is empty.
 type WorkspaceDoctorFunc func(context.Context, string, func(string)) error
 
+// WorkspaceReleaseFunc builds and packages every workspace member.
+type WorkspaceReleaseFunc func(context.Context, func(string)) error
+
 // Services is the set of operations the console can perform. The host supplies
 // one callback per action; a nil field disables that action, which the console
 // then reports as unavailable. SetScope selects which configuration file the
@@ -62,6 +65,7 @@ type Services struct {
 	BuildWorkspace    WorkspaceFunc
 	TestWorkspace     WorkspaceTestFunc
 	DoctorWorkspace   WorkspaceDoctorFunc
+	ReleaseWorkspace  WorkspaceReleaseFunc
 	SetScope          func(string)
 	AssessTargets     func(context.Context) (config.Config, map[string]policy.Status, policy.Report, error)
 	PreviewTask       func(context.Context, string) (config.TaskPreview, error)
@@ -617,6 +621,9 @@ func (model dashboardModel) selectReleaseOptimization() (tea.Model, tea.Cmd) {
 	})
 }
 func (model dashboardModel) startRelease() (tea.Model, tea.Cmd) {
+	if model.isWorkspace() && model.member == "" && model.services.ReleaseWorkspace != nil {
+		return model.startWorkflow("Release", model.services.ReleaseWorkspace)
+	}
 	if model.services.Release == nil {
 		model.setMessage("release service is unavailable", true)
 		return model, nil
@@ -1089,7 +1096,7 @@ var itemCounters = map[Route]func(dashboardModel) int{
 	PackagesRoute:     dashboardModel.packageItemCount,
 	TestsRoute:        dashboardModel.testItemCount,
 	BuildRoute:        func(model dashboardModel) int { return len(model.targetRows()) },
-	ReleaseRoute:      func(model dashboardModel) int { return len(model.optimizationNames()) },
+	ReleaseRoute:      dashboardModel.releaseItemCount,
 	SettingsRoute:     dashboardModel.settingsItemCount,
 }
 
@@ -1913,6 +1920,9 @@ func (model dashboardModel) buildTargetLines(p palette, width int) []string {
 }
 
 func (model dashboardModel) releaseLines(p palette, width int) []string {
+	if model.isWorkspace() && model.member == "" {
+		return model.workspaceReleaseLines(p, width)
+	}
 	lines := []string{p.faint.Render(" RELEASE PLAN"), keyValue(p, "ZIP output", model.config.Package.Output), keyValue(p, "Targets", fallback(strings.Join(model.config.Package.Targets, ", "), strings.Join(model.config.Build.DefaultTargets, ", "))), keyValue(p, "Selected optimization", fallback(model.config.Package.Optimization, "balanced")), "", p.faint.Render(" OPTIMIZATION PRESETS · ENTER SELECTS")}
 	details := map[string]string{"balanced": "-O2 /O2 · safe default", "speed": "LTO · maximum throughput", "size": "dead-code elimination · smaller ZIP"}
 	for index, name := range model.optimizationNames() {

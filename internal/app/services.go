@@ -1702,6 +1702,21 @@ func generateWithConfig(ctx context.Context, path string, cfg config.Config) (Bu
 		tc = toolchain.WithWSLDirectory(tc, linuxDir)
 	}
 	cfg = applyMSVCRuntimeFlag(cfg, tc)
+	// Clang builds targeting the MSVC ABI can be older than the installed MSVC
+	// STL accepts. Its documented escape hatch keeps the common pair (for
+	// example Clang 18 with MSVC 14.44) buildable instead of failing with STL1000.
+	if flag := toolchain.ClangMSVCSTLCompatibilityFlag(tc); flag != "" {
+		present := false
+		for _, existing := range cfg.Build.CompileFlags {
+			if existing == flag {
+				present = true
+				break
+			}
+		}
+		if !present {
+			cfg.Build.CompileFlags = append(append([]string{}, cfg.Build.CompileFlags...), flag)
+		}
+	}
 	cudaToolchain, err := detectCUDAToolchain(ctx, cfg, tc)
 	if err != nil {
 		return BuildResult{}, err

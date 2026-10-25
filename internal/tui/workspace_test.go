@@ -67,7 +67,7 @@ func TestWorkspaceTreeStartsWithOnlyRootExpanded(t *testing.T) {
 	p := newPalette(false)
 	side := ansi.Strip(model.sidebar(p, 40, 60))
 	for _, expected := range []string{
-		"▼ Root", "1 Overview", "2 Targets (all)", "8 Settings", "▶ core", "▶ cli",
+		"▼ Root", "1 Overview", "2 Targets (all)", "3 Build", "0 Settings", "▶ core", "▶ cli",
 	} {
 		if !strings.Contains(side, expected) {
 			t.Fatalf("workspace tree missing %q:\n%s", expected, side)
@@ -197,22 +197,22 @@ func TestWorkspaceTreeMovesWithArrowsLikeFlatNavigation(t *testing.T) {
 		updated, _ := tap(m, "down")
 		return updated
 	}
-	// Overview → Targets (all) → Packages: leaves switch the screen immediately.
+	// Overview → Targets (all) → Build: leaves switch the screen immediately.
 	model = down(model)
 	if model.route != TargetsRoute || model.member != "" {
 		t.Fatalf("first down: route=%q member=%q", model.route, model.member)
 	}
 	model = down(model)
-	if model.route != PackagesRoute || model.member != "" {
+	if model.route != BuildRoute || model.member != "" {
 		t.Fatalf("second down: route=%q member=%q", model.route, model.member)
 	}
 	side := ansi.Strip(model.sidebar(newPalette(false), 40, 60))
-	if !strings.Contains(side, "▸ 3 Packages") {
+	if !strings.Contains(side, "▸ 3 Build") {
 		t.Fatalf("active row not highlighted:\n%s", side)
 	}
 	// Move down to the last root row (Settings), then onto the collapsed core
 	// header: the header is selected, but the page stays put until Enter.
-	for model.navCursor < 8 {
+	for model.navCursor < 10 {
 		model = down(model)
 	}
 	if model.route != SettingsRoute {
@@ -400,6 +400,32 @@ func TestTargetSearchFiltersStandaloneTargets(t *testing.T) {
 	model = updated.(dashboardModel)
 	if len(model.targetRows()) != 2 {
 		t.Fatalf("clearing the filter did not restore every target: %#v", model.targetRows())
+	}
+}
+
+func TestWorkspaceRootReleaseReleasesEveryMember(t *testing.T) {
+	model, _ := workspaceConsole(t)
+	called := false
+	model.services = Services{
+		ReleaseWorkspace: func(_ context.Context, progress func(string)) error {
+			called = true
+			progress("[core] packaging")
+			return nil
+		},
+	}
+	model.route = ReleaseRoute
+	view := ansi.Strip(strings.Join(model.contentLines(newPalette(false), 100), "\n"))
+	if !strings.Contains(view, "RELEASE PLAN · EVERY MEMBER") || !strings.Contains(view, "core") || !strings.Contains(view, "cli") {
+		t.Fatalf("root release screen missing members:\n%s", view)
+	}
+	updated, cmd := model.startRelease()
+	model = updated.(dashboardModel)
+	if cmd == nil {
+		t.Fatal("release did not start")
+	}
+	model = feed(t, model, cmd, 8)
+	if !called {
+		t.Fatal("root release did not use the workspace release service")
 	}
 }
 

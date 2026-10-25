@@ -168,7 +168,7 @@ Build a release archive from the `[package]` settings. `-output` overrides the o
 trestle release [-C dir] [-optimization balanced|speed|size|custom:name] [-targets app,tool] [-output dist/app.zip]
 ```
 
-Configure and run a release build, then package it. `-optimization` selects the optimization preset, `-targets` takes a comma-separated target list, and `-output` overrides the archive path.
+Configure and run a release build, then package it. `-optimization` selects the optimization preset, `-targets` takes a comma-separated target list, and `-output` overrides the archive path. On a workspace root, every member is built and packaged in dependency order using its own `[package]` settings (`-optimization`/`-targets`/`-output` do not apply to that mode).
 
 ## `trestle editor-config`
 

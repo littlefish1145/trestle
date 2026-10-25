@@ -396,8 +396,12 @@ func importProject(ctx context.Context, command, path string) error {
 	return err
 }
 
-// releaseProject configures and runs a release build.
+// releaseProject configures and runs a release build. A workspace root releases
+// every member with its own [package] settings.
 func releaseProject(ctx context.Context, path string, flags *runFlags) error {
+	if cfg, err := config.Load(path); err == nil && cfg.Workspace != nil {
+		return app.ReleaseWorkspace(ctx, path, progressPrinter)
+	}
 	if err := app.ConfigureRelease(path, flags.preset, splitCSV(flags.releaseTargets), flags.output); err != nil {
 		return err
 	}
@@ -471,6 +475,9 @@ func dashboardServices(path string) tuimodel.Services {
 		},
 		DoctorWorkspace: func(ctx context.Context, member string, progress func(string)) error {
 			return app.DoctorWorkspace(ctx, path, member, progress)
+		},
+		ReleaseWorkspace: func(ctx context.Context, progress func(string)) error {
+			return app.ReleaseWorkspace(ctx, path, progress)
 		},
 		Doctor: func(ctx context.Context, progress func(string)) error {
 			if member := scopedMember(); member != "" {

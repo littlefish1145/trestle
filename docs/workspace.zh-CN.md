@@ -159,12 +159,14 @@ workspace 模式下侧边栏是一棵可折叠的成员树：`Root` 与每个成
 ▼ Root
   1 Overview
   2 Targets (all)
-  3 Packages
-  4 Tasks
-  5 Toolchains
-  6 Presets
-  7 Doctor
-  8 Settings
+  3 Build
+  4 Packages
+  5 Tasks
+  6 Toolchains
+  7 Presets
+  8 Release
+  9 Doctor
+  0 Settings
 ▶ core
 ▶ cli
 ```
@@ -182,8 +184,8 @@ workspace 模式下侧边栏是一棵可折叠的成员树：`Root` 与每个成
 ▼ Root
   1 Overview
   ...
-  8 Settings
-▶ core  （点击/Enter 展开后）
+  0 Settings
+▶ core  （Enter 展开后）
 ▼ core
   1 Targets (2)
   2 Packages (2)
@@ -202,12 +204,13 @@ Root 与成员的分工：
 | --- | --- | --- |
 | Overview | workspace 概览 | — |
 | Targets | 聚合所有成员的目标（`member:target`），`/` 搜索 | 该成员的目标 |
+| Build | 全部成员的构建摘要，`b`/Enter 构建全部 | 通过 `b` 构建该成员（无独立导航行） |
 | Packages | 共享包，所有成员继承 | 该成员的包（含继承的根包） |
 | Tests | — | 该成员的测试 |
 | Tasks | 根任务 | 成员任务 |
 | Toolchains | 共享工具链 | — |
 | Presets | 共享预设 | 合并后的预设 |
-| Release | — | 该成员打包 |
+| Release | 逐个成员按其 `[package]` 设置构建并打包 | 该成员打包 |
 | Doctor | 检查全部成员 | 检查该成员 |
 | Settings | 根设置（toolchain / vcpkg / conan / build_dir） | 成员设置（profile、标准、flags 等） |
 
@@ -233,6 +236,7 @@ Root 与成员的分工：
 | `E_WORKSPACE_CYCLE` | 成员互相依赖，拆开依赖环。 |
 | 成员编译找不到头文件 | 检查 `include_dirs` 是否写在声明头文件的成员里，并用 `成员:目标` 引用。 |
 | 链接找不到库 | 确认依赖作用域为 `public`/`private`，且提供方是 `static`/`shared` 目标。 |
+| `error STL1000: Unexpected compiler version` | 旧版 Clang 使用了更新的 MSVC STL。Trestle 会自动传入 `_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH`；若仍失败，用 `trestle configure -toolchain cl` 或升级 Clang。 |
 
 ## 另见
 

@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
@@ -47,10 +48,12 @@ func rootNavItems() []workspaceNavItem {
 	return []workspaceNavItem{
 		{label: "Overview", route: OverviewRoute},
 		{label: "Targets (all)", route: TargetsRoute},
+		{label: "Build", route: BuildRoute},
 		{label: "Packages", route: PackagesRoute},
 		{label: "Tasks", route: TasksRoute},
 		{label: "Toolchains", route: ToolchainsRoute},
 		{label: "Presets", route: PresetsRoute},
+		{label: "Release", route: ReleaseRoute},
 		{label: "Doctor", route: DoctorRoute},
 		{label: "Settings", route: SettingsRoute},
 	}
@@ -348,6 +351,34 @@ func (model *dashboardModel) applyScope() {
 	if model.services.SetScope != nil {
 		model.services.SetScope(model.member)
 	}
+}
+
+// releaseItemCount counts the Release screen rows: members at the workspace
+// root, optimization presets inside a member or standalone project.
+func (model dashboardModel) releaseItemCount() int {
+	if model.isWorkspace() && model.member == "" {
+		return len(model.workspaceMembers())
+	}
+	return len(model.optimizationNames())
+}
+
+// workspaceReleaseLines is the root Release screen: every member builds and
+// packages with its own settings.
+func (model dashboardModel) workspaceReleaseLines(p palette, width int) []string {
+	lines := []string{"", "  " + model.buildStateLabel(p), "", p.faint.Render(" RELEASE PLAN · EVERY MEMBER"), p.faint.Render(" Each member uses its own [package] output and optimization settings."), ""}
+	for index, name := range model.workspaceMembers() {
+		output := "dist/" + name + ".zip"
+		if member, ok := model.probe.MemberConfigs[name]; ok && member.Package.Output != "" {
+			output = filepath.Base(member.Package.Output)
+		}
+		text := fmt.Sprintf("%-18s %s", name, output)
+		lines = append(lines, model.selectableRow(p, index, ansi.Truncate(text, width-3, "…")))
+	}
+	lines = append(lines, "", p.accent.Render("r / b build and package every member"), p.faint.Render("enter release every member"))
+	if model.lastRun != "" {
+		lines = append(lines, "", p.faint.Render(" LAST RUN"), p.text.Render(model.lastRun))
+	}
+	return lines
 }
 
 // workspaceBuildLines is the workspace Build screen: every member with its

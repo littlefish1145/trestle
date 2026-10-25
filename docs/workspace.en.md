@@ -159,12 +159,14 @@ In a workspace the sidebar is a collapsible member tree: `Root` and every member
 ▼ Root
   1 Overview
   2 Targets (all)
-  3 Packages
-  4 Tasks
-  5 Toolchains
-  6 Presets
-  7 Doctor
-  8 Settings
+  3 Build
+  4 Packages
+  5 Tasks
+  6 Toolchains
+  7 Presets
+  8 Release
+  9 Doctor
+  0 Settings
 ▶ core
 ▶ cli
 ```
@@ -182,7 +184,7 @@ With `core` expanded, its rows number from 1 again:
 ▼ Root
   1 Overview
   ...
-  8 Settings
+  0 Settings
 ▼ core
   1 Targets (2)
   2 Packages (2)
@@ -201,12 +203,13 @@ Root and member responsibilities:
 | --- | --- | --- |
 | Overview | workspace summary | — |
 | Targets | every member's targets as `member:target`, `/` to search | that member's targets |
+| Build | summary of every member; `b`/Enter builds them all | `b` builds that member (no navigation row) |
 | Packages | shared packages, inherited by every member | that member's packages (root inherits included) |
 | Tests | — | that member's tests |
 | Tasks | root tasks | member tasks |
 | Toolchains | shared toolchain | — |
 | Presets | shared presets | merged presets |
-| Release | — | package that member |
+| Release | build and package every member with its own `[package]` settings | package that member |
 | Doctor | check every member | check that member |
 | Settings | root settings (toolchain / vcpkg / conan / build_dir) | member settings (profile, standards, flags) |
 
@@ -232,6 +235,7 @@ Root and member responsibilities:
 | `E_WORKSPACE_CYCLE` | Members depend on each other; break the cycle. |
 | A member cannot find a header | Declare `include_dirs` in the member that owns the header and reference it via `member:target`. |
 | The linker cannot find a library | Check the dependency scope is `public`/`private` and the provider is a `static`/`shared` target. |
+| `error STL1000: Unexpected compiler version` | An older Clang is using a newer MSVC STL. Trestle passes `_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH` automatically; if it still fails, use `trestle configure -toolchain cl` or upgrade Clang. |
 
 ## See also
 

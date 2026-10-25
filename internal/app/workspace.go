@@ -269,6 +269,68 @@ func workspaceOutputPaths(ctx context.Context, tc toolchain.Toolchain) map[strin
 	return outputs
 }
 
+// ReleaseWorkspace builds and packages every member in dependency order. Each
+// member uses its own [package] settings (output path, optimization, targets)
+// and its merged configuration, so cross-member dependencies still resolve; the
+// computed release settings are not written back to the member files.
+func ReleaseWorkspace(ctx context.Context, path string, progress func(string)) error {
+	wc, err := LoadWorkspace(ctx, path)
+	if err != nil {
+		return err
+	}
+	if wc == nil {
+		return fmt.Errorf("%s does not declare a [workspace] section", path)
+	}
+	order, err := graph.OrderWorkspaceMembers(wc)
+	if err != nil {
+		return err
+	}
+	buildRoot, err := filepath.Abs(wc.RootConfig.Build.BuildDir)
+	if err != nil {
+		return err
+	}
+	workspace, err := graph.ResolveWorkspace(ctx, wc, buildRoot)
+	if err != nil {
+		return err
+	}
+	for _, name := range order {
+		member := wc.Member(name)
+		if member == nil {
+			continue
+		}
+		memberPath := workspaceMemberPath(wc, name)
+		cfg := *member
+		if err := applyReleaseOptimization(&cfg); err != nil {
+			return err
+		}
+		cfg, err = policy.ApplyAt(ctx, cfg, cfg.Root())
+		if err != nil {
+			return err
+		}
+		memberCtx := context.WithValue(ctx, configurationKey{}, cfg)
+		memberCtx = context.WithValue(memberCtx, workspaceProjectKey{}, workspace)
+		memberCtx = context.WithValue(memberCtx, workspaceMemberKey{}, name)
+		targets := cfg.Package.Targets
+		if len(targets) == 0 {
+			targets = cfg.Build.DefaultTargets
+		}
+		prefixed := progress
+		if progress != nil {
+			prefixed = func(line string) { progress("[" + name + "] " + line) }
+		}
+		if prefixed != nil {
+			prefixed("Release optimization: " + cfg.Package.Optimization)
+		}
+		if err := BuildTargetsWithProgress(memberCtx, memberPath, targets, false, prefixed); err != nil {
+			return err
+		}
+		if err := packageSelectedWithContext(memberCtx, memberPath, targets, prefixed); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // workspaceMemberPath returns the member's trestle.toml path, or the root path
 // for the pseudo member that owns the root's own targets.
 func workspaceMemberPath(wc *config.WorkspaceContext, name string) string {

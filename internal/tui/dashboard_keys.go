@@ -283,6 +283,10 @@ func (model dashboardModel) handleEnterKey() (tea.Model, tea.Cmd, bool) {
 	case PresetsRoute:
 		return model.enterPreset()
 	case ReleaseRoute:
+		if model.isWorkspace() && model.member == "" {
+			updated, cmd := model.startRelease()
+			return updated, cmd, true
+		}
 		updated, cmd := model.selectReleaseOptimization()
 		return updated, cmd, true
 	case DoctorRoute:

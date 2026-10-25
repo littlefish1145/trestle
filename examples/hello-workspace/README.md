@@ -52,6 +52,7 @@ Hello, workspace!
 trestle test -C examples/hello-workspace            # 跳过没有测试的成员
 trestle test -C examples/hello-workspace -p core    # 只跑 core 的测试
 trestle doctor -C examples/hello-workspace          # 逐成员检查
+trestle release -C examples/hello-workspace         # 逐成员 release 并生成各自 ZIP
 ```
 
 ## 用 TUI 操作
@@ -66,12 +67,14 @@ trestle -C examples/hello-workspace
 ▼ Root
   1 Overview
   2 Targets (all)
-  3 Packages
-  4 Tasks
-  5 Toolchains
-  6 Presets
-  7 Doctor
-  8 Settings
+  3 Build
+  4 Packages
+  5 Tasks
+  6 Toolchains
+  7 Presets
+  8 Release
+  9 Doctor
+  0 Settings
 ▶ core
 ▶ cli
 ```

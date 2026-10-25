@@ -168,7 +168,7 @@ trestle package [-C dir] [-output dist/app.zip]
 trestle release [-C dir] [-optimization balanced|speed|size|custom:name] [-targets app,tool] [-output dist/app.zip]
 ```
 
-配置并运行一次发布构建，然后打包。`-optimization` 选择优化预设，`-targets` 指定逗号分隔的目标，`-output` 覆盖归档路径。
+配置并运行一次发布构建，然后打包。`-optimization` 选择优化预设，`-targets` 指定逗号分隔的目标，`-output` 覆盖归档路径。在 workspace 根上运行时，会按依赖顺序逐个成员使用各自 `[package]` 设置构建并打包（`-optimization`/`-targets`/`-output` 不适用于该模式）。
 
 ## `trestle editor-config`
 
