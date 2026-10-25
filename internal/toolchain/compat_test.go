@@ -22,7 +22,7 @@ func writeSTLHeader(t *testing.T, root string, required int) string {
 func TestClangMSVCSTLCompatibilityFlag(t *testing.T) {
 	include := writeSTLHeader(t, filepath.Join(t.TempDir(), "include"), 19)
 	env := map[string]string{"INCLUDE": include}
-	old := Toolchain{Kind: Clang, Target: "x86_64-pc-windows-msvc", Version: "18.1.8", Env: env}
+	old := Toolchain{Kind: Clang, CXX: `C:\LLVM\bin\clang++.exe`, Target: "x86_64-pc-windows-msvc", Version: "18.1.8", Env: env}
 	if flag := ClangMSVCSTLCompatibilityFlag(old); flag != "-D"+CompilerSTLCompatibilityDefine {
 		t.Fatalf("old clang flag = %q", flag)
 	}
@@ -38,6 +38,12 @@ func TestClangMSVCSTLCompatibilityFlag(t *testing.T) {
 	}
 	if flag := ClangMSVCSTLCompatibilityFlag(Toolchain{Kind: MSVC, Env: env, Version: "19.44"}); flag != "" {
 		t.Fatalf("MSVC should need no flag, got %q", flag)
+	}
+	clangCL := old
+	clangCL.Kind = MSVC
+	clangCL.CXX = `C:\LLVM\bin\clang-cl.exe`
+	if flag := ClangMSVCSTLCompatibilityFlag(clangCL); flag != "-D"+CompilerSTLCompatibilityDefine {
+		t.Fatalf("clang-cl flag = %q", flag)
 	}
 	if flag := ClangMSVCSTLCompatibilityFlag(Toolchain{Kind: Clang, Target: old.Target, Version: "18.1.8"}); flag != "" {
 		t.Fatalf("missing INCLUDE should need no flag, got %q", flag)

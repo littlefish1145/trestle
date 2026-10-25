@@ -236,6 +236,7 @@ Root and member responsibilities:
 | A member cannot find a header | Declare `include_dirs` in the member that owns the header and reference it via `member:target`. |
 | The linker cannot find a library | Check the dependency scope is `public`/`private` and the provider is a `static`/`shared` target. |
 | `error STL1000: Unexpected compiler version` | An older Clang is using a newer MSVC STL. Trestle passes `_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH` automatically; if it still fails, use `trestle configure -toolchain cl` or upgrade Clang. |
+| `LNK1104: cannot open file ...lnk{...}.tmp` | `link.exe` could not create its temporary response file. Trestle links Clang/Clang-cl projects with the bundled `lld-link` (`-fuse-ld=lld`) so that file is never needed; install LLVM's lld component if it is missing, or switch to MSVC `cl`. |
 
 ## See also
 

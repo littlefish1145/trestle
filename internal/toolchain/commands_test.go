@@ -79,6 +79,63 @@ func TestMSVCDriverLinkPrefersSiblingLinkExe(t *testing.T) {
 	}
 }
 
+func TestClangMSVCABILinkPrefersLLD(t *testing.T) {
+	dir := t.TempDir()
+	driver := filepath.Join(dir, "clang++.exe")
+	for _, name := range []string{"clang++.exe", "lld-link.exe"} {
+		if err := os.WriteFile(filepath.Join(dir, name), nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tc := Toolchain{Kind: Clang, CXX: driver, Linker: driver, Target: "x86_64-pc-windows-msvc"}
+	executable, args, err := tc.Link(LinkSpec{Inputs: []string{"main.o"}, Output: "bin/app.exe", LibraryDirs: []string{"lib"}, Libraries: []string{"greeter"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if executable != driver || len(args) == 0 || args[0] != "-fuse-ld=lld" {
+		t.Fatalf("clang MSVC link did not prefer lld: %s %v", executable, args)
+	}
+	text := strings.Join(args, " ")
+	if !strings.Contains(text, "-Llib") || !strings.Contains(text, "-lgreeter") {
+		t.Fatalf("gnu-style link arguments lost: %s", text)
+	}
+}
+
+func TestClangCLLinkPrefersLLD(t *testing.T) {
+	dir := t.TempDir()
+	driver := filepath.Join(dir, "clang-cl.exe")
+	if err := os.WriteFile(filepath.Join(dir, "lld-link.exe"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tc := Toolchain{Kind: MSVC, CXX: driver, Linker: driver, Target: "x86_64-pc-windows-msvc"}
+	executable, args, err := tc.Link(LinkSpec{Inputs: []string{"main.obj"}, Output: "bin/app.exe"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := strings.Join(args, " ")
+	// With no link.exe beside it, the toolset directory's lld-link is invoked
+	// directly with native flags; that still avoids link.exe temp files.
+	if executable != filepath.Join(dir, "lld-link.exe") || !strings.Contains(text, "/OUT:bin/app.exe") || strings.Contains(text, "/link") {
+		t.Fatalf("clang-cl link did not use lld-link directly: %s %s", executable, text)
+	}
+}
+
+func TestClangNonMSVCTargetKeepsDefaultLinker(t *testing.T) {
+	dir := t.TempDir()
+	driver := filepath.Join(dir, "clang++.exe")
+	if err := os.WriteFile(filepath.Join(dir, "lld-link.exe"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tc := Toolchain{Kind: Clang, CXX: driver, Linker: driver, Target: "x86_64-pc-linux-gnu"}
+	_, args, err := tc.Link(LinkSpec{Inputs: []string{"main.o"}, Output: "app"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(strings.Join(args, " "), "-fuse-ld") {
+		t.Fatalf("non-MSVC target gained a lld flag: %v", args)
+	}
+}
+
 func TestMSVCLinkSkipsCMakePthreadShim(t *testing.T) {
 	tc := Toolchain{Kind: MSVC, CXX: "cl.exe", Linker: "cl.exe"}
 	_, args, err := tc.Link(LinkSpec{Inputs: []string{"main.obj"}, Output: "app.exe", Libraries: []string{"pthreads", "advapi32"}})

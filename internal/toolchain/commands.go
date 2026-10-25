@@ -101,8 +101,48 @@ func (t Toolchain) Link(spec LinkSpec) (string, []string, error) {
 	} else {
 		args = gnuLinkArgs(spec)
 	}
+	// Clang on Windows shells out to link.exe, which fails with LNK1104 when it
+	// cannot create its temporary response file. lld-link is a drop-in linker
+	// that writes no such file, so prefer it whenever the LLVM installation ships
+	// it beside the driver.
+	if isClangDriver(linker) && targetUsesMSVCABI(t.Target) {
+		if flag := lldLinkFlag(linker); flag != "" {
+			args = append([]string{flag}, args...)
+		}
+	}
 	exe, args := t.Wrap(linker, args)
 	return exe, args, nil
+}
+
+// siblingExecutable returns the first of names that exists beside an absolute
+// driver path, or "".
+func siblingExecutable(driver string, names ...string) string {
+	if !filepath.IsAbs(driver) {
+		return ""
+	}
+	dir := filepath.Dir(driver)
+	for _, name := range names {
+		candidate := filepath.Join(dir, name)
+		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
+			return candidate
+		}
+	}
+	return ""
+}
+
+// lldLinkFlag returns the flag that makes a Clang driver use lld-link, when the
+// LLVM installation provides it next to the driver.
+func lldLinkFlag(driver string) string {
+	if siblingExecutable(driver, "lld-link.exe", "lld.exe", "ld.lld.exe") == "" {
+		return ""
+	}
+	return "-fuse-ld=lld"
+}
+
+// isClangDriver reports whether the linker path belongs to a Clang driver, which
+// understands -fuse-ld.
+func isClangDriver(linker string) bool {
+	return strings.Contains(strings.ToLower(filepath.Base(linker)), "clang")
 }
 
 // msvcNativeLinker returns link.exe from the compiler driver's own toolset

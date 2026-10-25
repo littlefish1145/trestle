@@ -237,6 +237,7 @@ Root 与成员的分工：
 | 成员编译找不到头文件 | 检查 `include_dirs` 是否写在声明头文件的成员里，并用 `成员:目标` 引用。 |
 | 链接找不到库 | 确认依赖作用域为 `public`/`private`，且提供方是 `static`/`shared` 目标。 |
 | `error STL1000: Unexpected compiler version` | 旧版 Clang 使用了更新的 MSVC STL。Trestle 会自动传入 `_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH`；若仍失败，用 `trestle configure -toolchain cl` 或升级 Clang。 |
+| `LNK1104: 无法打开文件 ...lnk{...}.tmp` | `link.exe` 无法创建临时响应文件。Trestle 在 Clang/Clang-cl 链接时优先使用同目录的 `lld-link`（`-fuse-ld=lld`），不再经过该临时文件；若 LLVM 未安装 lld，请安装 LLVM 的 lld 组件或改用 MSVC `cl`。 |
 
 ## 另见
 

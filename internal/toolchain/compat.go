@@ -25,7 +25,7 @@ var (
 // required Clang major version is read from the STL's own yvals_core.h, so the
 // decision follows whatever Visual Studio version the environment provides.
 func ClangMSVCSTLCompatibilityFlag(t Toolchain) string {
-	if t.Kind != Clang || !targetUsesMSVCABI(t.Target) {
+	if !targetUsesMSVCABI(t.Target) || !isClangDriver(t.CXX) {
 		return ""
 	}
 	major := firstNumber(t.Version)
