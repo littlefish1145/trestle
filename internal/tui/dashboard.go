@@ -267,6 +267,7 @@ type dashboardModel struct {
 	workflowErrors     []string
 	member             string
 	navCursor          int
+	rootCollapsed      bool
 	targetQuery        string
 	expanded           map[string]bool
 	testFileMode       bool
@@ -339,7 +340,7 @@ func newDashboard(path string, services Services) dashboardModel {
 	return dashboardModel{
 		path: path, services: services, route: OverviewRoute, focus: focusNavigation,
 		width: 100, height: 30, probing: true, discovering: true, wslDiscovering: true, lastRun: "No build in this session",
-		message: "Reading project configuration…",
+		message: "Reading project configuration…", navCursor: 1,
 	}
 }
 
@@ -1209,6 +1210,16 @@ func navigationKey(index int) string {
 	}
 	return " "
 }
+
+// navigationKeyLabel is the display form of navigationKey: rows beyond the tenth
+// keep a visible marker so the sidebar columns stay aligned, even though they
+// have no digit shortcut.
+func navigationKeyLabel(index int) string {
+	if key := navigationKey(index); key != " " {
+		return key
+	}
+	return "·"
+}
 func routeIndex(route Route) int {
 	for index, item := range routes {
 		if item == route {
@@ -1308,12 +1319,12 @@ func (model dashboardModel) activityTone() string {
 func (model dashboardModel) sidebar(p palette, width, height int) string {
 	if model.isWorkspace() {
 		lines := append([]string{p.faint.Render(" WORKSPACE"), ""}, model.workspaceNavLines(p, width)...)
-		lines = append(lines, "", p.faint.Render(" tab  switch focus"), p.faint.Render(" ↑↓   navigate"), p.faint.Render(" ↵    open / fold"), p.faint.Render(" z    fold all  w  member"))
+		lines = append(lines, "", p.faint.Render(" tab  switch focus"), p.faint.Render(" ↑↓   navigate"), p.faint.Render(" ↵    open / fold"), p.faint.Render(" z    fold  w  member"))
 		return lipgloss.NewStyle().Border(p.border).BorderForeground(lipgloss.Color(p.borderMuted)).Width(width - 2).Height(max(1, height-2)).Render(strings.Join(lines, "\n"))
 	}
 	lines := []string{p.faint.Render(" WORKSPACE"), ""}
 	for index, route := range routes {
-		label := fmt.Sprintf(" %s  %s  %s", navigationKey(index), routeGlyph[route], navigationLabel(route))
+		label := fmt.Sprintf(" %s  %s  %s", navigationKeyLabel(index), routeGlyph[route], navigationLabel(route))
 		if route == model.route {
 			marker := "  "
 			if model.focus == focusNavigation {

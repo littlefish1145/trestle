@@ -153,7 +153,7 @@ After a build, all member compile commands are merged into:
 trestle -C examples/hello-workspace
 ```
 
-In a workspace the sidebar is a collapsible member tree: only `Root` starts expanded, and each member shows as `▶ core`. Select a member header and press Enter (or `z`) to expand or fold it; its screens appear once expanded.
+In a workspace the sidebar is a collapsible member tree: `Root` and every member are foldable groups, and only `Root` starts expanded. Select any group header and press Enter (or `z`) to fold or unfold it.
 
 ```text
 ▼ Root
@@ -169,23 +169,29 @@ In a workspace the sidebar is a collapsible member tree: only `Root` starts expa
 ▶ cli
 ```
 
-↑↓ moves between rows: screen rows switch the page immediately, while member headers only move the selection (the page stays) until Enter folds or unfolds them. Digits follow the visible screen rows (headers are not numbered). Long lists scroll to keep the selection visible. ↑↓ wraps, `z` folds the active member (or every member from the root scope), and `w` prompts for a member name, switches to it and expands it.
+Selection and numbering:
 
-With `core` expanded:
+- Numbering restarts at 1 inside each group (`1`–`9`, the tenth row is `0`, further rows show `·` and stay reachable with ↑↓).
+- Digits act on the group the current selection belongs to: with the selection anywhere in Root, `2` opens Root's Targets (all); with the selection on the `core` header or one of its screens, `1` opens core's Targets and `2` opens core's Packages. A folded group expands automatically when a digit targets it.
+- ↑↓ moves between rows: screen rows switch the page immediately, while group headers only move the selection (the page stays) until Enter folds or unfolds them.
+- Long lists scroll to keep the selection visible; `w` prompts for a member name, switches to it and expands it.
+
+With `core` expanded, its rows number from 1 again:
 
 ```text
 ▼ Root
   1 Overview
-  2 Targets (all)
   ...
-  9 Targets (2)      ← core
-  0 Packages (2)
-  · Tests (1)
-  · Tasks
-  · Presets
-  · Release
-  · Doctor
-  · Settings
+  8 Settings
+▼ core
+  1 Targets (2)
+  2 Packages (2)
+  3 Tests (1)
+  4 Tasks
+  5 Presets
+  6 Release
+  7 Doctor
+  8 Settings
 ▶ cli
 ```
 

@@ -143,7 +143,14 @@ func (model dashboardModel) applyProbe(probe probeMessage) (tea.Model, tea.Cmd) 
 	model.projectFingerprint = probe.Fingerprint
 	if model.member != "" && !containsString(model.workspaceMembers(), model.member) {
 		model.member = ""
+		model.rootCollapsed = false
 		model.navCursor = 0
+		for index, item := range model.workspaceNavItems() {
+			if item.route == OverviewRoute && item.member == "" && !item.header {
+				model.navCursor = index
+				break
+			}
+		}
 	}
 	model.clampWorkspaceNavCursor()
 	model.applyScope()

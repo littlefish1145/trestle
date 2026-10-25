@@ -67,8 +67,7 @@ func TestWorkspaceTreeStartsWithOnlyRootExpanded(t *testing.T) {
 	p := newPalette(false)
 	side := ansi.Strip(model.sidebar(p, 40, 60))
 	for _, expected := range []string{
-		"▼ Root", "Overview", "Targets (all)", "Packages", "Tasks", "Toolchains", "Presets", "Doctor", "Settings",
-		"▶ core", "▶ cli",
+		"▼ Root", "1 Overview", "2 Targets (all)", "8 Settings", "▶ core", "▶ cli",
 	} {
 		if !strings.Contains(side, expected) {
 			t.Fatalf("workspace tree missing %q:\n%s", expected, side)
@@ -91,6 +90,43 @@ func TestWorkspaceTreeStartsWithOnlyRootExpanded(t *testing.T) {
 	}
 }
 
+func TestFlatNavigationShowsMarkersBeyondTen(t *testing.T) {
+	model, _ := freshConsole(t)
+	side := ansi.Strip(model.sidebar(newPalette(false), 44, 60))
+	for _, expected := range []string{"0  ▶  Build", "·  ◆  Release", "·  ✚  Doctor", "·  ≡  Settings"} {
+		if !strings.Contains(side, expected) {
+			t.Fatalf("flat navigation missing %q:\n%s", expected, side)
+		}
+	}
+	if navigationKeyLabel(10) != "·" || navigationKeyLabel(9) != "0" {
+		t.Fatalf("navigation labels beyond the tenth row regressed")
+	}
+}
+
+func TestWorkspaceRootHeaderFoldsTheRootSection(t *testing.T) {
+	model, _ := workspaceConsole(t)
+	model.focus = focusNavigation
+	model.navCursor = model.workspaceHeaderIndex("")
+	updated, _, handled := model.handleEnterKey()
+	model = updated.(dashboardModel)
+	if !handled || !model.rootCollapsed {
+		t.Fatal("Enter on the Root header did not fold the root section")
+	}
+	side := ansi.Strip(model.sidebar(newPalette(false), 40, 60))
+	if !strings.Contains(side, "▶ Root") || strings.Contains(side, "Overview") {
+		t.Fatalf("root section still shows its rows:\n%s", side)
+	}
+	updated, _, _ = model.handleEnterKey()
+	model = updated.(dashboardModel)
+	if model.rootCollapsed {
+		t.Fatal("Enter on the Root header did not expand it again")
+	}
+	side = ansi.Strip(model.sidebar(newPalette(false), 40, 60))
+	if !strings.Contains(side, "▼ Root") || !strings.Contains(side, "Overview") {
+		t.Fatalf("root section did not come back:\n%s", side)
+	}
+}
+
 func TestWorkspaceHeaderEnterExpandsAndCollapses(t *testing.T) {
 	model, _ := workspaceConsole(t)
 	model = selectWorkspaceHeader(t, model, "core")
@@ -98,7 +134,7 @@ func TestWorkspaceHeaderEnterExpandsAndCollapses(t *testing.T) {
 		t.Fatal("Enter on the core header did not expand it")
 	}
 	side := ansi.Strip(model.sidebar(newPalette(false), 40, 60))
-	for _, expected := range []string{"▸ ▼ core", "Targets (2)", "Packages (2)", "Tests (1)", "Release", "▶ cli"} {
+	for _, expected := range []string{"▸ ▼ core", "1 Targets (2)", "2 Packages (2)", "3 Tests (1)", "Release", "▶ cli"} {
 		if !strings.Contains(side, expected) {
 			t.Fatalf("expanded tree missing %q:\n%s", expected, side)
 		}
@@ -116,9 +152,9 @@ func TestWorkspaceHeaderEnterExpandsAndCollapses(t *testing.T) {
 func TestWorkspaceTreeSelectsMemberTargets(t *testing.T) {
 	model, _ := workspaceConsole(t)
 	model = selectWorkspaceHeader(t, model, "core")
-	// The 9th visible leaf is "core → Targets (2)"; digits count leaves, not
-	// headers.
-	model = tapNumber(t, model, "9")
+	// Digits count inside the section of the current selection. The cursor is on
+	// the core header, so 1 opens core's first screen.
+	model = tapNumber(t, model, "1")
 	if model.member != "core" || model.route != TargetsRoute {
 		t.Fatalf("tree selection: member=%q route=%q", model.member, model.route)
 	}
@@ -128,6 +164,22 @@ func TestWorkspaceTreeSelectsMemberTargets(t *testing.T) {
 	}
 	if strings.Contains(view, "hello") {
 		t.Fatalf("targets page leaked another member's target:\n%s", view)
+	}
+}
+
+func TestWorkspaceDigitsFollowTheSelectedSection(t *testing.T) {
+	model, _ := workspaceConsole(t)
+	model = selectWorkspaceHeader(t, model, "core")
+	model = tapNumber(t, model, "2")
+	if model.member != "core" || model.route != PackagesRoute {
+		t.Fatalf("member digit: member=%q route=%q", model.member, model.route)
+	}
+	// Move the selection to the Root header: the same digit now addresses the
+	// root section.
+	model.navCursor = model.workspaceHeaderIndex("")
+	model = tapNumber(t, model, "2")
+	if model.member != "" || model.route != TargetsRoute {
+		t.Fatalf("root digit: member=%q route=%q", model.member, model.route)
 	}
 }
 
@@ -160,7 +212,7 @@ func TestWorkspaceTreeMovesWithArrowsLikeFlatNavigation(t *testing.T) {
 	}
 	// Move down to the last root row (Settings), then onto the collapsed core
 	// header: the header is selected, but the page stays put until Enter.
-	for model.navCursor < 7 {
+	for model.navCursor < 8 {
 		model = down(model)
 	}
 	if model.route != SettingsRoute {
@@ -178,10 +230,14 @@ func TestWorkspaceTreeMovesWithArrowsLikeFlatNavigation(t *testing.T) {
 	if !strings.Contains(side, "▸ ▶ core") {
 		t.Fatalf("header not highlighted:\n%s", side)
 	}
-	// The next header is cli, then the cursor wraps back to Overview.
+	// The next header is cli, then the Root header, then back to Overview.
 	model = down(model)
 	if items := model.workspaceNavItems(); !items[model.navCursor].header || items[model.navCursor].member != "cli" {
 		t.Fatalf("cursor should rest on the cli header: %#v", items[model.navCursor])
+	}
+	model = down(model)
+	if items := model.workspaceNavItems(); !items[model.navCursor].header || items[model.navCursor].member != "" {
+		t.Fatalf("cursor should rest on the Root header: %#v", items[model.navCursor])
 	}
 	model = down(model)
 	if model.route != OverviewRoute || model.member != "" {
@@ -216,34 +272,31 @@ func TestWorkspaceBuildBuildsEveryMemberFromRootScope(t *testing.T) {
 
 func TestWorkspaceTreeCollapseShortcut(t *testing.T) {
 	model, _ := workspaceConsole(t)
-	// The root scope starts with every member collapsed; z expands them all and
-	// then folds them again.
+	// The cursor starts on Overview (Root section): z folds the root section and
+	// z brings it back.
 	updated, _ := tap(model, "z")
 	model = updated
-	if !model.expanded["core"] || !model.expanded["cli"] {
-		t.Fatalf("z from the root did not expand every member: %#v", model.expanded)
+	if !model.rootCollapsed {
+		t.Fatal("z on a root row did not fold the Root section")
 	}
 	side := ansi.Strip(model.sidebar(newPalette(false), 40, 60))
-	if !strings.Contains(side, "▼ core") || !strings.Contains(side, "Targets (2)") || !strings.Contains(side, "Targets (1)") {
-		t.Fatalf("expanded tree not rendered:\n%s", side)
+	if !strings.Contains(side, "▶ Root") || !strings.Contains(side, "▶ core") || !strings.Contains(side, "▶ cli") {
+		t.Fatalf("folded tree not rendered:\n%s", side)
 	}
 	updated, _ = tap(model, "z")
 	model = updated
-	if model.expanded["core"] || model.expanded["cli"] {
-		t.Fatalf("second z did not collapse every member: %#v", model.expanded)
-	}
-	side = ansi.Strip(model.sidebar(newPalette(false), 40, 60))
-	if !strings.Contains(side, "▶ core") || !strings.Contains(side, "▶ cli") {
-		t.Fatalf("collapsed tree not rendered:\n%s", side)
+	if model.rootCollapsed {
+		t.Fatal("second z did not expand the Root section")
 	}
 	// Inside a member scope z folds just that member.
 	model = selectWorkspaceHeader(t, model, "core")
-	model.member = "core"
-	model.route = TargetsRoute
+	if !model.expanded["core"] {
+		t.Fatal("core did not expand")
+	}
 	updated, _ = tap(model, "z")
 	model = updated
 	if model.expanded["core"] {
-		t.Fatal("z inside a member scope did not fold it")
+		t.Fatal("z on the core header did not fold it")
 	}
 }
 
@@ -355,10 +408,14 @@ func TestWorkspaceScopeFollowsSelectedMember(t *testing.T) {
 	scopes := []string{}
 	model.services = Services{SetScope: func(member string) { scopes = append(scopes, member) }}
 	model = selectWorkspaceHeader(t, model, "core")
-	model = tapNumber(t, model, "9")
+	// The cursor sits on the core header, so 1 opens core's Targets.
+	model = tapNumber(t, model, "1")
 	if model.member != "core" {
 		t.Fatalf("member = %q", model.member)
 	}
+	// Move the selection to the Root header and press 1: the root section's
+	// first row, which clears the member scope.
+	model.navCursor = model.workspaceHeaderIndex("")
 	model = tapNumber(t, model, "1")
 	if model.member != "" {
 		t.Fatalf("root row did not clear the scope: %q", model.member)

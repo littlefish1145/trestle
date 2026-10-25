@@ -726,11 +726,7 @@ func (model *dashboardModel) selectRouteByNumber(key tea.Key) {
 		return
 	}
 	if model.isWorkspace() {
-		leaf := model.workspaceNavLeafIndex(index + 1)
-		if leaf < 0 {
-			return
-		}
-		*model = model.activateWorkspaceNav(leaf)
+		model.jumpWorkspaceSectionRow(index + 1)
 		return
 	}
 	if index < len(routes) {

@@ -81,7 +81,14 @@ func (model dashboardModel) applyMemberSwitch(text string) (tea.Model, tea.Cmd) 
 	model.member = text
 	model.applyScope()
 	if text == "" {
+		model.rootCollapsed = false
 		model.navCursor = 0
+		for index, item := range model.workspaceNavItems() {
+			if item.route == OverviewRoute && item.member == "" && !item.header {
+				model.navCursor = index
+				break
+			}
+		}
 		model.setMessage("Workspace: operating on all members", false)
 		return model, nil
 	}

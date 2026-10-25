@@ -326,14 +326,13 @@ func (model dashboardModel) navigationPanel(p palette, width, height int) string
 	if model.isWorkspace() {
 		lines := model.workspaceNavLines(p, width-2)
 		visible := max(1, height-3)
-		cursorLine := model.navCursor + 1 // the root header is line 0
-		start := cursorLine - visible/2
+		start := model.navCursor - visible/2
 		start = min(max(start, 0), max(0, len(lines)-visible))
 		return fittedPanel(p, "Workspace", sliceViewport(lines, start, visible), width, height, model.focus == focusNavigation)
 	}
 	var lines []string
 	for index, route := range routes {
-		line := navigationKey(index) + " " + navigationLabel(route)
+		line := navigationKeyLabel(index) + " " + navigationLabel(route)
 		if model.route == route {
 			line = p.selected.Render("› " + line)
 		} else {

@@ -20,22 +20,16 @@ type workspaceNavItem struct {
 	expanded bool
 }
 
-// workspaceNavItems flattens the visible tree: the root screens first, then each
-// member header followed by its screens when expanded. Member sections start
-// collapsed, so the root is the only expanded group on a fresh console.
+// workspaceNavItems flattens the visible tree: the selectable Root header and
+// its screens first, then each member header followed by its screens when
+// expanded. Root starts expanded; member sections start collapsed.
 func (model dashboardModel) workspaceNavItems() []workspaceNavItem {
 	if !model.isWorkspace() {
 		return nil
 	}
-	items := []workspaceNavItem{
-		{label: "Overview", route: OverviewRoute},
-		{label: "Targets (all)", route: TargetsRoute},
-		{label: "Packages", route: PackagesRoute},
-		{label: "Tasks", route: TasksRoute},
-		{label: "Toolchains", route: ToolchainsRoute},
-		{label: "Presets", route: PresetsRoute},
-		{label: "Doctor", route: DoctorRoute},
-		{label: "Settings", route: SettingsRoute},
+	items := []workspaceNavItem{{label: "Root", member: "", header: true, expanded: !model.rootCollapsed}}
+	if !model.rootCollapsed {
+		items = append(items, rootNavItems()...)
 	}
 	for _, name := range model.workspaceMembers() {
 		expanded := model.expanded[name]
@@ -46,6 +40,20 @@ func (model dashboardModel) workspaceNavItems() []workspaceNavItem {
 		items = append(items, model.memberNavItems(name)...)
 	}
 	return items
+}
+
+// rootNavItems builds the workspace-wide screens owned by the root section.
+func rootNavItems() []workspaceNavItem {
+	return []workspaceNavItem{
+		{label: "Overview", route: OverviewRoute},
+		{label: "Targets (all)", route: TargetsRoute},
+		{label: "Packages", route: PackagesRoute},
+		{label: "Tasks", route: TasksRoute},
+		{label: "Toolchains", route: ToolchainsRoute},
+		{label: "Presets", route: PresetsRoute},
+		{label: "Doctor", route: DoctorRoute},
+		{label: "Settings", route: SettingsRoute},
+	}
 }
 
 // memberNavItems builds the screens inside one member section.
@@ -104,37 +112,55 @@ func (model *dashboardModel) focusWorkspaceMember(name string) {
 	model.clampWorkspaceNavCursor()
 }
 
-// toggleWorkspaceSection folds or unfolds one member section, or every member
-// section when name is empty.
+// toggleWorkspaceSection folds or unfolds one section: the root when name is
+// empty, otherwise a member.
 func (model *dashboardModel) toggleWorkspaceSection(name string) {
 	if !model.isWorkspace() {
 		return
 	}
-	if model.expanded == nil {
-		model.expanded = map[string]bool{}
-	}
-	if name != "" {
-		model.expanded[name] = !model.expanded[name]
-		model.clampWorkspaceNavCursor()
-		return
-	}
-	anyExpanded := false
-	for _, member := range model.workspaceMembers() {
-		if model.expanded[member] {
-			anyExpanded = true
-			break
+	wasExpanded := !model.rootCollapsed
+	if name == "" {
+		model.rootCollapsed = !model.rootCollapsed
+	} else {
+		if model.expanded == nil {
+			model.expanded = map[string]bool{}
 		}
+		wasExpanded = model.expanded[name]
+		model.expanded[name] = !wasExpanded
 	}
-	for _, member := range model.workspaceMembers() {
-		model.expanded[member] = !anyExpanded
+	// Keep the selection on the header when its rows fold away.
+	if wasExpanded {
+		if index := model.workspaceHeaderIndex(name); index >= 0 {
+			model.navCursor = index
+		}
 	}
 	model.clampWorkspaceNavCursor()
 }
 
-// toggleWorkspaceCollapse is the z shortcut: it folds the active member section,
-// or every member section from the root scope.
+// workspaceHeaderIndex returns the row index of a section header, where name ""
+// is the root header.
+func (model dashboardModel) workspaceHeaderIndex(name string) int {
+	for index, item := range model.workspaceNavItems() {
+		if item.header && item.member == name {
+			return index
+		}
+	}
+	return -1
+}
+
+// selectedWorkspaceSection returns the section of the current tree selection:
+// the root for the Root header and its screens, otherwise the member.
+func (model dashboardModel) selectedWorkspaceSection() string {
+	items := model.workspaceNavItems()
+	if model.navCursor >= 0 && model.navCursor < len(items) {
+		return items[model.navCursor].member
+	}
+	return model.member
+}
+
+// toggleWorkspaceCollapse is the z shortcut: it folds the selected section.
 func (model *dashboardModel) toggleWorkspaceCollapse() {
-	model.toggleWorkspaceSection(model.member)
+	model.toggleWorkspaceSection(model.selectedWorkspaceSection())
 }
 
 // toggleSelectedWorkspaceSection folds or unfolds the member header the tree
@@ -178,31 +204,48 @@ func (model *dashboardModel) activateWorkspaceNav(index int) dashboardModel {
 	return *model
 }
 
-// workspaceNavLeafIndex maps a 1-based digit to the nth visible leaf row. Section
-// headers are not numbered.
-func (model dashboardModel) workspaceNavLeafIndex(digit int) int {
+// jumpWorkspaceSectionRow selects the nth page row of the section the current
+// selection belongs to, expanding that section first when it is folded. Root
+// and every member number their own rows from 1.
+func (model *dashboardModel) jumpWorkspaceSectionRow(number int) {
+	items := model.workspaceNavItems()
+	if len(items) == 0 {
+		return
+	}
+	model.clampWorkspaceNavCursor()
+	section := items[model.navCursor].member
+	if section == "" {
+		model.rootCollapsed = false
+	} else {
+		if model.expanded == nil {
+			model.expanded = map[string]bool{}
+		}
+		model.expanded[section] = true
+	}
+	items = model.workspaceNavItems()
 	leaf := 0
-	for index, item := range model.workspaceNavItems() {
-		if item.header {
+	for index, item := range items {
+		if item.header || item.member != section {
 			continue
 		}
 		leaf++
-		if leaf == digit {
-			return index
+		if leaf == number {
+			model.openWorkspaceNavLeaf(index)
+			return
 		}
 	}
-	return -1
 }
 
-// workspaceNavLines renders the workspace tree. The root header is static; every
-// member header is a selectable row that toggles its section.
+// workspaceNavLines renders the workspace tree. Every section header is a
+// selectable row; numbering restarts at 1 inside each section.
 func (model dashboardModel) workspaceNavLines(p palette, width int) []string {
 	items := model.workspaceNavItems()
-	lines := []string{p.faint.Render("▼ Root")}
+	var lines []string
 	leaf := 0
 	for index, item := range items {
 		active := index == model.navCursor
 		if item.header {
+			leaf = 0
 			glyph := "▶"
 			if item.expanded {
 				glyph = "▼"

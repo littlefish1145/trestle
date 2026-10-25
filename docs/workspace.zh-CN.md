@@ -153,7 +153,7 @@ trestle editor-config -C examples/hello-workspace
 trestle -C examples/hello-workspace
 ```
 
-workspace 模式下侧边栏是一棵可折叠的成员树：默认只展开 `Root`，每个成员显示为 `▶ core`；选中成员标题行按 Enter（或 `z`）展开/折叠，展开后才会显示该成员的页面。
+workspace 模式下侧边栏是一棵可折叠的成员树：`Root` 与每个成员都是可折叠分组，默认只展开 `Root`。选中任意分组标题行按 Enter（或 `z`）展开/折叠。
 
 ```text
 ▼ Root
@@ -169,23 +169,30 @@ workspace 模式下侧边栏是一棵可折叠的成员树：默认只展开 `Ro
 ▶ cli
 ```
 
-↑↓ 在行间移动：落到页面行会立即切换页面，落到成员标题行只移动选择（页面不变），Enter 展开/折叠该成员；数字键按可见页面行顺序跳转（标题行不编号）。列表超出一屏时会自动滚动，保持当前选择可见。`↑↓` 循环，`z` 折叠当前成员（在 Root 作用域折叠/展开全部成员），`w` 输入成员名快速切换并展开该成员。
+选择与编号：
 
-展开 `core` 后：
+- 编号在**每个分组内从 1 开始**（`1`–`9`，第 10 行用 `0`，更多行显示 `·` 并可用 ↑↓ 选择）。
+- 数字键作用于**当前选择所在的分组**：焦点在 Root 的任意行时 `2` 打开 Root 的 Targets (all)；焦点在 `core` 标题或其页面时 `1` 打开 core 的 Targets、`2` 打开 core 的 Packages。选中的分组若处于折叠状态，按数字会自动展开。
+- ↑↓ 在行间移动：落到页面行会立即切换页面，落到分组标题行只移动选择（页面不变），Enter 展开/折叠。
+- 列表超出一屏时会自动滚动，保持当前选择可见；`w` 输入成员名会切换并展开该成员。
+
+展开 `core` 后，编号重新从 1 开始：
 
 ```text
 ▼ Root
   1 Overview
-  2 Targets (all)
   ...
-  9 Targets (2)      ← core
-  0 Packages (2)
-  · Tests (1)
-  · Tasks
-  · Presets
-  · Release
-  · Doctor
-  · Settings
+  8 Settings
+▶ core  （点击/Enter 展开后）
+▼ core
+  1 Targets (2)
+  2 Packages (2)
+  3 Tests (1)
+  4 Tasks
+  5 Presets
+  6 Release
+  7 Doctor
+  8 Settings
 ▶ cli
 ```
 

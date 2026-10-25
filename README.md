@@ -301,7 +301,7 @@ trestle doctor                # 逐个成员检查环境
 trestle editor-config         # 生成含成员构建/运行任务的 VS Code 配置
 ```
 
-TUI 在 workspace 模式下把侧边栏变成可折叠的成员树：默认只展开 `Root`，选中成员标题按 Enter（或 `z`）展开/折叠。`Root` 分组承载 workspace 级页面（Overview、聚合 Targets、共享 Packages、Tasks、Toolchains、Presets、Doctor、Settings），每个成员分组承载自己的 Targets / Packages / Tests / Tasks / Presets / Release / Doctor / Settings。↑↓ 在行间移动（页面行立即切换、标题行仅移动选择）、数字键跳转、列表过长自动滚动保持选择可见、`w` 切换成员；Root Targets 聚合所有成员目标（`member:target`）并支持 `/` 搜索（单项目 Targets 页同样支持）。成员页的修改写入该成员 `trestle.toml`，Root 的包自动被所有成员继承并标注 `shared from root`。日志行带 `[member]` 前缀，标题栏显示 `ws:` 与 `pkg:` 上下文。
+TUI 在 workspace 模式下把侧边栏变成可折叠的成员树：`Root` 与每个成员都是可折叠分组，默认只展开 `Root`，选中任意分组标题按 Enter（或 `z`）展开/折叠。`Root` 分组承载 workspace 级页面（Overview、聚合 Targets、共享 Packages、Tasks、Toolchains、Presets、Doctor、Settings），每个成员分组承载自己的 Targets / Packages / Tests / Tasks / Presets / Release / Doctor / Settings。编号在每个分组内从 1 开始，数字键作用于当前选择所在分组的分页；↑↓ 在行间移动（页面行立即切换、标题行仅移动选择）、列表过长自动滚动保持选择可见、`w` 切换成员。Root Targets 聚合所有成员目标（`member:target`）并支持 `/` 搜索（单项目 Targets 页同样支持）。成员页的修改写入该成员 `trestle.toml`，Root 的包自动被所有成员继承并标注 `shared from root`。日志行带 `[member]` 前缀，标题栏显示 `ws:` 与 `pkg:` 上下文。
 
 ## 项目结构
 
