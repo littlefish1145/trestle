@@ -29,7 +29,7 @@ Trestle brings compiler discovery, dependency resolution, project import, Ninja 
 - Test selection by job, group, owning source file, or the complete suite.
 - Release workflows with built-in or custom optimization presets and ZIP packaging of outputs and runtime dependencies.
 - `compile_commands.json` for VS Code/clangd and `.trestle/commands.json` for editor automation.
-- VS Code tasks: `trestle init` writes `.vscode/tasks.json` with build, test, release, target-picker, and per-executable run tasks; `trestle editor-config` refreshes them, merging instead of clobbering your own tasks.
+- VS Code tasks: `trestle init` asks whether to write `.vscode/tasks.json` with build, test, release, target-picker, and per-executable run tasks; `trestle editor-config` refreshes them, merging instead of clobbering your own tasks.
 - Diagnostics grouped by target and compile/link stage, followed by succeeded, failed, and skipped target summaries.
 
 ## Requirements
@@ -79,11 +79,12 @@ go vet ./...
 Start with [the complete C++ + fmt tutorial](docs/tutorial.en.md) for Windows, Linux, macOS and WSL, including logs and recovery. A runnable project is in [examples/hello-fmt](examples/hello-fmt/). For multiple projects, see the runnable [examples/hello-workspace](examples/hello-workspace/) and the [workspace guide](docs/workspace.en.md).
 
 ```powershell
-trestle init -C hello -name hello
+trestle init -C hello -name hello   # interactive wizard: toolchains / workspace / import or scan / tasks.json
 cd hello
-trestle configure -toolchain clang-cl
 trestle build app
 ```
+
+Init writes a CUDA or Vulkan example for the toolchains you enable and builds it once to prove it compiles.
 
 Run `trestle` in a project directory to open the TUI, or use:
 

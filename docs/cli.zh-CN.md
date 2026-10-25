@@ -49,7 +49,16 @@ trestle tui [-C dir]
 trestle init [-C dir] [-name project]
 ```
 
-创建一个最小可用的项目（`trestle.toml` 与示例源文件）。`-C` 指定创建目录，`-name` 指定项目名。若 `.vscode/tasks.json` 尚不存在，init 还会写入 VS Code 的构建、测试、发布和运行任务；已存在的文件不会被改动。
+创建一个最小可用的项目（`trestle.toml` 与示例源文件）。`-C` 指定创建目录，`-name` 指定项目名。
+
+该命令是交互式的，会依次询问：
+
+- **工具链**：是否启用 CUDA / Vulkan（可多选）。启用 CUDA 会生成 `src/cuda/vector_add.cu` 向量加法示例并注册 `cuda_example` 静态库目标（示例只需 nvcc 即可编译；若要在可执行文件中启动 kernel，请自行在目标的 `libraries` 中加入 `cudart`）；检测到 Vulkan SDK 时生成 `shaders/triangle.vert`、`shaders/triangle.frag` 并注册对应的 shader 目标。
+- **Workspace 模式**：选择后根目录只保留 `[workspace]`，并自动创建带 `src/main.cpp` 的 `app/` 成员。
+- **导入或扫描**：目录中已有 `xmake.lua` / `CMakeLists.txt` 时优先询问是否导入（导入优先于扫描）；否则在已有文件的目录中询问是否扫描源文件以生成目标。
+- **tasks.json**：是否生成 `.vscode/tasks.json`；已存在的文件不会被改动。
+
+生成完成后会构建一次示例以确认可以编译；构建失败只给出警告，不会否定已经写入的配置。
 
 ## `trestle configure`
 

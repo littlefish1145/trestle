@@ -80,7 +80,7 @@ func run(command string, args []string) (result error) {
 		return err
 	}
 	if command == "init" {
-		return app.Init(filepath.Clean(flags.directory), flags.name)
+		return app.Init(filepath.Clean(flags.directory), flags.name, os.Stdin, os.Stdout)
 	}
 	if err := os.Chdir(flags.directory); err != nil {
 		return err

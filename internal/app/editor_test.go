@@ -41,7 +41,7 @@ func findEditorTask(t *testing.T, document vscode.Document, label string) vscode
 
 func TestInitGeneratesEditorConfig(t *testing.T) {
 	root := t.TempDir()
-	if err := Init(root, "hello"); err != nil {
+	if err := Init(root, "hello", nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	document := readEditorConfig(t, root)
@@ -73,7 +73,7 @@ func TestInitLeavesAnExistingEditorConfigAlone(t *testing.T) {
 	if err := os.WriteFile(path, user, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := Init(root, "hello"); err != nil {
+	if err := Init(root, "hello", nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	data, err := os.ReadFile(path)
@@ -87,7 +87,7 @@ func TestInitLeavesAnExistingEditorConfigAlone(t *testing.T) {
 
 func TestEditorConfigCreatesRefusesMergesAndReplaces(t *testing.T) {
 	root := t.TempDir()
-	if err := Init(root, "hello"); err != nil {
+	if err := Init(root, "hello", nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	tasksPath := filepath.Join(root, ".vscode", "tasks.json")

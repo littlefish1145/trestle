@@ -29,7 +29,7 @@ Trestle 把编译器发现、依赖解析、项目导入、Ninja 构建、测试
 - 测试支持单个 job、分组、源文件归属和全部运行。
 - Release 页面/命令支持内置或自定义优化预设，并将目标及运行时依赖打包为 ZIP。
 - 为 VS Code/clangd 生成 `compile_commands.json`，并生成 `.trestle/commands.json`。
-- VS Code 任务：`trestle init` 自动生成含构建、测试、发布、目标选择和逐可执行目标运行任务的 `.vscode/tasks.json`；`trestle editor-config` 可刷新配置，合并时不会覆盖你自定义的任务。
+- VS Code 任务：`trestle init` 会询问是否生成含构建、测试、发布、目标选择和逐可执行目标运行任务的 `.vscode/tasks.json`；`trestle editor-config` 可刷新配置，合并时不会覆盖你自定义的任务。
 - 构建诊断按目标和编译/链接阶段聚合，汇总成功、失败和跳过的目标。
 
 ## 环境要求
@@ -79,11 +79,12 @@ go vet ./...
 首次使用建议阅读 [从零构建带 fmt 依赖的 C++ 项目](docs/tutorial.zh-CN.md)，涵盖 Windows、Linux、macOS、WSL、完整日志及故障恢复；可运行示例见 [examples/hello-fmt](examples/hello-fmt/)。多项目 workspace 的完整示例见 [examples/hello-workspace](examples/hello-workspace/)，指南见 [Workspace 文档](docs/workspace.zh-CN.md)。
 
 ```powershell
-trestle init -C hello -name hello
+trestle init -C hello -name hello   # 交互式向导：工具链 / workspace / 导入或扫描 / tasks.json
 cd hello
-trestle configure -toolchain clang-cl
 trestle build app
 ```
+
+init 会按所选工具链生成 CUDA 或 Vulkan 示例，并在结束时构建一次以确认示例可以编译。
 
 在项目目录直接运行 `trestle` 会打开 TUI；也可使用：
 

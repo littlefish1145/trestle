@@ -107,10 +107,15 @@ func TestBuildAndVcpkgConflictAcrossProcesses(t *testing.T) {
 func TestPackageFailurePreservesPreviousZIP(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, config.DefaultFileName)
-	if err := Init(root, "demo"); err != nil {
+	if err := Init(root, "demo", nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	selectRecoveryCompiler(t, path)
+	// Init verifies its generated example by building it; start these
+	// failure-injection tests from a pristine build directory again.
+	if err := os.RemoveAll(filepath.Join(root, "build")); err != nil {
+		t.Fatal(err)
+	}
 	old := []byte("previous archive")
 	output := filepath.Join(root, "dist", "demo.zip")
 	if err := fsx.AtomicWrite(output, old); err != nil {
@@ -132,10 +137,15 @@ func TestPackageFailurePreservesPreviousZIP(t *testing.T) {
 func TestGenerationPublishFailureCanRetry(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, config.DefaultFileName)
-	if err := Init(root, "retry"); err != nil {
+	if err := Init(root, "retry", nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	selectRecoveryCompiler(t, path)
+	// Init verifies its generated example by building it; start from a
+	// pristine build directory so the manifest path can be sabotaged.
+	if err := os.RemoveAll(filepath.Join(root, "build")); err != nil {
+		t.Fatal(err)
+	}
 	dir := filepath.Join(root, "build", "debug")
 	if err := os.MkdirAll(filepath.Join(dir, "build.ninja"), 0700); err != nil {
 		t.Fatal(err)

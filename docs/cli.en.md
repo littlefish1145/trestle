@@ -49,7 +49,16 @@ Open the Project Console. With no subcommand, `trestle` discovers the project co
 trestle init [-C dir] [-name project]
 ```
 
-Create a minimal working project (`trestle.toml` plus a sample source file). `-C` selects the directory to create, `-name` sets the project name. When `.vscode/tasks.json` does not exist yet, init also writes VS Code build, test, release, and run tasks; an existing file is left untouched.
+Create a minimal working project (`trestle.toml` plus sample sources). `-C` selects the directory to create, `-name` sets the project name.
+
+The command is interactive and asks, in order:
+
+- **Toolchains**: whether to enable CUDA and/or Vulkan. Enabling CUDA writes `src/cuda/vector_add.cu` and registers a `cuda_example` static-library target (nvcc alone compiles it; add `cudart` to a target's `libraries` when an executable must launch the kernel); a detected Vulkan SDK writes `shaders/triangle.vert` and `shaders/triangle.frag` and registers the matching shader targets.
+- **Workspace mode**: the root keeps only `[workspace]` and an `app/` member with its own `src/main.cpp` is created.
+- **Import or scan**: a `xmake.lua` / `CMakeLists.txt` in the directory is offered for import first (import beats scanning); otherwise a directory with existing files is offered a source scan.
+- **tasks.json**: whether to write `.vscode/tasks.json`; an existing file is left untouched.
+
+The generated example is built once to prove it compiles; a failed build is reported as a warning and does not discard the written configuration.
 
 ## `trestle configure`
 

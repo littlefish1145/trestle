@@ -37,7 +37,6 @@ import (
 	"trestle/internal/state"
 	"trestle/internal/toolchain"
 	"trestle/internal/toolchain/cuda"
-	"trestle/internal/vscode"
 )
 
 // BuildResult reports what a generation run produced: the manifest path, the
@@ -50,47 +49,6 @@ type BuildResult struct {
 	Outputs        map[model.TargetID]string
 	RuntimeOutputs map[model.TargetID][]string
 	Environment    map[string]string
-}
-
-// Init creates a new project at root, writing a default trestle.toml, a starter
-// src/main.cpp, a .gitignore, and a VS Code .vscode/tasks.json when they are
-// missing. Existing files are never overwritten.
-func Init(root, name string) error {
-	if strings.TrimSpace(name) == "" {
-		absolute, err := filepath.Abs(root)
-		if err != nil {
-			return err
-		}
-		name = filepath.Base(absolute)
-	}
-	path := filepath.Join(root, config.DefaultFileName)
-	if _, err := os.Stat(path); err == nil {
-		return fmt.Errorf("E_CONFIG_EXISTS: %s already exists", path)
-	} else if !os.IsNotExist(err) {
-		return err
-	}
-	if err := os.MkdirAll(filepath.Join(root, "src"), 0o755); err != nil {
-		return err
-	}
-	cfg := config.Default(name)
-	if err := config.SaveExpected(path, cfg, "missing"); err != nil {
-		return err
-	}
-	main := filepath.Join(root, "src", "main.cpp")
-	if _, err := os.Stat(main); os.IsNotExist(err) {
-		if err := os.WriteFile(main, []byte("int main() { return 0; }\n"), 0o644); err != nil {
-			return err
-		}
-	}
-	gitignore := filepath.Join(root, ".gitignore")
-	if _, err := os.Stat(gitignore); os.IsNotExist(err) {
-		if err := os.WriteFile(gitignore, []byte("build/\ndist/\n.trestle/\n"), 0o644); err != nil {
-			return err
-		}
-	}
-	document := vscode.Generate(vscode.FromConfig(root, cfg))
-	_, err := vscode.Write(filepath.Join(root, ".vscode", "tasks.json"), document, vscode.ModeCreate)
-	return err
 }
 
 // ConfigureOptions carries the settings resolved from the command-line flags and

@@ -45,7 +45,7 @@ func TestRealNativeCPPBuild(t *testing.T) {
 		t.Skip("set TRESTLE_TEST_NATIVE=1 to require an actual native C++ build and run")
 	}
 	root := t.TempDir()
-	if err := Init(root, "hello-native"); err != nil {
+	if err := Init(root, "hello-native", nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	path := filepath.Join(root, config.DefaultFileName)
@@ -143,7 +143,7 @@ func TestFmtTutorial(t *testing.T) {
 	}
 	root := t.TempDir()
 	path := filepath.Join(root, config.DefaultFileName)
-	if err := Init(root, "hello-fmt"); err != nil {
+	if err := Init(root, "hello-fmt", nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	data, err := os.ReadFile(filepath.Join("..", "..", "examples", "hello-fmt", "src", "main.cpp"))
@@ -214,7 +214,7 @@ func TestRealWSLBuild(t *testing.T) {
 	}
 	root := t.TempDir()
 	path := filepath.Join(root, config.DefaultFileName)
-	if err := Init(root, "hello-wsl"); err != nil {
+	if err := Init(root, "hello-wsl", nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	cfg, err := config.Load(path)
