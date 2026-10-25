@@ -266,8 +266,9 @@ type dashboardModel struct {
 	workflowLog        []string
 	workflowErrors     []string
 	member             string
+	navCursor          int
 	targetQuery        string
-	collapsed          map[string]bool
+	expanded           map[string]bool
 	testFileMode       bool
 	rulesView          bool
 	pendingTask        string
@@ -1017,15 +1018,15 @@ func (model *dashboardModel) move(delta int) {
 			if len(items) == 0 {
 				return
 			}
-			current := model.workspaceNavIndex()
-			if current < 0 {
-				current = 0
-			}
-			index := (current + delta) % len(items)
+			model.clampWorkspaceNavCursor()
+			index := (model.navCursor + delta) % len(items)
 			if index < 0 {
 				index += len(items)
 			}
-			*model = model.activateWorkspaceNav(index)
+			model.navCursor = index
+			if !items[index].header {
+				model.openWorkspaceNavLeaf(index)
+			}
 			return
 		}
 		index := routeIndex(model.route) + delta
@@ -1307,7 +1308,7 @@ func (model dashboardModel) activityTone() string {
 func (model dashboardModel) sidebar(p palette, width, height int) string {
 	if model.isWorkspace() {
 		lines := append([]string{p.faint.Render(" WORKSPACE"), ""}, model.workspaceNavLines(p, width)...)
-		lines = append(lines, "", p.faint.Render(" tab  switch focus"), p.faint.Render(" ↑↓   navigate"), p.faint.Render(" z    collapse  w  member"))
+		lines = append(lines, "", p.faint.Render(" tab  switch focus"), p.faint.Render(" ↑↓   navigate"), p.faint.Render(" ↵    open / fold"), p.faint.Render(" z    fold all  w  member"))
 		return lipgloss.NewStyle().Border(p.border).BorderForeground(lipgloss.Color(p.borderMuted)).Width(width - 2).Height(max(1, height-2)).Render(strings.Join(lines, "\n"))
 	}
 	lines := []string{p.faint.Render(" WORKSPACE"), ""}

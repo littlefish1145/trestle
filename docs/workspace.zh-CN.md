@@ -153,7 +153,7 @@ trestle editor-config -C examples/hello-workspace
 trestle -C examples/hello-workspace
 ```
 
-workspace 模式下侧边栏是一棵可折叠的成员树：Root 承载 workspace 级页面，每个成员承载自己的页面。
+workspace 模式下侧边栏是一棵可折叠的成员树：默认只展开 `Root`，每个成员显示为 `▶ core`；选中成员标题行按 Enter（或 `z`）展开/折叠，展开后才会显示该成员的页面。
 
 ```text
 ▼ Root
@@ -165,8 +165,20 @@ workspace 模式下侧边栏是一棵可折叠的成员树：Root 承载 workspa
   6 Presets
   7 Doctor
   8 Settings
-▼ core
-  9 Targets (2)
+▶ core
+▶ cli
+```
+
+↑↓ 在行间移动：落到页面行会立即切换页面，落到成员标题行只移动选择（页面不变），Enter 展开/折叠该成员；数字键按可见页面行顺序跳转（标题行不编号）。列表超出一屏时会自动滚动，保持当前选择可见。`↑↓` 循环，`z` 折叠当前成员（在 Root 作用域折叠/展开全部成员），`w` 输入成员名快速切换并展开该成员。
+
+展开 `core` 后：
+
+```text
+▼ Root
+  1 Overview
+  2 Targets (all)
+  ...
+  9 Targets (2)      ← core
   0 Packages (2)
   · Tests (1)
   · Tasks
@@ -174,12 +186,8 @@ workspace 模式下侧边栏是一棵可折叠的成员树：Root 承载 workspa
   · Release
   · Doctor
   · Settings
-▼ cli
-  · Targets (1)
-  ...
+▶ cli
 ```
-
-↑↓ 立即切换页面（循环），数字键直接跳转，Enter 进入内容区，`z` 折叠当前成员分组（在 Root 作用域按 `z` 折叠/展开全部成员），`w` 输入成员名快速切换。超过 9 行后行号为 `·`，用 ↑↓ + Enter。
 
 Root 与成员的分工：
 

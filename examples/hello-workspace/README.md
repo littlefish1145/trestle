@@ -60,7 +60,7 @@ trestle doctor -C examples/hello-workspace          # 逐成员检查
 trestle -C examples/hello-workspace
 ```
 
-侧边栏在 workspace 模式下显示可折叠的成员树：
+侧边栏在 workspace 模式下显示可折叠的成员树，默认只展开 `Root`：
 
 ```text
 ▼ Root
@@ -72,21 +72,13 @@ trestle -C examples/hello-workspace
   6 Presets
   7 Doctor
   8 Settings
-▼ core
-  9 Targets (2)
-  0 Packages (2)
-  · Tests (1)
-  · Tasks
-  · Presets
-  · Release
-  · Doctor
-  · Settings
-▼ cli
-  · Targets (1)
-  ...
+▶ core
+▶ cli
 ```
 
-Root Targets 聚合所有成员目标（`core:greeter`、`cli:hello`），按 `/` 可按成员名或目标名过滤；选中后 Enter 只构建该成员的该目标。↑↓ 立即切换页面、Enter 进入内容区、`z` 折叠分组、`w` 切换成员。成员页的修改写入该成员 `trestle.toml`；Root Packages 的包会被所有成员继承，成员页标为 `shared from root`。日志行带 `[core]` / `[cli]` 前缀。
+选中 `core` / `cli` 标题行按 Enter（或 `z`）展开，展开后才会出现该成员的 Targets / Packages / Tests / … 页面。↑↓ 落到页面行会立即切换页面，落到标题行只移动选择；列表过长会自动滚动保持选择可见；`w` 输入成员名快速切换并展开。
+
+Root Targets 聚合所有成员目标（`core:greeter`、`cli:hello`），按 `/` 可按成员名或目标名过滤；选中后 Enter 只构建该成员的该目标。成员页的修改写入该成员 `trestle.toml`；Root Packages 的包会被所有成员继承，成员页标为 `shared from root`。日志行带 `[core]` / `[cli]` 前缀。
 
 ## 需要自定义编译器时
 

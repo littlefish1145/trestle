@@ -153,7 +153,7 @@ After a build, all member compile commands are merged into:
 trestle -C examples/hello-workspace
 ```
 
-In a workspace the sidebar is a collapsible member tree: the Root section holds workspace-wide screens, and each member holds its own.
+In a workspace the sidebar is a collapsible member tree: only `Root` starts expanded, and each member shows as `▶ core`. Select a member header and press Enter (or `z`) to expand or fold it; its screens appear once expanded.
 
 ```text
 ▼ Root
@@ -165,8 +165,20 @@ In a workspace the sidebar is a collapsible member tree: the Root section holds 
   6 Presets
   7 Doctor
   8 Settings
-▼ core
-  9 Targets (2)
+▶ core
+▶ cli
+```
+
+↑↓ moves between rows: screen rows switch the page immediately, while member headers only move the selection (the page stays) until Enter folds or unfolds them. Digits follow the visible screen rows (headers are not numbered). Long lists scroll to keep the selection visible. ↑↓ wraps, `z` folds the active member (or every member from the root scope), and `w` prompts for a member name, switches to it and expands it.
+
+With `core` expanded:
+
+```text
+▼ Root
+  1 Overview
+  2 Targets (all)
+  ...
+  9 Targets (2)      ← core
   0 Packages (2)
   · Tests (1)
   · Tasks
@@ -174,12 +186,8 @@ In a workspace the sidebar is a collapsible member tree: the Root section holds 
   · Release
   · Doctor
   · Settings
-▼ cli
-  · Targets (1)
-  ...
+▶ cli
 ```
-
-↑↓ switches screens immediately (wrapping), digits jump directly, Enter focuses the content pane, `z` folds the active member section (from the root scope it folds or unfolds every member), and `w` opens a member prompt. Rows past the tenth use `·` as their marker; use ↑↓ + Enter for those.
 
 Root and member responsibilities:
 

@@ -143,7 +143,9 @@ func (model dashboardModel) applyProbe(probe probeMessage) (tea.Model, tea.Cmd) 
 	model.projectFingerprint = probe.Fingerprint
 	if model.member != "" && !containsString(model.workspaceMembers(), model.member) {
 		model.member = ""
+		model.navCursor = 0
 	}
+	model.clampWorkspaceNavCursor()
 	model.applyScope()
 	if probe.Error != nil {
 		model.lastError = probe.Error

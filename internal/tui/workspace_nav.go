@@ -10,32 +10,24 @@ import (
 	"trestle/internal/config"
 )
 
-// workspaceNavItem is one selectable row in the workspace tree: a root-level
-// screen or a member's screen.
+// workspaceNavItem is one row in the workspace tree: a member section header, a
+// root-level screen, or a member's screen.
 type workspaceNavItem struct {
-	label  string
-	route  Route
-	member string
+	label    string
+	route    Route
+	member   string
+	header   bool
+	expanded bool
 }
 
-// workspaceNavSection is one collapsible group in the workspace tree: the root
-// section or one member.
-type workspaceNavSection struct {
-	name      string // "" for the root section
-	items     []workspaceNavItem
-	collapsed bool
-}
-
-// workspaceNavSections builds the tree groups. The root group holds the
-// workspace-wide screens (aggregate targets, shared packages, toolchains,
-// presets, tasks, doctor, settings); every member group holds the screens that
-// edit that member's own trestle.toml. Collapsed member groups are represented
-// by their header only.
-func (model dashboardModel) workspaceNavSections() []workspaceNavSection {
+// workspaceNavItems flattens the visible tree: the root screens first, then each
+// member header followed by its screens when expanded. Member sections start
+// collapsed, so the root is the only expanded group on a fresh console.
+func (model dashboardModel) workspaceNavItems() []workspaceNavItem {
 	if !model.isWorkspace() {
 		return nil
 	}
-	sections := []workspaceNavSection{{items: []workspaceNavItem{
+	items := []workspaceNavItem{
 		{label: "Overview", route: OverviewRoute},
 		{label: "Targets (all)", route: TargetsRoute},
 		{label: "Packages", route: PackagesRoute},
@@ -44,159 +36,209 @@ func (model dashboardModel) workspaceNavSections() []workspaceNavSection {
 		{label: "Presets", route: PresetsRoute},
 		{label: "Doctor", route: DoctorRoute},
 		{label: "Settings", route: SettingsRoute},
-	}}}
+	}
 	for _, name := range model.workspaceMembers() {
-		section := workspaceNavSection{name: name, collapsed: model.collapsed[name]}
-		if section.collapsed {
-			sections = append(sections, section)
+		expanded := model.expanded[name]
+		items = append(items, workspaceNavItem{label: name, member: name, header: true, expanded: expanded})
+		if !expanded {
 			continue
 		}
-		member, ok := model.probe.MemberConfigs[name]
-		targets, tests, packages := 0, 0, 0
-		if ok {
-			targets = len(member.Targets)
-			packages = len(member.Packages)
-			for _, target := range member.Targets {
-				if target.Type == "test" {
-					tests++
-				}
-			}
-		}
-		section.items = []workspaceNavItem{
-			{label: fmt.Sprintf("Targets (%d)", targets), route: TargetsRoute, member: name},
-			{label: fmt.Sprintf("Packages (%d)", packages), route: PackagesRoute, member: name},
-			{label: fmt.Sprintf("Tests (%d)", tests), route: TestsRoute, member: name},
-			{label: "Tasks", route: TasksRoute, member: name},
-			{label: "Presets", route: PresetsRoute, member: name},
-			{label: "Release", route: ReleaseRoute, member: name},
-			{label: "Doctor", route: DoctorRoute, member: name},
-			{label: "Settings", route: SettingsRoute, member: name},
-		}
-		sections = append(sections, section)
-	}
-	return sections
-}
-
-// workspaceNavItems flattens the visible tree rows.
-func (model dashboardModel) workspaceNavItems() []workspaceNavItem {
-	var items []workspaceNavItem
-	for _, section := range model.workspaceNavSections() {
-		items = append(items, section.items...)
+		items = append(items, model.memberNavItems(name)...)
 	}
 	return items
 }
 
-// workspaceNavIndex returns the leaf row matching the active screen, or -1 when
-// that row is hidden inside a collapsed member section.
-func (model dashboardModel) workspaceNavIndex() int {
-	items := model.workspaceNavItems()
-	for index, item := range items {
-		if item.route == model.route && item.member == model.member {
-			return index
-		}
-	}
-	if model.route == BuildRoute {
-		// Build is reached with `b` and has no tree row of its own; point the
-		// highlight at the scope's Targets row so the tree stays in sync.
-		for index, item := range items {
-			if item.route == TargetsRoute && item.member == model.member {
-				return index
+// memberNavItems builds the screens inside one member section.
+func (model dashboardModel) memberNavItems(name string) []workspaceNavItem {
+	member, ok := model.probe.MemberConfigs[name]
+	targets, tests, packages := 0, 0, 0
+	if ok {
+		targets = len(member.Targets)
+		packages = len(member.Packages)
+		for _, target := range member.Targets {
+			if target.Type == "test" {
+				tests++
 			}
 		}
 	}
-	if model.member != "" && model.collapsed[model.member] {
-		// The active member's rows are folded away; its header carries the
-		// highlight instead.
-		return -1
+	return []workspaceNavItem{
+		{label: fmt.Sprintf("Targets (%d)", targets), route: TargetsRoute, member: name},
+		{label: fmt.Sprintf("Packages (%d)", packages), route: PackagesRoute, member: name},
+		{label: fmt.Sprintf("Tests (%d)", tests), route: TestsRoute, member: name},
+		{label: "Tasks", route: TasksRoute, member: name},
+		{label: "Presets", route: PresetsRoute, member: name},
+		{label: "Release", route: ReleaseRoute, member: name},
+		{label: "Doctor", route: DoctorRoute, member: name},
+		{label: "Settings", route: SettingsRoute, member: name},
 	}
-	if len(items) > 0 {
-		return 0
-	}
-	return -1
 }
 
-// toggleWorkspaceCollapse folds the active member section, or every member
-// section when the root scope is active.
-func (model *dashboardModel) toggleWorkspaceCollapse() {
+// clampWorkspaceNavCursor keeps the tree selection inside the visible rows.
+func (model *dashboardModel) clampWorkspaceNavCursor() {
+	items := model.workspaceNavItems()
+	if len(items) == 0 {
+		model.navCursor = 0
+		return
+	}
+	model.navCursor = min(max(model.navCursor, 0), len(items)-1)
+}
+
+// focusWorkspaceMember moves the tree selection to a member's first screen,
+// expanding the section so its screens are reachable.
+func (model *dashboardModel) focusWorkspaceMember(name string) {
+	if name == "" {
+		model.navCursor = 0
+		return
+	}
+	if model.expanded == nil {
+		model.expanded = map[string]bool{}
+	}
+	model.expanded[name] = true
+	items := model.workspaceNavItems()
+	for index, item := range items {
+		if !item.header && item.member == name {
+			model.navCursor = index
+			return
+		}
+	}
+	model.clampWorkspaceNavCursor()
+}
+
+// toggleWorkspaceSection folds or unfolds one member section, or every member
+// section when name is empty.
+func (model *dashboardModel) toggleWorkspaceSection(name string) {
 	if !model.isWorkspace() {
 		return
 	}
-	if model.collapsed == nil {
-		model.collapsed = map[string]bool{}
+	if model.expanded == nil {
+		model.expanded = map[string]bool{}
 	}
-	if model.member != "" {
-		model.collapsed[model.member] = !model.collapsed[model.member]
+	if name != "" {
+		model.expanded[name] = !model.expanded[name]
+		model.clampWorkspaceNavCursor()
 		return
 	}
 	anyExpanded := false
-	for _, name := range model.workspaceMembers() {
-		if !model.collapsed[name] {
+	for _, member := range model.workspaceMembers() {
+		if model.expanded[member] {
 			anyExpanded = true
 			break
 		}
 	}
-	for _, name := range model.workspaceMembers() {
-		model.collapsed[name] = anyExpanded
+	for _, member := range model.workspaceMembers() {
+		model.expanded[member] = !anyExpanded
 	}
+	model.clampWorkspaceNavCursor()
 }
 
-// activateWorkspaceNav opens the tree row at index, carrying the row's member
-// scope into the host so mutations write the right trestle.toml.
+// toggleWorkspaceCollapse is the z shortcut: it folds the active member section,
+// or every member section from the root scope.
+func (model *dashboardModel) toggleWorkspaceCollapse() {
+	model.toggleWorkspaceSection(model.member)
+}
+
+// toggleSelectedWorkspaceSection folds or unfolds the member header the tree
+// selection is on.
+func (model *dashboardModel) toggleSelectedWorkspaceSection() bool {
+	items := model.workspaceNavItems()
+	if model.navCursor < 0 || model.navCursor >= len(items) || !items[model.navCursor].header {
+		return false
+	}
+	model.toggleWorkspaceSection(items[model.navCursor].member)
+	return true
+}
+
+// openWorkspaceNavLeaf switches the console to the selected screen, carrying the
+// row's member scope into the host so mutations write the right trestle.toml.
+func (model *dashboardModel) openWorkspaceNavLeaf(index int) {
+	items := model.workspaceNavItems()
+	if index < 0 || index >= len(items) || items[index].header {
+		return
+	}
+	item := items[index]
+	model.navCursor = index
+	model.member = item.member
+	model.applyScope()
+	model.selectRoute(routeIndex(item.route))
+}
+
+// activateWorkspaceNav handles a leaf activation by index (digits): headers are
+// toggled instead of opened.
 func (model *dashboardModel) activateWorkspaceNav(index int) dashboardModel {
 	items := model.workspaceNavItems()
 	if index < 0 || index >= len(items) {
 		return *model
 	}
-	item := items[index]
-	model.member = item.member
-	model.applyScope()
-	model.selectRoute(routeIndex(item.route))
+	if items[index].header {
+		model.navCursor = index
+		model.toggleWorkspaceSection(items[index].member)
+		return *model
+	}
+	model.openWorkspaceNavLeaf(index)
 	return *model
 }
 
-// workspaceNavLines renders the workspace tree section by section. A collapsed
-// member keeps its header visible; when that member is the active scope the
-// header carries the selection highlight.
+// workspaceNavLeafIndex maps a 1-based digit to the nth visible leaf row. Section
+// headers are not numbered.
+func (model dashboardModel) workspaceNavLeafIndex(digit int) int {
+	leaf := 0
+	for index, item := range model.workspaceNavItems() {
+		if item.header {
+			continue
+		}
+		leaf++
+		if leaf == digit {
+			return index
+		}
+	}
+	return -1
+}
+
+// workspaceNavLines renders the workspace tree. The root header is static; every
+// member header is a selectable row that toggles its section.
 func (model dashboardModel) workspaceNavLines(p palette, width int) []string {
-	active := model.workspaceNavIndex()
-	var lines []string
-	index := 0
-	for _, section := range model.workspaceNavSections() {
-		name := section.name
-		if name == "" {
-			name = "Root"
+	items := model.workspaceNavItems()
+	lines := []string{p.faint.Render("▼ Root")}
+	leaf := 0
+	for index, item := range items {
+		active := index == model.navCursor
+		if item.header {
+			glyph := "▶"
+			if item.expanded {
+				glyph = "▼"
+			}
+			prefix := "   "
+			if active {
+				prefix = " ▸ "
+			}
+			label := prefix + glyph + " " + item.label
+			if active {
+				lines = append(lines, p.selected.Copy().Width(max(1, width-4)).Render(label))
+			} else {
+				lines = append(lines, p.faint.Render(label))
+			}
+			continue
 		}
-		glyph := "▼"
-		if section.collapsed {
-			glyph = "▶"
-		}
-		header := glyph + " " + name
-		if section.collapsed && section.name != "" && section.name == model.member {
-			lines = append(lines, p.selected.Copy().Width(max(1, width-4)).Render(" "+header))
-		} else {
-			lines = append(lines, p.faint.Render(header))
-		}
-		for _, item := range section.items {
-			lines = append(lines, model.workspaceNavRow(p, width, index, item, index == active))
-			index++
-		}
+		leaf++
+		lines = append(lines, model.workspaceNavRow(p, width, leaf, item, active))
 	}
 	return lines
 }
 
-// workspaceNavRow renders one numbered tree row, highlighting the active screen.
-func (model dashboardModel) workspaceNavRow(p palette, width, index int, item workspaceNavItem, active bool) string {
-	number := "·"
-	if index < 9 {
-		number = fmt.Sprint(index + 1)
-	} else if index == 9 {
-		number = "0"
+// workspaceNavRow renders one numbered tree row, highlighting the active row.
+// number is the leaf's 1-based ordinal, so digits map to it directly.
+func (model dashboardModel) workspaceNavRow(p palette, width, number int, item workspaceNavItem, active bool) string {
+	key := "·"
+	if number < 10 {
+		key = fmt.Sprint(number)
+	} else if number == 10 {
+		key = "0"
 	}
 	marker := "   "
 	if active {
 		marker = " ▸ "
 	}
-	label := ansi.Truncate(marker+number+" "+item.label, width-4, "…")
+	label := ansi.Truncate(marker+key+" "+item.label, width-4, "…")
 	if active {
 		return p.selected.Copy().Width(max(1, width-4)).Render(label)
 	}

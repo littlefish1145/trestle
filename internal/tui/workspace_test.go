@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -42,17 +43,40 @@ func workspaceConsole(t *testing.T) (dashboardModel, *callJournal) {
 	return model, journal
 }
 
-func TestWorkspaceTreeRendersRootAndMemberScreens(t *testing.T) {
+// selectWorkspaceHeader selects a member header and presses Enter, toggling the
+// section. It returns the updated model with the cursor still on the header.
+func selectWorkspaceHeader(t *testing.T, model dashboardModel, name string) dashboardModel {
+	t.Helper()
+	model.focus = focusNavigation
+	for index, item := range model.workspaceNavItems() {
+		if item.header && item.member == name {
+			model.navCursor = index
+			updated, _, handled := model.handleEnterKey()
+			if !handled {
+				t.Fatal("header Enter was not handled")
+			}
+			return updated.(dashboardModel)
+		}
+	}
+	t.Fatalf("member header %q not found", name)
+	return model
+}
+
+func TestWorkspaceTreeStartsWithOnlyRootExpanded(t *testing.T) {
 	model, _ := workspaceConsole(t)
 	p := newPalette(false)
 	side := ansi.Strip(model.sidebar(p, 40, 60))
 	for _, expected := range []string{
 		"▼ Root", "Overview", "Targets (all)", "Packages", "Tasks", "Toolchains", "Presets", "Doctor", "Settings",
-		"▼ core", "Targets (2)", "Packages (2)", "Tests (1)", "Release",
-		"▼ cli", "Targets (1)",
+		"▶ core", "▶ cli",
 	} {
 		if !strings.Contains(side, expected) {
 			t.Fatalf("workspace tree missing %q:\n%s", expected, side)
+		}
+	}
+	for _, hidden := range []string{"Targets (2)", "Targets (1)", "Tests (1)"} {
+		if strings.Contains(side, hidden) {
+			t.Fatalf("member rows must start collapsed, found %q:\n%s", hidden, side)
 		}
 	}
 	header := ansi.Strip(model.header(p, 140))
@@ -65,15 +89,35 @@ func TestWorkspaceTreeRendersRootAndMemberScreens(t *testing.T) {
 	if !strings.Contains(header, "pkg: core") {
 		t.Fatalf("header missing selected member: %q", header)
 	}
-	side = ansi.Strip(model.sidebar(p, 40, 60))
-	if !strings.Contains(side, "▸ 9 Targets (2)") {
-		t.Fatalf("workspace tree does not mark the active member screen:\n%s", side)
+}
+
+func TestWorkspaceHeaderEnterExpandsAndCollapses(t *testing.T) {
+	model, _ := workspaceConsole(t)
+	model = selectWorkspaceHeader(t, model, "core")
+	if !model.expanded["core"] {
+		t.Fatal("Enter on the core header did not expand it")
+	}
+	side := ansi.Strip(model.sidebar(newPalette(false), 40, 60))
+	for _, expected := range []string{"▸ ▼ core", "Targets (2)", "Packages (2)", "Tests (1)", "Release", "▶ cli"} {
+		if !strings.Contains(side, expected) {
+			t.Fatalf("expanded tree missing %q:\n%s", expected, side)
+		}
+	}
+	model = selectWorkspaceHeader(t, model, "core")
+	if model.expanded["core"] {
+		t.Fatal("Enter on the header did not collapse it again")
+	}
+	side = ansi.Strip(model.sidebar(newPalette(false), 40, 60))
+	if !strings.Contains(side, "▶ core") || strings.Contains(side, "Targets (2)") {
+		t.Fatalf("collapsed tree still shows member rows:\n%s", side)
 	}
 }
 
 func TestWorkspaceTreeSelectsMemberTargets(t *testing.T) {
 	model, _ := workspaceConsole(t)
-	// Row 9 is "core → Targets (2)"; digits address the tree rows.
+	model = selectWorkspaceHeader(t, model, "core")
+	// The 9th visible leaf is "core → Targets (2)"; digits count leaves, not
+	// headers.
 	model = tapNumber(t, model, "9")
 	if model.member != "core" || model.route != TargetsRoute {
 		t.Fatalf("tree selection: member=%q route=%q", model.member, model.route)
@@ -97,12 +141,11 @@ func tapNumber(t *testing.T, model dashboardModel, digit string) dashboardModel 
 func TestWorkspaceTreeMovesWithArrowsLikeFlatNavigation(t *testing.T) {
 	model, _ := workspaceConsole(t)
 	model.focus = focusNavigation
-	// Overview → Targets (all) → Packages, immediately switching the screen the
-	// way the flat navigation does.
 	down := func(m dashboardModel) dashboardModel {
 		updated, _ := tap(m, "down")
 		return updated
 	}
+	// Overview → Targets (all) → Packages: leaves switch the screen immediately.
 	model = down(model)
 	if model.route != TargetsRoute || model.member != "" {
 		t.Fatalf("first down: route=%q member=%q", model.route, model.member)
@@ -114,6 +157,35 @@ func TestWorkspaceTreeMovesWithArrowsLikeFlatNavigation(t *testing.T) {
 	side := ansi.Strip(model.sidebar(newPalette(false), 40, 60))
 	if !strings.Contains(side, "▸ 3 Packages") {
 		t.Fatalf("active row not highlighted:\n%s", side)
+	}
+	// Move down to the last root row (Settings), then onto the collapsed core
+	// header: the header is selected, but the page stays put until Enter.
+	for model.navCursor < 7 {
+		model = down(model)
+	}
+	if model.route != SettingsRoute {
+		t.Fatalf("last root row: route=%q", model.route)
+	}
+	model = down(model)
+	items := model.workspaceNavItems()
+	if !items[model.navCursor].header || items[model.navCursor].member != "core" {
+		t.Fatalf("cursor should rest on the core header: %#v", items[model.navCursor])
+	}
+	if model.route != SettingsRoute {
+		t.Fatalf("header selection must not switch the page: route=%q", model.route)
+	}
+	side = ansi.Strip(model.sidebar(newPalette(false), 40, 60))
+	if !strings.Contains(side, "▸ ▶ core") {
+		t.Fatalf("header not highlighted:\n%s", side)
+	}
+	// The next header is cli, then the cursor wraps back to Overview.
+	model = down(model)
+	if items := model.workspaceNavItems(); !items[model.navCursor].header || items[model.navCursor].member != "cli" {
+		t.Fatalf("cursor should rest on the cli header: %#v", items[model.navCursor])
+	}
+	model = down(model)
+	if model.route != OverviewRoute || model.member != "" {
+		t.Fatalf("wrapped cursor: route=%q member=%q", model.route, model.member)
 	}
 }
 
@@ -142,52 +214,58 @@ func TestWorkspaceBuildBuildsEveryMemberFromRootScope(t *testing.T) {
 	}
 }
 
-func TestWorkspaceTreeCollapsesMemberSections(t *testing.T) {
+func TestWorkspaceTreeCollapseShortcut(t *testing.T) {
 	model, _ := workspaceConsole(t)
-	model.member = "core"
-	model.route = TargetsRoute
+	// The root scope starts with every member collapsed; z expands them all and
+	// then folds them again.
 	updated, _ := tap(model, "z")
 	model = updated
-	if !model.collapsed["core"] {
-		t.Fatal("z did not collapse the active member section")
-	}
-	if model.workspaceNavIndex() != -1 {
-		t.Fatalf("collapsed row should be hidden, index=%d", model.workspaceNavIndex())
+	if !model.expanded["core"] || !model.expanded["cli"] {
+		t.Fatalf("z from the root did not expand every member: %#v", model.expanded)
 	}
 	side := ansi.Strip(model.sidebar(newPalette(false), 40, 60))
-	if !strings.Contains(side, "▶ core") {
-		t.Fatalf("collapsed header not rendered:\n%s", side)
-	}
-	if model.member != "core" || model.route != TargetsRoute {
-		t.Fatalf("collapse changed the active scope: member=%q route=%q", model.member, model.route)
+	if !strings.Contains(side, "▼ core") || !strings.Contains(side, "Targets (2)") || !strings.Contains(side, "Targets (1)") {
+		t.Fatalf("expanded tree not rendered:\n%s", side)
 	}
 	updated, _ = tap(model, "z")
 	model = updated
-	if model.collapsed["core"] {
-		t.Fatal("z did not expand the section again")
+	if model.expanded["core"] || model.expanded["cli"] {
+		t.Fatalf("second z did not collapse every member: %#v", model.expanded)
 	}
 	side = ansi.Strip(model.sidebar(newPalette(false), 40, 60))
-	if !strings.Contains(side, "▼ core") || !strings.Contains(side, "Targets (2)") {
-		t.Fatalf("expanded tree not rendered:\n%s", side)
+	if !strings.Contains(side, "▶ core") || !strings.Contains(side, "▶ cli") {
+		t.Fatalf("collapsed tree not rendered:\n%s", side)
+	}
+	// Inside a member scope z folds just that member.
+	model = selectWorkspaceHeader(t, model, "core")
+	model.member = "core"
+	model.route = TargetsRoute
+	updated, _ = tap(model, "z")
+	model = updated
+	if model.expanded["core"] {
+		t.Fatal("z inside a member scope did not fold it")
 	}
 }
 
-func TestWorkspaceTreeCollapsesAllFromRootScope(t *testing.T) {
+func TestWorkspaceNavigationKeepsSelectionVisible(t *testing.T) {
 	model, _ := workspaceConsole(t)
-	expanded := len(model.workspaceNavItems())
-	updated, _ := tap(model, "z")
-	model = updated
-	if got := len(model.workspaceNavItems()); got != 8 {
-		t.Fatalf("collapsed tree should keep only the 8 root rows, got %d", got)
+	names := make([]string, 0, 30)
+	members := map[string]config.Config{}
+	for index := 0; index < 30; index++ {
+		name := fmt.Sprintf("m%02d", index)
+		names = append(names, name)
+		members[name] = config.Config{Targets: map[string]config.Target{"app": {Type: "executable"}}}
 	}
-	side := ansi.Strip(model.sidebar(newPalette(false), 40, 60))
-	if !strings.Contains(side, "▶ core") || !strings.Contains(side, "▶ cli") {
-		t.Fatalf("members not collapsed:\n%s", side)
+	model.config.Workspace.Members = names
+	model.probe.MemberConfigs = members
+	model.focus = focusNavigation
+	model.navCursor = len(model.workspaceNavItems()) - 1
+	panel := ansi.Strip(model.navigationPanel(newPalette(false), 44, 16))
+	if !strings.Contains(panel, names[len(names)-1]) {
+		t.Fatalf("selected member row is not visible after scrolling:\n%s", panel)
 	}
-	updated, _ = tap(model, "z")
-	model = updated
-	if got := len(model.workspaceNavItems()); got != expanded {
-		t.Fatalf("sections not restored: %d != %d", got, expanded)
+	if strings.Contains(panel, "Overview") {
+		t.Fatalf("navigation did not scroll away from the top:\n%s", panel)
 	}
 }
 
@@ -276,6 +354,7 @@ func TestWorkspaceScopeFollowsSelectedMember(t *testing.T) {
 	model, _ := workspaceConsole(t)
 	scopes := []string{}
 	model.services = Services{SetScope: func(member string) { scopes = append(scopes, member) }}
+	model = selectWorkspaceHeader(t, model, "core")
 	model = tapNumber(t, model, "9")
 	if model.member != "core" {
 		t.Fatalf("member = %q", model.member)

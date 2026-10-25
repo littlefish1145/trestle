@@ -250,6 +250,13 @@ func (model dashboardModel) profileKey() (tea.Model, tea.Cmd) {
 // offers for the selected row.
 func (model dashboardModel) handleEnterKey() (tea.Model, tea.Cmd, bool) {
 	if model.focus == focusNavigation {
+		if model.isWorkspace() {
+			model.clampWorkspaceNavCursor()
+			if model.toggleSelectedWorkspaceSection() {
+				return model, nil, true
+			}
+			model.openWorkspaceNavLeaf(model.navCursor)
+		}
 		model.focus = focusContent
 		model.keepCursorVisible()
 		return model, nil, true
@@ -719,10 +726,11 @@ func (model *dashboardModel) selectRouteByNumber(key tea.Key) {
 		return
 	}
 	if model.isWorkspace() {
-		if index >= len(model.workspaceNavItems()) {
+		leaf := model.workspaceNavLeafIndex(index + 1)
+		if leaf < 0 {
 			return
 		}
-		*model = model.activateWorkspaceNav(index)
+		*model = model.activateWorkspaceNav(leaf)
 		return
 	}
 	if index < len(routes) {

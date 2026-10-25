@@ -81,9 +81,11 @@ func (model dashboardModel) applyMemberSwitch(text string) (tea.Model, tea.Cmd) 
 	model.member = text
 	model.applyScope()
 	if text == "" {
+		model.navCursor = 0
 		model.setMessage("Workspace: operating on all members", false)
 		return model, nil
 	}
+	model.focusWorkspaceMember(text)
 	model.setMessage("Member: "+text, false)
 	return model, nil
 }
