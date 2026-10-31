@@ -1361,48 +1361,14 @@ func (model dashboardModel) activityTone() string {
 }
 
 func (model dashboardModel) sidebar(p palette, width, height int) string {
-	if model.isWorkspace() {
-		lines := append([]string{p.faint.Render(" WORKSPACE"), ""}, model.workspaceNavLines(p, width)...)
-		lines = append(lines, "", p.faint.Render(" tab  switch focus"), p.faint.Render(" ↑↓   navigate"), p.faint.Render(" ↵    open / fold"), p.faint.Render(" z    fold  w  member"))
-		return lipgloss.NewStyle().Border(p.border).BorderForeground(lipgloss.Color(p.borderMuted)).Width(width - 2).Height(max(1, height-2)).Render(strings.Join(lines, "\n"))
-	}
-	lines := []string{p.faint.Render(" WORKSPACE"), ""}
-	for index, route := range routes {
-		label := fmt.Sprintf("%s %s", navigationKeyLabel(index), navigationLabel(route))
-		if route == model.route {
-			marker := "  "
-			if model.focus == focusNavigation {
-				marker = "▎ "
-			}
-			label = p.selected.Copy().Width(max(1, width-4)).Render(ansi.Truncate(marker+label, width-4, "…"))
-		} else {
-			label = p.muted.Render(ansi.Truncate("   "+label, width-4, "…"))
-		}
-		lines = append(lines, label)
-	}
-	lines = append(lines, "", p.faint.Render(" tab  switch focus"), p.faint.Render(" ↑↓   navigate"))
-	return lipgloss.NewStyle().Border(p.border).BorderForeground(lipgloss.Color(p.borderMuted)).Width(width - 2).Height(max(1, height-2)).Render(strings.Join(lines, "\n"))
-}
-
-func (model dashboardModel) compactNavigation(p palette, width int) string {
-	items := make([]string, 0, len(routes))
-	for index, route := range routes {
-		label := navigationLabel(route)
-		if key := navigationKey(index); key != " " {
-			label = key + ":" + label
-		}
-		if route == model.route {
-			label = p.selected.Render(" " + label + " ")
-		} else {
-			label = p.faint.Render(label)
-		}
-		items = append(items, label)
-	}
-	return ansi.Truncate(strings.Join(items, "  "), width, " …")
+	return model.navigationPanel(p, width, height)
 }
 
 func (model dashboardModel) contentPanel(p palette, width, height int) string {
 	title, subtitle := model.routeHeading()
+	if model.isWorkspace() && model.member != "" {
+		subtitle = "member " + model.member + " · " + subtitle
+	}
 	var lines []string
 	for _, line := range model.contentLines(p, max(1, width-4)) {
 		lines = append(lines, wrapText(line, max(1, width-4))...)
@@ -1471,7 +1437,7 @@ func (model dashboardModel) loadingLines(p palette) []string {
 
 func (model dashboardModel) overviewLines(p palette, width int) []string {
 	lines := []string{
-		p.muted.Render(fmt.Sprintf("%d targets · %d sources · %d packages", len(model.targetRows()), model.probe.Sources, len(model.scopedConfig().Packages))),
+		p.muted.Render(fmt.Sprintf("%d targets · %d sources · %d package%s", len(model.targetRows()), model.probe.Sources, len(model.scopedConfig().Packages), plural(len(model.scopedConfig().Packages)))),
 		p.faint.Render("Last build: " + model.lastRun),
 	}
 	if model.probe.Error != nil {
@@ -1479,10 +1445,6 @@ func (model dashboardModel) overviewLines(p palette, width int) []string {
 	}
 	lines = append(lines, "", p.title.Render("Targets")+p.faint.Render(" · enter builds the selection · b builds defaults"))
 	return append(lines, model.targetLines(p, width)...)
-}
-
-func (model dashboardModel) stat(p palette, value, label string) string {
-	return lipgloss.NewStyle().Border(p.border).BorderForeground(lipgloss.Color(p.borderMuted)).Padding(0, 2).Render(p.accent.Render(value) + " " + p.muted.Render(label))
 }
 
 func statusRow(p palette, ok bool, success, failure string) string {
@@ -1502,14 +1464,25 @@ func (model dashboardModel) targetLines(p palette, width int) []string {
 	}
 	var lines []string
 	for index, row := range rows {
-		text := fmt.Sprintf("%s %s %-24s  %-12s  %3d sources", model.targetAvailability(row), model.defaultTargetMark(row), row.label(), row.target.Type, len(row.target.Sources))
+		text := model.targetSummary(row, width-3)
 		lines = append(lines, model.selectableRow(p, index, ansi.Truncate(text, width-3, "…")))
 		if index == model.cursor && model.focus == focusContent {
 			lines = append(lines, model.targetDetailLines(p, width, row)...)
 		}
 	}
-	lines = append(lines, "", p.faint.Render("filter: "+model.targetQueryLabel()+"   / search   enter build selected   f force   d default   a build all"))
+	lines = append(lines, "", p.faint.Render(model.targetQueryLabel()+" · / filter · a build all · f force · d default"))
 	return lines
+}
+
+func (model dashboardModel) targetSummary(row targetRow, width int) string {
+	mark := model.targetAvailability(row) + " " + model.defaultTargetMark(row) + " "
+	detail := row.target.Type
+	if width >= 60 {
+		detail = fmt.Sprintf("%-12s %3d sources", row.target.Type, len(row.target.Sources))
+	}
+	nameWidth := max(1, min(36, width-ansi.StringWidth(mark)-ansi.StringWidth(detail)-2))
+	name := ansi.Truncate(row.label(), nameWidth, "…")
+	return mark + name + strings.Repeat(" ", max(2, nameWidth-ansi.StringWidth(name)+2)) + detail
 }
 
 // targetDetailLines describes the selected target: its output name, dependency
@@ -2098,18 +2071,9 @@ func compactLine(value string) string {
 }
 
 func (model dashboardModel) helpView(p palette, width, height int) string {
-	lines := []string{
-		p.title.Render("Keyboard reference") + "  " + p.faint.Render("press ? or esc to close"), "",
-		keyValue(p, "↑ ↓ / j k", "navigate routes or rows"), keyValue(p, "tab / ← →", "switch navigation and content focus"),
-		keyValue(p, "1 … 9 / 0", "jump directly to a screen"), keyValue(p, "b", "build the active profile"),
-		keyValue(p, "r", "refresh configuration and probes"), keyValue(p, "p", "toggle debug/release profile"),
-		keyValue(p, "/", "search the vcpkg.io and conan.center indexes"), keyValue(p, "enter / i", "run the selected screen action"),
-		keyValue(p, "toolchains", "enter connect · e environment · c CUDA · v Vulkan"),
-		keyValue(p, "tests", "enter job/file · g group · a all · f view"), keyValue(p, "packages", "enter choose version · esc go back · f features · a install · d remove"),
-		keyValue(p, "targets", "enter build · f force build (skip availability check)"), keyValue(p, "tasks", "enter preview · y confirm · n cancel"),
-		keyValue(p, "q", "leave Project Console"), "", p.faint.Render("Inputs: enter saves · esc cancels · ctrl+u clears · ctrl+w deletes a word"),
-	}
-	return lipgloss.NewStyle().Border(p.border).BorderForeground(lipgloss.Color(p.borderFocus)).Padding(1, 2).Width(max(20, width-6)).Height(max(3, height-4)).Render(strings.Join(lines, "\n"))
+	model.help = true
+	title, lines := model.overlayContent(p, width)
+	return fittedPanel(p, title, sliceViewport(lines, model.overlayScroll, max(1, height-3)), width, height, true)
 }
 
 func (model dashboardModel) statusLine(p palette, width int) string {
@@ -2185,11 +2149,6 @@ func (model dashboardModel) shortcutContext() string {
 		return context
 	}
 	return "b build   r refresh   p profile"
-}
-
-func (model dashboardModel) shortcutLine(p palette, width int) string {
-	left, right := p.faint.Render(" "+model.shortcutContext()), p.faint.Render("? help   wheel scroll   q quit ")
-	return ansi.Truncate(left+strings.Repeat(" ", max(1, width-lipgloss.Width(left)-lipgloss.Width(right)))+right, width, "")
 }
 
 func appendWrappedLog(lines []string, style lipgloss.Style, line string, width int) []string {

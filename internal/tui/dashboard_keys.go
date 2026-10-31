@@ -101,6 +101,10 @@ func (model dashboardModel) backKey() (tea.Model, tea.Cmd) {
 		model.help, model.details, model.history = false, false, false
 		return model, nil
 	}
+	if model.focus == focusNavigation {
+		model.sidebarVisible, model.focus = false, focusContent
+		return model, nil
+	}
 	model.setMessage("Nothing to go back to", false)
 	return model, nil
 }

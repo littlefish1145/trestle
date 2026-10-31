@@ -338,7 +338,7 @@ func TestWorkspaceRootTargetsAggregateAllMembers(t *testing.T) {
 		}
 	}
 	view := ansi.Strip(strings.Join(model.contentLines(newPalette(false), 90), "\n"))
-	for _, expected := range []string{"core:greeter", "cli:hello", "filter: all targets", "/ search"} {
+	for _, expected := range []string{"core:greeter", "cli:hello", "all targets", "/ filter"} {
 		if !strings.Contains(view, expected) {
 			t.Fatalf("targets page missing %q:\n%s", expected, view)
 		}

@@ -43,6 +43,8 @@ trestle tui [-C dir]
 
 Open the Project Console. With no subcommand, `trestle` discovers the project configuration first, then opens the TUI.
 
+Select a target on the home page and press Enter to build it. Press `Ctrl+P` to search actions, pages, targets, tasks, and workspace members; `Ctrl+B` toggles navigation. Output appears when needed, and `F2` opens the full log. Press `?` for the keyboard reference.
+
 ## `trestle init`
 
 ```text

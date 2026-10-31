@@ -43,6 +43,8 @@ trestle tui [-C dir]
 
 打开 Project Console。`trestle` 不带子命令时会先发现项目配置，再打开 TUI。
 
+首页可直接选择目标并按 Enter 构建。`Ctrl+P` 搜索命令、页面、目标和成员，`Ctrl+B` 显示导航。完整操作说明见 [TUI 工作台](tui.zh-CN.md)。
+
 ## `trestle init`
 
 ```text

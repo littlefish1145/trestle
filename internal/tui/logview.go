@@ -243,7 +243,9 @@ func (model dashboardModel) renderDashboard(p palette) string {
 	switch {
 	case model.commandsOpen:
 		main = model.commandPanel(p, width, mainHeight)
-	case model.help || model.details || model.history:
+	case model.help:
+		main = model.helpView(p, width, mainHeight)
+	case model.details || model.history:
 		title, lines := model.overlayContent(p, width)
 		main = fittedPanel(p, title, sliceViewport(lines, model.overlayScroll, max(1, mainHeight-3)), width, mainHeight, true)
 	case model.fullLog:
@@ -263,7 +265,7 @@ func (model dashboardModel) overlayContent(p palette, width int) (string, []stri
 	switch {
 	case model.help:
 		title := "Keyboard reference · ? / Esc close"
-		return title, wrapText("Ctrl+B: toggle navigation\nTab / Shift+Tab: switch visible panes\nF2: full output\nF3: complete error / item details\nF4: operation history\nF5: collapse or expand output\n↑↓ / j k: navigate focused panel\nPgUp/PgDn: page\nHome/End: first/last output (End resumes follow)\n/ in output: search · n next match\nb: build · r: refresh · p: profile · w workspace member · z fold · workspaces: Enter folds a member header\nEnter: selected action · 1…9 / 0: page\nEsc / Ctrl+C: cancel active operation\nq: stop operation and quit\nInputs: Enter save · Esc cancel · Ctrl+U clear\nTasks: Enter preview · y confirm · n cancel\nPackages: / search · Enter install · f features\nTargets: Enter build · f force · d default\nToolchains: Enter connect · c CUDA · v Vulkan\nTests: Enter selected · g group · a all\nSettings: Enter category / edit · / search all · Esc back · v rules", max(1, width-4))
+		return title, wrapText("Ctrl+P: search actions, pages, targets, tasks and members\nCtrl+B: toggle navigation\nTab / Shift+Tab: switch visible panes\nF2: full output\nF3: complete error / item details\nF4: operation history\nF5: collapse or expand output\n↑↓ / j k: navigate focused panel\nPgUp/PgDn: page\nHome/End: first/last output (End resumes follow)\n/ in output: search · n next match\nb: build · r: refresh · p: profile · w workspace member · z fold · workspaces: Enter folds a member header\nEnter: selected action · 1…9 / 0: page\nEsc / Ctrl+C: cancel active operation\nq: stop operation and quit\nInputs: Enter save · Esc cancel · Ctrl+U clear\nTasks: Enter preview · y confirm · n cancel\nPackages: / search · Enter install · f features\nTargets: Enter build · f force · d default\nToolchains: Enter connect · c CUDA · v Vulkan\nTests: Enter selected · g group · a all\nSettings: Enter category / edit · / search all · Esc back · v rules", max(1, width-4))
 	case model.details:
 		return "Complete details · F3 / Esc close", wrapText(model.detailText, max(1, width-2))
 	case model.history:
@@ -295,23 +297,14 @@ func (model dashboardModel) workspaceMain(p palette, width, height, mainHeight i
 	if model.showSidebar() {
 		navWidth = sidebarWidth(width)
 		contentWidth = width - navWidth - 1
-		nav = model.navigationPanel(p, navWidth, mainHeight)
-	}
-	title, subtitle := model.routeHeading()
-	if model.isWorkspace() && model.member != "" {
-		subtitle = "member " + model.member + " · " + subtitle
+		nav = model.sidebar(p, navWidth, mainHeight)
 	}
 	pageHeight := mainHeight
 	showLog := model.showOutput()
 	if showLog && height >= 20 {
 		pageHeight = mainHeight - model.logHeight()
 	}
-	lines := model.contentLines(p, max(1, contentWidth-4))
-	var wrapped []string
-	for _, line := range lines {
-		wrapped = append(wrapped, wrapText(line, max(1, contentWidth-4))...)
-	}
-	page := fittedPanel(p, title+" · "+subtitle, sliceViewport(wrapped, model.scroll, max(1, pageHeight-3)), contentWidth, pageHeight, model.focus == focusContent)
+	page := model.contentPanel(p, contentWidth, pageHeight)
 	if showLog && height < 20 {
 		if model.focus == focusLog {
 			page = model.logPanel(p, contentWidth, mainHeight)
@@ -323,15 +316,6 @@ func (model dashboardModel) workspaceMain(p palette, width, height, mainHeight i
 		return lipgloss.JoinHorizontal(lipgloss.Top, nav, " ", page)
 	}
 	return page
-}
-
-// navigationStrip is the route strip on narrow terminals and the static key
-// hints on wide ones.
-func (model dashboardModel) navigationStrip(p palette, width int) string {
-	if width < 96 {
-		return model.compactNavigation(p, width)
-	}
-	return p.faint.Render("Tab focus · F2 output · F3 details · F4 history")
 }
 
 func (model dashboardModel) navigationPanel(p palette, width, height int) string {
@@ -358,7 +342,7 @@ func (model dashboardModel) navigationPanel(p palette, width, height int) string
 
 func (model dashboardModel) focusShortcut(p palette, width int) string {
 	if model.commandsOpen {
-		return ansi.Truncate(p.faint.Render("? help  ↑↓ select   enter run   esc close   ctrl+u clear"), width, "")
+		return ansi.Truncate(p.faint.Render(" ↑↓ select   enter run   esc close   ctrl+u clear"), width, "")
 	}
 	if model.inputMode {
 		return ansi.Truncate(p.faint.Render(" enter save   esc cancel   ctrl+u clear   ctrl+w delete word"), width, "")
@@ -388,9 +372,11 @@ func (model dashboardModel) actionDock(p palette, width int) string {
 	inner := max(1, width-4)
 	rows := []string{model.statusLine(p, inner), "", context}
 	marker := lipgloss.NewStyle().Foreground(lipgloss.Color(p.borderFocus)).Render("▎")
-	surface := lipgloss.NewStyle().Background(lipgloss.Color(p.pillBg)).Width(max(1, width-1))
+	background := ansi.Style{}.BackgroundColor(lipgloss.Color(p.pillBg)).String()
+	resets := strings.NewReplacer(ansi.ResetStyle, ansi.ResetStyle+background, "\x1b[0m", "\x1b[0m"+background)
 	for i, row := range rows {
-		rows[i] = marker + surface.Render(" "+ansi.Truncate(row, inner, "…"))
+		content := fitRows([]string{" " + ansi.Truncate(row, inner, "…")}, max(1, width-1), 1)
+		rows[i] = marker + background + resets.Replace(content) + ansi.ResetStyle
 	}
 	return strings.Join(rows, "\n")
 }
@@ -414,6 +400,10 @@ func (model dashboardModel) detailForContext() string {
 	switch {
 	case model.lastError != nil && model.messageError:
 		return diag.Text(model.lastError)
+	case model.route == OverviewRoute || model.route == TargetsRoute || (model.route == BuildRoute && !(model.isWorkspace() && model.member == "")):
+		if row, ok := model.selectedTargetRow(); ok {
+			return fmt.Sprintf("%s\nType: %s\nOutput: %s\nMember: %s\n\nSources:\n%s", row.label(), row.target.Type, fallback(row.target.OutputName, row.name), fallback(row.member, "project"), strings.Join(row.target.Sources, "\n"))
+		}
 	case model.route == ToolchainsRoute:
 		if item, ok := model.selectedComponent(); ok {
 			return fmt.Sprintf("%s\nPath: %s\nVersion: %s\nExecution: %s\nDistribution: %s\n%s", item.Name, item.Path, item.Version, item.Execution, item.Distribution, item.Detail)

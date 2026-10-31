@@ -65,7 +65,11 @@ func assertFrameFits(t *testing.T, model dashboardModel) {
 			t.Fatalf("row %d width: got %d, want %d", i, ansi.StringWidth(line), model.width)
 		}
 	}
-	if !strings.Contains(lines[len(lines)-1], "? help") {
+	hint := "? help"
+	if model.commandsOpen {
+		hint = "esc close"
+	}
+	if !strings.Contains(lines[len(lines)-1], hint) {
 		t.Fatal("footer was clipped")
 	}
 }
@@ -82,5 +86,38 @@ func TestNarrowNavigationRemainsUsable(t *testing.T) {
 	model, _ = tap(model, "enter")
 	if model.route != TargetsRoute || model.focus != focusContent || !strings.Contains(ansi.Strip(model.View().Content), "Targets ·") {
 		t.Fatal("narrow navigation did not open the selected page")
+	}
+	model, _ = tap(model, "left")
+	model, _ = tap(model, "esc")
+	if model.sidebarVisible || model.focus != focusContent {
+		t.Fatal("Escape should return from narrow navigation to the page")
+	}
+}
+
+func TestHelpScrollsTheVisibleReference(t *testing.T) {
+	model, _ := freshConsole(t)
+	model.height = 20
+	model, _ = tap(model, "?")
+	before := ansi.Strip(model.View().Content)
+	model, _ = tap(model, "pgdown")
+	if model.overlayScroll == 0 || before == ansi.Strip(model.View().Content) {
+		t.Fatal("help page did not scroll")
+	}
+	model, _ = tap(model, "esc")
+	model, _ = tap(model, "?")
+	if model.overlayScroll == 0 {
+		t.Fatal("help lost its saved position")
+	}
+}
+
+func TestTargetDetailsKeepFullNamesAndSources(t *testing.T) {
+	base, _ := freshConsole(t)
+	for _, route := range []Route{OverviewRoute, TargetsRoute, BuildRoute} {
+		model := base
+		model.route = route
+		model, _ = tap(model, "f3")
+		if !model.details || !strings.Contains(model.detailText, "src/main.cpp") || !strings.Contains(model.detailText, "executable") {
+			t.Fatalf("%s lost selected target details", route)
+		}
 	}
 }

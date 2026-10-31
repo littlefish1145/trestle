@@ -172,7 +172,7 @@ func TestInputLabelsAndPrompt(t *testing.T) {
 func TestHelpViewAndInit(t *testing.T) {
 	model, _ := freshConsole(t)
 	pane := model.helpView(model.palette(), 110, 34)
-	if !strings.Contains(compactLine(pane), "Keyboard reference") || !strings.Contains(pane, "ctrl+u clears") {
+	if !strings.Contains(compactLine(pane), "Keyboard reference") || !strings.Contains(pane, "Ctrl+P") || !strings.Contains(pane, "Ctrl+U clear") {
 		t.Fatalf("help view incomplete: %q", compactLine(pane))
 	}
 	if narrow := model.helpView(model.palette(), 24, 12); len(compactLine(narrow)) == 0 {
