@@ -3,9 +3,11 @@ package config
 import (
 	"fmt"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 	"trestle/internal/condition"
+	"trestle/internal/sdk/vulkan"
 )
 
 // validateSchemaVersion rejects a configuration written for a schema the
@@ -36,7 +38,20 @@ func validateProject(cfg Config) error {
 
 // validateToolchain checks the toolchain selection mode, the optional CUDA and
 // Vulkan execution modes, and every compiler version selector.
+var cudaArchitecturePattern = regexp.MustCompile(`^sm_[0-9]{2,3}[af]?$`)
+
 func validateToolchain(cfg Config) error {
+	switch cfg.Toolchain.CUDAMode {
+	case "", "whole", "rdc", "separate":
+	default:
+		return fmt.Errorf("toolchain.cuda_mode %q is unsupported; use whole, rdc or separate", cfg.Toolchain.CUDAMode)
+	}
+	for _, arch := range cfg.Toolchain.CUDAArchitectures {
+		if !cudaArchitecturePattern.MatchString(arch) {
+			return fmt.Errorf("toolchain.cuda_architectures contains invalid architecture %q; expected sm_XX", arch)
+		}
+	}
+
 	if cfg.Toolchain.Mode != "" && cfg.Toolchain.Mode != "native" && cfg.Toolchain.Mode != "wsl" {
 		return fmt.Errorf("toolchain.mode %q is unsupported; use native or wsl", cfg.Toolchain.Mode)
 	}
@@ -96,8 +111,16 @@ func validateTargets(cfg Config) error {
 		if len(target.Sources) == 0 {
 			return fmt.Errorf("target %q must contain at least one source", name)
 		}
-		if target.Type == "shader" && target.ShaderStage == "" {
-			return fmt.Errorf("target %q shader_stage is required", name)
+		if target.Type == "shader" {
+			if target.ShaderStage == "" {
+				return fmt.Errorf("target %q shader_stage is required", name)
+			}
+			if !vulkan.ValidStage(vulkan.Stage(target.ShaderStage)) {
+				return fmt.Errorf("target %q has unsupported shader_stage %q", name, target.ShaderStage)
+			}
+			if len(target.Sources) != 1 {
+				return fmt.Errorf("target %q shader requires exactly one source pattern", name)
+			}
 		}
 		for _, source := range target.Sources {
 			if _, err := filepath.Abs(source); err != nil {

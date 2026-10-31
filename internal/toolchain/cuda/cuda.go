@@ -6,11 +6,12 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"path"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
+	"trestle/internal/processx"
 
 	"trestle/internal/toolchain"
 )
@@ -93,13 +94,19 @@ func DetectWSL(ctx context.Context, distribution, root string, host toolchain.To
 		root = path.Dir(path.Dir(nvcc))
 	}
 	exe, args := host.Wrap(nvcc, []string{"--version"})
-	versionOutput, _ := exec.CommandContext(ctx, exe, args...).Output()
+	versionOutput, err := processx.Command(ctx, exe, args...).CombinedOutput()
+	if err != nil {
+		return Toolchain{}, fmt.Errorf("E_CUDA_NVCC: WSL nvcc --version failed: %w: %s", err, strings.TrimSpace(string(versionOutput)))
+	}
 	version := firstLine(string(versionOutput))
 	return Toolchain{NVCC: NVCC{Path: nvcc, Version: version}, Host: host, Toolkit: Toolkit{Root: root, Version: version}, Architectures: []string{defaultArchitecture()}}, nil
 }
 
 func detect(ctx context.Context, root string, configuredHost *toolchain.Toolchain) (Toolchain, error) {
-	root = toolkitRoot(root)
+	if err := ctx.Err(); err != nil {
+		return Toolchain{}, err
+	}
+	root = toolkitRoot(strings.TrimSpace(root))
 	if root == "" {
 		return Toolchain{}, fmt.Errorf("E_CUDA_NOT_FOUND: set CUDA_PATH or CUDA_HOME")
 	}
@@ -110,7 +117,10 @@ func detect(ctx context.Context, root string, configuredHost *toolchain.Toolchai
 	if _, err := os.Stat(nvcc); err != nil {
 		return Toolchain{}, fmt.Errorf("E_CUDA_NVCC: %s not found", nvcc)
 	}
-	versionOutput, _ := exec.CommandContext(ctx, nvcc, "--version").CombinedOutput()
+	versionOutput, err := processx.Command(ctx, nvcc, "--version").CombinedOutput()
+	if err != nil {
+		return Toolchain{}, fmt.Errorf("E_CUDA_NVCC: %s --version failed: %w: %s", nvcc, err, strings.TrimSpace(string(versionOutput)))
+	}
 	version := firstLine(string(versionOutput))
 	host, err := resolveHost(ctx, configuredHost)
 	if err != nil {
@@ -123,10 +133,10 @@ func detect(ctx context.Context, root string, configuredHost *toolchain.Toolchai
 // environment variable.
 func toolkitRoot(root string) string {
 	if root == "" {
-		root = os.Getenv("CUDA_PATH")
+		root = strings.TrimSpace(os.Getenv("CUDA_PATH"))
 	}
 	if root == "" {
-		root = os.Getenv("CUDA_HOME")
+		root = strings.TrimSpace(os.Getenv("CUDA_HOME"))
 	}
 	return root
 }
@@ -157,7 +167,11 @@ func defaultArchitecture() string {
 }
 
 func firstLine(value string) string {
-	lines := strings.Split(strings.TrimSpace(value), "\n")
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "unknown"
+	}
+	lines := strings.Split(value, "\n")
 	if len(lines) == 0 {
 		return "unknown"
 	}
@@ -177,6 +191,9 @@ func (tc Toolchain) Capabilities(ctx context.Context) Capabilities {
 // Compile builds the nvcc argument vector that compiles one CUDA source file
 // for the toolchain's target architectures.
 func (tc Toolchain) Compile(spec toolchain.CompileSpec) (string, []string, error) {
+	if err := tc.validate(); err != nil {
+		return "", nil, err
+	}
 	args := []string{"-ccbin", tc.Host.CXX, "-x", "cu"}
 	if spec.CXXStandard != "" {
 		// nvcc accepts the same spelling as CMake/MSVC configuration values
@@ -191,8 +208,20 @@ func (tc Toolchain) Compile(spec toolchain.CompileSpec) (string, []string, error
 	if tc.Mode == SeparateCompilation {
 		args = append(args, "-dc")
 	}
-	args = append(args, "-c", spec.Source, "-o", spec.Output)
-	args = append(args, spec.Options...)
+	if tc.Mode == WholeProgram {
+		args = append(args, "-c")
+	}
+	if spec.Depfile != "" {
+		args = append(args, "-MD", "-MF", spec.Depfile)
+	}
+	args = append(args, spec.Source, "-o", spec.Output)
+	for _, option := range spec.Options {
+		if strings.HasPrefix(option, "--") || option == "-G" || option == "-lineinfo" || option == "-use_fast_math" {
+			args = append(args, option)
+		} else {
+			args = append(args, "-Xcompiler", option)
+		}
+	}
 	exe, args := tc.Host.Wrap(tc.NVCC.Path, args)
 	return exe, args, nil
 }
@@ -219,7 +248,11 @@ func includeArgs(includes []string) []string {
 // DeviceLink builds the nvcc -dlink argument vector that links separately
 // compiled device code into a single object.
 func (tc Toolchain) DeviceLink(objects []string, output string) (string, []string, error) {
+	if err := tc.validate(); err != nil {
+		return "", nil, err
+	}
 	args := []string{"-ccbin", tc.Host.CXX, "-dlink"}
+	args = append(args, architectureArgs(tc.Architectures)...)
 	args = append(args, objects...)
 	args = append(args, "-o", output)
 	exe, args := tc.Host.Wrap(tc.NVCC.Path, args)
@@ -257,9 +290,16 @@ func ProbeHost(ctx context.Context, tc Toolchain) error {
 	if err != nil {
 		return err
 	}
-	command := exec.CommandContext(ctx, exe, args...)
+	command := processx.Command(ctx, exe, args...)
+	command.Env = os.Environ()
+	for key, value := range tc.Host.Env {
+		command.Env = append(command.Env, key+"="+value)
+	}
 	if output, err := command.CombinedOutput(); err != nil {
-		return fmt.Errorf("E_TOOLCHAIN_CUDA_HOST_INCOMPATIBLE: nvcc -ccbin %s failed: %s", tc.Host.CXX, strings.TrimSpace(string(output)))
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return fmt.Errorf("E_TOOLCHAIN_CUDA_HOST_INCOMPATIBLE: nvcc -ccbin %s failed: %w: %s", tc.Host.CXX, err, strings.TrimSpace(string(output)))
 	}
 	return nil
 }
@@ -302,4 +342,38 @@ func withoutRunnerDirectory(args []string) []string {
 		result = append(result, args[index])
 	}
 	return result
+}
+
+var architecturePattern = regexp.MustCompile(`^sm_[0-9]{2,3}[af]?$`)
+
+func (tc Toolchain) validate() error {
+	if tc.NVCC.Path == "" {
+		return fmt.Errorf("E_CUDA_NVCC: nvcc is not configured")
+	}
+	if tc.Host.CXX == "" {
+		return fmt.Errorf("E_CUDA_HOST: host compiler is not configured")
+	}
+	if tc.Mode != WholeProgram && tc.Mode != SeparateCompilation {
+		return fmt.Errorf("E_CUDA_MODE: unsupported compilation mode %d", tc.Mode)
+	}
+	for _, arch := range tc.Architectures {
+		if !architecturePattern.MatchString(arch) {
+			return fmt.Errorf("E_CUDA_ARCHITECTURE: invalid architecture %q; expected sm_XX", arch)
+		}
+	}
+	return nil
+}
+func (tc Toolchain) RuntimeLibraries() (string, []string) {
+	libs := []string{"cudart_static"}
+	if tc.Mode == SeparateCompilation {
+		libs = append(libs, "cudadevrt")
+	}
+	if tc.Host.Kind == toolchain.MSVC {
+		return filepath.Join(tc.Toolkit.Root, "lib", "x64"), libs
+	}
+	libs = append(libs, "dl", "rt", "pthread")
+	if tc.Host.Runner != "" {
+		return path.Join(tc.Toolkit.Root, "lib64"), libs
+	}
+	return filepath.Join(tc.Toolkit.Root, "lib64"), libs
 }

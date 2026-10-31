@@ -103,7 +103,7 @@ func detectCUDAToolchain(ctx context.Context, cfg config.Config, tc toolchain.To
 		if cfg.Toolchain.WSLDistribution != "" && distribution != "" && !strings.EqualFold(cfg.Toolchain.WSLDistribution, distribution) {
 			return nil, fmt.Errorf("E_CUDA_WSL_DISTRIBUTION: CUDA is in %s but the compiler is in %s", distribution, cfg.Toolchain.WSLDistribution)
 		}
-		detected, detectErr = cuda.DetectWSL(context.Background(), distribution, cfg.Toolchain.CUDARoot, tc)
+		detected, detectErr = cuda.DetectWSL(ctx, distribution, cfg.Toolchain.CUDARoot, tc)
 	} else {
 		if tc.Runner != "" {
 			return nil, fmt.Errorf("E_CUDA_NATIVE_HOST: native CUDA cannot use a WSL host compiler; connect CUDA from the same WSL distribution")
@@ -112,13 +112,13 @@ func detectCUDAToolchain(ctx context.Context, cfg config.Config, tc toolchain.To
 		if resolveErr != nil {
 			return nil, resolveErr
 		}
-		detected, detectErr = cuda.DetectWithHost(context.Background(), root, tc)
+		detected, detectErr = cuda.DetectWithHost(ctx, root, tc)
 	}
 	if detectErr != nil {
 		return nil, detectErr
 	}
 	detected.Architectures = append([]string{}, cfg.Toolchain.CUDAArchitectures...)
-	if err := cuda.ProbeHost(context.Background(), detected); err != nil {
+	if err := cuda.ProbeHost(ctx, detected); err != nil {
 		return nil, err
 	}
 	if cfg.Toolchain.CUDAMode == "rdc" || cfg.Toolchain.CUDAMode == "separate" {
@@ -130,7 +130,10 @@ func detectCUDAToolchain(ctx context.Context, cfg config.Config, tc toolchain.To
 // detectVulkanSDK resolves the Vulkan SDK for the first shader target in the
 // project, honouring the configured execution environment. It returns nil when
 // the project has no shader target.
-func detectVulkanSDK(cfg config.Config, project model.ResolvedProject, manifestDir string) (*vulkan.SDK, error) {
+func detectVulkanSDK(ctx context.Context, cfg config.Config, project model.ResolvedProject, manifestDir string) (*vulkan.SDK, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	for _, target := range project.Targets {
 		if target.Type != model.Shader {
 			continue
@@ -142,9 +145,9 @@ func detectVulkanSDK(cfg config.Config, project model.ResolvedProject, manifestD
 			if distribution == "" {
 				distribution = cfg.Toolchain.WSLDistribution
 			}
-			detected, detectErr = vulkan.DetectWSL(context.Background(), distribution, cfg.Toolchain.Vulkan)
+			detected, detectErr = vulkan.DetectWSL(ctx, distribution, cfg.Toolchain.Vulkan)
 			if detectErr == nil {
-				linuxDir, pathErr := toolchain.WSLPath(context.Background(), distribution, manifestDir)
+				linuxDir, pathErr := toolchain.WSLPath(ctx, distribution, manifestDir)
 				if pathErr != nil {
 					return nil, pathErr
 				}

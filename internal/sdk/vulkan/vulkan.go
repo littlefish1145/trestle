@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"trestle/internal/processx"
 
 	"trestle/internal/toolchain"
 )
@@ -57,11 +58,7 @@ func DetectRoot(root string) (SDK, error) {
 		return SDK{}, fmt.Errorf("E_VULKAN_SDK_NOT_FOUND: Vulkan SDK root is required")
 	}
 	sdk := SDK{Root: root, IncludeDir: filepath.Join(root, "include")}
-	if runtime.GOOS == "windows" {
-		sdk.LibraryDirs = []string{filepath.Join(root, "lib")}
-	} else {
-		sdk.LibraryDirs = []string{filepath.Join(root, "lib")}
-	}
+	sdk.LibraryDirs = []string{filepath.Join(root, "lib")}
 	sdk.Glslc = findTool(root, "glslc")
 	sdk.Glslang = findTool(root, "glslangValidator")
 	if sdk.Glslc == "" && sdk.Glslang == "" {
@@ -73,21 +70,31 @@ func DetectRoot(root string) (SDK, error) {
 // DetectWSL resolves shader tools installed either by a Vulkan SDK archive or
 // by the distribution package manager.
 func DetectWSL(ctx context.Context, distribution, root string) (SDK, error) {
+	if err := ctx.Err(); err != nil {
+		return SDK{}, err
+	}
 	root = strings.TrimSpace(root)
 	if root == "" {
 		root = toolchain.WSLVariable(ctx, distribution, "VULKAN_SDK")
 	}
+	var probeErrors []string
 	find := func(name string) string {
 		requested := name
 		if root != "" {
 			requested = path.Join(root, "bin", name)
 		}
-		resolved, _ := toolchain.WSLExecutable(ctx, distribution, requested)
+		resolved, err := toolchain.WSLExecutable(ctx, distribution, requested)
+		if err != nil {
+			probeErrors = append(probeErrors, err.Error())
+		}
 		return resolved
 	}
 	sdk := SDK{Root: root, Glslc: find("glslc"), Glslang: find("glslangValidator")}
+	if err := ctx.Err(); err != nil {
+		return SDK{}, err
+	}
 	if sdk.Glslc == "" && sdk.Glslang == "" {
-		return SDK{}, fmt.Errorf("E_VULKAN_SHADER_TOOL_NOT_FOUND: glslc or glslangValidator was not found in WSL distribution %s", distribution)
+		return SDK{}, fmt.Errorf("E_VULKAN_SHADER_TOOL_NOT_FOUND: glslc or glslangValidator was not found in WSL distribution %s: %s", distribution, strings.Join(probeErrors, "; "))
 	}
 	tool := sdk.Glslc
 	if tool == "" {
@@ -98,11 +105,23 @@ func DetectWSL(ctx context.Context, distribution, root string) (SDK, error) {
 	}
 	sdk.IncludeDir = path.Join(sdk.Root, "include")
 	sdk.LibraryDirs = []string{path.Join(sdk.Root, "lib")}
-	sdk.Runner, sdk.RunnerArgs, _ = toolchain.WSLRunner(distribution)
-	exe, args := sdk.wrap(tool, []string{"--version"})
-	if output, err := exec.CommandContext(ctx, exe, args...).Output(); err == nil {
-		sdk.Version = firstLine(string(output))
+	runner, runnerArgs, err := toolchain.WSLRunner(distribution)
+	if err != nil {
+		return SDK{}, err
 	}
+	sdk.Runner, sdk.RunnerArgs = runner, runnerArgs
+	exe, args := sdk.wrap(tool, []string{"--version"})
+	output, err := processx.Command(ctx, exe, args...).Output()
+	if ctx.Err() != nil {
+		return SDK{}, ctx.Err()
+	}
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			output = append(output, exitErr.Stderr...)
+		}
+		return SDK{}, fmt.Errorf("E_VULKAN_SHADER_TOOL_FAILED: %s --version: %w: %s", tool, err, strings.TrimSpace(string(output)))
+	}
+	sdk.Version = firstLine(string(output))
 	return sdk, nil
 }
 
@@ -112,7 +131,15 @@ func WithWSLDirectory(sdk SDK, directory string) SDK {
 	if sdk.Runner == "" || strings.TrimSpace(directory) == "" {
 		return sdk
 	}
-	sdk.RunnerArgs = append(append([]string{}, sdk.RunnerArgs...), "--cd", directory)
+	args := make([]string, 0, len(sdk.RunnerArgs)+2)
+	for i := 0; i < len(sdk.RunnerArgs); i++ {
+		if sdk.RunnerArgs[i] == "--cd" && i+1 < len(sdk.RunnerArgs) {
+			i++
+			continue
+		}
+		args = append(args, sdk.RunnerArgs[i])
+	}
+	sdk.RunnerArgs = append(args, "--cd", directory)
 	return sdk
 }
 
@@ -142,11 +169,10 @@ func findTool(root, name string) string {
 	if runtime.GOOS == "windows" {
 		candidate += ".exe"
 	}
-	if _, err := os.Stat(candidate); err == nil {
-		return candidate
-	}
-	if path, err := exec.LookPath(name); err == nil {
-		return path
+	if info, err := os.Stat(candidate); err == nil && info.Mode().IsRegular() {
+		if executable, err := exec.LookPath(candidate); err == nil {
+			return executable
+		}
 	}
 	return ""
 }
@@ -161,6 +187,7 @@ type ShaderSpec struct {
 	Defines    []string
 	TargetEnv  string
 	Tool       string
+	Depfile    string
 }
 
 // ShaderCommand is a resolved program and argument vector ready to execute.
@@ -170,7 +197,7 @@ type ShaderCommand struct {
 }
 
 func toolBase(value string) string {
-	return path.Base(filepath.ToSlash(value))
+	return strings.TrimSuffix(strings.ToLower(path.Base(strings.ReplaceAll(value, `\`, "/"))), ".exe")
 }
 
 // shaderTool returns the shader compiler to run for spec, preferring a tool
@@ -178,12 +205,19 @@ func toolBase(value string) string {
 // an empty string when none is available.
 func (sdk SDK) shaderTool(spec ShaderSpec) string {
 	tool := spec.Tool
+	switch tool {
+	case "glslc", "glslc.exe":
+		return sdk.Glslc
+	case "glslangValidator", "glslangValidator.exe":
+		return sdk.Glslang
+	}
 	if tool == "" {
 		tool = sdk.Glslc
 	}
 	if tool == "" {
 		tool = sdk.Glslang
 	}
+
 	return tool
 }
 
@@ -191,7 +225,10 @@ func (sdk SDK) shaderTool(spec ShaderSpec) string {
 // file is appended by Compile after the command is wrapped, so it is not
 // included here.
 func glslangArguments(spec ShaderSpec) []string {
-	args := []string{"-S", string(spec.Stage), "-o", spec.Output}
+	args := []string{"-V", "-S", string(spec.Stage), "-o", spec.Output}
+	if spec.Depfile != "" {
+		args = append(args, "--depfile", spec.Depfile)
+	}
 	if spec.EntryPoint != "" {
 		args = append(args, "-e", spec.EntryPoint)
 	}
@@ -211,6 +248,9 @@ func glslangArguments(spec ShaderSpec) []string {
 // appended by Compile after the command is wrapped, so it is not included here.
 func glslcArguments(spec ShaderSpec) []string {
 	args := []string{"-fshader-stage=" + string(spec.Stage), "-o", spec.Output}
+	if spec.Depfile != "" {
+		args = append(args, "-MD", "-MF", spec.Depfile)
+	}
 	if spec.EntryPoint != "" {
 		args = append(args, "-fentry-point="+spec.EntryPoint)
 	}
@@ -229,12 +269,27 @@ func glslcArguments(spec ShaderSpec) []string {
 // Compile builds the shader-compiler command for spec, preferring glslc and
 // falling back to glslangValidator.
 func (sdk SDK) Compile(spec ShaderSpec) (ShaderCommand, error) {
+	if !ValidStage(spec.Stage) {
+		return ShaderCommand{}, fmt.Errorf("E_VULKAN_SHADER_STAGE: unsupported stage %q", spec.Stage)
+	}
+	if strings.TrimSpace(spec.Source) == "" || strings.TrimSpace(spec.Output) == "" {
+		return ShaderCommand{}, fmt.Errorf("E_VULKAN_SHADER_PATH: source and output are required")
+	}
 	tool := sdk.shaderTool(spec)
 	if tool == "" {
 		return ShaderCommand{}, fmt.Errorf("E_VULKAN_SHADER_TOOL_NOT_FOUND")
 	}
+	// glslc emits unescaped dependency paths. Do not silently generate an
+	// invalid Ninja depfile when a known dependency path contains whitespace.
+	if spec.Depfile != "" && toolBase(tool) != "glslangvalidator" && unsafeDepfilePaths(spec) {
+		if spec.Tool == "" && sdk.Glslang != "" {
+			tool = sdk.Glslang
+		} else {
+			return ShaderCommand{}, fmt.Errorf("E_VULKAN_DEPFILE_PATH: glslc does not escape dependency paths containing whitespace; select glslangValidator for this target")
+		}
+	}
 	args := glslcArguments(spec)
-	if toolBase(tool) == "glslangValidator" {
+	if toolBase(tool) == "glslangvalidator" {
 		args = glslangArguments(spec)
 	}
 	exe, args := sdk.wrap(tool, append(args, spec.Source))
@@ -251,4 +306,22 @@ func (sdk SDK) Link(name string, inputs []string) (string, error) {
 		return "", fmt.Errorf("shader link requires inputs")
 	}
 	return strings.Join(append([]string{"link"}, inputs...), " "), nil
+}
+
+// ValidStage accepts graphics, compute, mesh and ray-tracing stage suffixes.
+func ValidStage(stage Stage) bool {
+	switch stage {
+	case Vertex, Fragment, Compute, Geometry, TessControl, TessEvaluation, "task", "mesh", "rgen", "rint", "rahit", "rchit", "rmiss", "rcall":
+		return true
+	}
+	return false
+}
+
+func unsafeDepfilePaths(spec ShaderSpec) bool {
+	for _, value := range append([]string{spec.Source, spec.Output, spec.Depfile}, spec.Includes...) {
+		if strings.ContainsAny(value, " \t\r\n#") {
+			return true
+		}
+	}
+	return false
 }

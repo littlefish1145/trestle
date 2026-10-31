@@ -47,7 +47,7 @@ jobs:
   quality:
     name: Test and vet (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -77,8 +77,57 @@ jobs:
         run: |
           set -Eeuo pipefail
           log="quality-logs/go-test-${RUNNER_OS}-${RUNNER_ARCH}.log"
-          printf 'Command: go test -count=1 ./...\n' | tee "$log"
-          go test -count=1 ./... 2>&1 | tee -a "$log"
+          printf 'Command: go test -count=1 -timeout=8m ./...\n' | tee "$log"
+          go test -count=1 -timeout=8m ./... 2>&1 | tee -a "$log"
+
+      - name: Stress workspace and CUDA planning contracts
+        run: |
+          set -Eeuo pipefail
+          log="quality-logs/go-stress-${RUNNER_OS}-${RUNNER_ARCH}.log"
+          go test -count=20 -shuffle=on -timeout=5m \
+            ./internal/config ./internal/graph ./internal/plan ./internal/ninja ./internal/toolchain/cuda ./internal/sdk/vulkan \
+            -run 'Workspace|MemberDir|CUDA|CompileExact|DeviceLink|InvalidToolchain|DetectAndProbe|ToolkitRoot|MultiInput|ReplacePaths|Vulkan|Shader|CompileExactShader|WSLDirectory|DetectRoot|StageAndTool|UnsafeGlslc' 2>&1 | tee "$log"
+
+      - name: Fuzz workspace paths and target selectors
+        if: runner.os == 'Linux'
+        run: |
+          set -Eeuo pipefail
+          go test ./internal/config -run '^$' -fuzz '^FuzzMemberDirCannotEscapeRoot$' -fuzztime=10s -parallel=2 2>&1 | tee quality-logs/fuzz-path.log
+          go test ./internal/app -run '^$' -fuzz '^FuzzSplitWorkspaceTargets$' -fuzztime=10s -parallel=2 2>&1 | tee quality-logs/fuzz-target.log
+
+      - name: Install Ninja for native integration
+        run: python -m pip install ninja
+
+      - name: Build and run native workspace examples
+        env:
+          TRESTLE_TEST_NATIVE: '1'
+        run: |
+          set -Eeuo pipefail
+          log="quality-logs/go-native-${RUNNER_OS}-${RUNNER_ARCH}.log"
+          go test -count=1 -timeout=5m ./internal/app \
+            -run 'TestRealNativeCPPBuild|TestRealWorkspaceCleanSelectedMemberAndProfiles' 2>&1 | tee "$log"
+
+      - name: Install Vulkan shader validation tools
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y glslc glslang-tools spirv-tools
+
+      - name: Compile and validate real Vulkan shaders
+        if: runner.os == 'Linux'
+        env:
+          TRESTLE_TEST_VULKAN: '1'
+          TRESTLE_TEST_VULKAN_ROOT: /usr
+        run: |
+          set -Eeuo pipefail
+          go test -count=1 -v -timeout=5m ./internal/app -run TestRealVulkanNativeBuildAndIncrementalDependencies 2>&1 | tee quality-logs/vulkan-integration.log
+
+      - name: Detect data races
+        if: runner.os == 'Linux'
+        run: |
+          set -Eeuo pipefail
+          log="quality-logs/go-race-${RUNNER_OS}-${RUNNER_ARCH}.log"
+          go test -race -count=1 -timeout=8m ./... 2>&1 | tee "$log"
 
       - name: Enforce VS Code generator coverage
         run: |

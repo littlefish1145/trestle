@@ -5,10 +5,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 
 	"github.com/BurntSushi/toml"
+	"trestle/internal/fsx"
 )
 
 // WorkspaceContext is the fully loaded view of a workspace root: the root
@@ -81,10 +83,17 @@ func ParseWorkspace(rootPath string) (*WorkspaceContext, error) {
 		if err != nil {
 			return nil, err
 		}
-		if seen[name] {
+		canonical, err := fsx.Canonical(dir)
+		if err != nil {
+			return nil, err
+		}
+		if runtime.GOOS == "windows" {
+			canonical = strings.ToLower(canonical)
+		}
+		if seen[canonical] {
 			return nil, fmt.Errorf("E_WORKSPACE_INVALID: member %q is listed twice in [workspace] of %s", name, rootPath)
 		}
-		seen[name] = true
+		seen[canonical] = true
 		merged, err := MergeMemberConfig(root, filepath.Join(rootDir, DefaultFileName), filepath.Join(dir, DefaultFileName))
 		if err != nil {
 			return nil, err
@@ -114,7 +123,18 @@ func MemberDir(rootDir, member string) (string, string, error) {
 	if rel, err := filepath.Rel(rootDir, dir); err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return "", "", fmt.Errorf("E_WORKSPACE_INVALID: member %q escapes the workspace directory", member)
 	}
-	return clean, dir, nil
+	canonicalRoot, err := fsx.Canonical(rootDir)
+	if err != nil {
+		return "", "", err
+	}
+	canonicalDir, err := fsx.Canonical(dir)
+	if err != nil {
+		return "", "", err
+	}
+	if rel, err := filepath.Rel(canonicalRoot, canonicalDir); err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", "", fmt.Errorf("E_WORKSPACE_INVALID: member %q resolves outside the workspace directory", member)
+	}
+	return filepath.ToSlash(clean), dir, nil
 }
 
 // MergeMemberConfig loads the member trestle.toml at memberPath and inherits

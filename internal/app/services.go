@@ -184,7 +184,17 @@ func configuredMSVC(ctx context.Context, cfg config.Config) (toolchain.MSVCInsta
 }
 
 func detectConfigured(ctx context.Context, cfg config.Config) (toolchain.Toolchain, error) {
-	return toolchain.DetectConfigured(ctx, toolchainRequest(cfg))
+	request := toolchainRequest(cfg)
+	if runtime.GOOS == "windows" && cfg.Toolchain.Mode != "wsl" && (cfg.Toolchain.CUDA != "" || cfg.Toolchain.CUDARoot != "") && (request.CXX == "" || request.CXX == "auto") {
+		request.CXX = "cl"
+		if install, ok := configuredMSVC(ctx, cfg); ok {
+			request.CXX = install.Compiler
+			if request.C == "" || request.C == "auto" {
+				request.C = install.Compiler
+			}
+		}
+	}
+	return toolchain.DetectConfigured(ctx, request)
 }
 
 // toolchainRequest converts the configuration into the portable specification
@@ -1679,7 +1689,7 @@ func generateWithConfig(ctx context.Context, path string, cfg config.Config) (Bu
 	if err != nil {
 		return BuildResult{}, err
 	}
-	vulkanSDK, err := detectVulkanSDK(cfg, project, manifestDir)
+	vulkanSDK, err := detectVulkanSDK(ctx, cfg, project, manifestDir)
 	if err != nil {
 		return BuildResult{}, err
 	}
@@ -1697,10 +1707,8 @@ func generateWithConfig(ctx context.Context, path string, cfg config.Config) (Bu
 	if err != nil {
 		return BuildResult{}, err
 	}
-	if cfg.Toolchain.Mode == "wsl" {
-		if err := translateWSLArguments(ctx, cfg.Toolchain.WSLDistribution, &buildPlan); err != nil {
-			return BuildResult{}, err
-		}
+	if err := translateWSLArguments(ctx, cfg.Toolchain.WSLDistribution, &buildPlan); err != nil {
+		return BuildResult{}, err
 	}
 	manifest, err := ninja.Emit(buildPlan)
 	if err != nil {

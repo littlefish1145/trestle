@@ -1,62 +1,19 @@
 schema_version = 7
 
 [project]
-  name = "hello-workspace"
+name = "hello-workspace"
 
 [build]
-  profile = "debug"
-  build_dir = "build"
-  c_standard = "c17"
-  cxx_standard = "c++20"
-  compile_commands = "compile_commands.json"
-  auto_compile_shaders = false
-  modules = false
-  module_scanner = ""
+profile = "debug"
+build_dir = "build"
+cxx_standard = "c++20"
+compile_commands = "compile_commands.json"
 
+# Members inherit portable compiler selection. Override locally with
+# trestle configure -toolchain <compiler> when a specific compiler is required.
 [toolchain]
-  msvc = "14.44.35207~14.44.35207"
-  c = "auto"
-  cxx = "clang-cl"
-  archiver = "auto"
-  linker = "auto"
-  setup = ""
-  cuda = ""
-  cuda_root = ""
-  cache_dir = ".trestle/toolchain"
-  cuda_mode = "whole"
-  cuda_architectures = ["sm_75"]
-  cuda_execution = "native"
-  cuda_wsl_distribution = ""
-  vulkan = ""
-  vulkan_execution = "native"
-  vulkan_wsl_distribution = ""
-  module_scanner = ""
-  mode = "native"
-  wsl_distribution = ""
-  preset = ""
-
-[vcpkg]
-  root = ""
-  triplet = "auto"
-  crt_linkage = ""
-  library_linkage = ""
-
-[conan]
-  root = ""
-  build_root = ""
-  profile = "default"
-
-[compiler_presets]
-
-[targets]
-
-[packages]
-
-[package]
-  format = "zip"
-  output = "dist/hello-workspace.zip"
-  optimization = "balanced"
-  targets = []
+cxx = "auto"
+msvc = "auto"
 
 [workspace]
-  members = ["core", "cli"]
+members = ["core", "cli"]

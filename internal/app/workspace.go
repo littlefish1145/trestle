@@ -59,13 +59,17 @@ func IsWorkspace(path string) bool {
 // targets resolved against the selected member.
 func SplitWorkspaceTargets(args []string) (member string, targets []string, err error) {
 	for _, arg := range args {
+		arg = strings.TrimSpace(arg)
+		if arg == "" {
+			return "", nil, fmt.Errorf("E_WORKSPACE_INVALID: target must not be empty")
+		}
 		name, target, prefixed := strings.Cut(arg, ":")
 		if !prefixed {
 			targets = append(targets, arg)
 			continue
 		}
 		name, target = strings.TrimSpace(name), strings.TrimSpace(target)
-		if name == "" || target == "" {
+		if name == "" || target == "" || strings.Contains(target, ":") {
 			return "", nil, fmt.Errorf("E_WORKSPACE_INVALID: %q must use member:target syntax", arg)
 		}
 		if member != "" && member != name {
@@ -89,12 +93,12 @@ func BuildWorkspace(ctx context.Context, path string, options WorkspaceBuildOpti
 	if wc == nil {
 		return fmt.Errorf("%s does not declare a [workspace] section", path)
 	}
-	order, err := graph.OrderWorkspaceMembers(wc)
+	_, err = graph.OrderWorkspaceMembers(wc)
 	if err != nil {
 		return err
 	}
 	if options.Member != "" {
-		if wc.Member(options.Member) == nil {
+		if !workspaceHasMember(wc, options.Member) {
 			return fmt.Errorf("E_WORKSPACE_INVALID: unknown member %q; members: %s", options.Member, strings.Join(wc.MemberNames(), ", "))
 		}
 	}
@@ -104,20 +108,21 @@ func BuildWorkspace(ctx context.Context, path string, options WorkspaceBuildOpti
 	if err != nil {
 		return err
 	}
+	options.Targets = targets
 	if prefixedMember != "" {
 		if options.Member != "" && options.Member != prefixedMember {
 			return fmt.Errorf("E_WORKSPACE_INVALID: %q names member %q but -p selected %q", strings.Join(options.Targets, " "), prefixedMember, options.Member)
 		}
-		if wc.Member(prefixedMember) == nil {
+		if !workspaceHasMember(wc, prefixedMember) {
 			return fmt.Errorf("E_WORKSPACE_INVALID: unknown member %q; members: %s", prefixedMember, strings.Join(wc.MemberNames(), ", "))
 		}
 		options.Member = prefixedMember
 		options.Targets = targets
 	}
-	selected := make([]string, 0, len(order))
-	for _, name := range order {
-		if options.Member == "" || options.Member == name {
-			selected = append(selected, name)
+	if options.Profile != "" {
+		wc.RootConfig.Build.Profile = options.Profile
+		for _, cfg := range wc.Members {
+			cfg.Build.Profile = options.Profile
 		}
 	}
 	buildRoot, err := filepath.Abs(wc.RootConfig.Build.BuildDir)
@@ -134,17 +139,22 @@ func BuildWorkspace(ctx context.Context, path string, options WorkspaceBuildOpti
 		}
 		return func(line string) { progress("[" + member + "] " + line) }
 	}
+	selected := workspaceBuildMembers(workspace, options.Member)
 	for _, name := range selected {
 		memberPath := workspaceMemberPath(wc, name)
 		memberCtx, err := workspaceMemberContext(ctx, wc, name, options.Profile, workspace)
 		if err != nil {
 			return err
 		}
-		if err := BuildTargetsWithOptions(memberCtx, memberPath, options.Targets, options.All, options.Force, prefix(name)); err != nil {
+		targets, all := options.Targets, options.All
+		if options.Member != "" && name != options.Member {
+			targets, all = nil, true
+		}
+		if err := BuildTargetsWithOptions(memberCtx, memberPath, targets, all, options.Force, prefix(name)); err != nil {
 			return err
 		}
 	}
-	return publishWorkspaceCompileCommands(wc, buildRoot)
+	return publishWorkspaceCompileCommands(ctx, wc, buildRoot)
 }
 
 // RunWorkspaceTests runs the test jobs of each selected member in dependency
@@ -161,7 +171,7 @@ func RunWorkspaceTests(ctx context.Context, path string, member string, selectio
 	if err != nil {
 		return err
 	}
-	if member != "" && wc.Member(member) == nil {
+	if member != "" && !workspaceHasMember(wc, member) {
 		return fmt.Errorf("E_WORKSPACE_INVALID: unknown member %q; members: %s", member, strings.Join(wc.MemberNames(), ", "))
 	}
 	buildRoot, err := filepath.Abs(wc.RootConfig.Build.BuildDir)
@@ -177,6 +187,9 @@ func RunWorkspaceTests(ctx context.Context, path string, member string, selectio
 			continue
 		}
 		memberCfg := wc.Member(name)
+		if name == graph.RootMemberName {
+			memberCfg = &wc.RootConfig
+		}
 		if memberCfg == nil {
 			continue
 		}
@@ -199,6 +212,19 @@ func RunWorkspaceTests(ctx context.Context, path string, member string, selectio
 		prefixed := progress
 		if progress != nil {
 			prefixed = func(line string) { progress("[" + name + "] " + line) }
+		}
+		// Build provider members before the selected member's test binaries.
+		for _, provider := range workspaceBuildMembers(workspace, name) {
+			if provider == name {
+				continue
+			}
+			providerCtx, err := workspaceMemberContext(ctx, wc, provider, "", workspace)
+			if err != nil {
+				return err
+			}
+			if err := BuildTargetsWithProgress(providerCtx, workspaceMemberPath(wc, provider), nil, true, prefixed); err != nil {
+				return err
+			}
 		}
 		if err := RunTests(memberCtx, memberPath, selection, prefixed); err != nil {
 			return err
@@ -348,7 +374,11 @@ func workspaceMemberContext(ctx context.Context, wc *config.WorkspaceContext, na
 	if name == graph.RootMemberName {
 		cfg = wc.RootConfig
 	} else {
-		cfg = *wc.Member(name)
+		member := wc.Member(name)
+		if member == nil {
+			return ctx, fmt.Errorf("E_WORKSPACE_INVALID: unknown member %q", name)
+		}
+		cfg = *member
 	}
 	if profile != "" {
 		cfg.Build.Profile = profile
@@ -368,7 +398,10 @@ func workspaceMemberContext(ctx context.Context, wc *config.WorkspaceContext, na
 // publishWorkspaceCompileCommands merges every member's compile_commands.json
 // into the workspace build profile directory and the root's configured
 // compile_commands path, so one editor configuration covers all members.
-func publishWorkspaceCompileCommands(wc *config.WorkspaceContext, buildRoot string) error {
+func publishWorkspaceCompileCommands(ctx context.Context, wc *config.WorkspaceContext, buildRoot string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	profile := wc.RootConfig.Build.Profile
 	if profile == "" {
 		profile = "debug"
@@ -393,12 +426,36 @@ func publishWorkspaceCompileCommands(wc *config.WorkspaceContext, buildRoot stri
 		if err := json.Unmarshal(data, &member); err != nil {
 			return err
 		}
-		entries = append(entries, member...)
+		for _, entry := range member {
+			// A root database may be the previous aggregate. Only retain root
+			// commands here; member databases below are the current authority.
+			if filepath.Clean(dir) == filepath.Clean(filepath.Join(buildRoot, profile)) && filepath.Clean(entry.Directory) != filepath.Clean(dir) {
+				continue
+			}
+			entries = append(entries, entry)
+		}
 	}
 	if len(entries) == 0 {
 		return nil
 	}
-	sort.Slice(entries, func(i, j int) bool { return entries[i].File < entries[j].File })
+	unique := make(map[string]compileCommandEntry)
+	for _, entry := range entries {
+		unique[entry.Directory+"\x00"+entry.File+"\x00"+entry.Output] = entry
+	}
+	entries = entries[:0]
+	for _, entry := range unique {
+		entries = append(entries, entry)
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		a, b := entries[i], entries[j]
+		if a.File != b.File {
+			return a.File < b.File
+		}
+		if a.Directory != b.Directory {
+			return a.Directory < b.Directory
+		}
+		return a.Output < b.Output
+	})
 	data, err := json.MarshalIndent(entries, "", "  ")
 	if err != nil {
 		return err
@@ -410,7 +467,7 @@ func publishWorkspaceCompileCommands(wc *config.WorkspaceContext, buildRoot stri
 	}
 	destination := wc.RootConfig.Build.CompileCommands
 	if destination != "" && filepath.Clean(destination) != filepath.Clean(filepath.Join(aggregateDir, "compile_commands.json")) {
-		lock, err := fsx.WaitLock(context.Background(), destination, "publish workspace compile commands")
+		lock, err := fsx.WaitLock(ctx, destination, "publish workspace compile commands")
 		if err != nil {
 			return err
 		}
@@ -420,4 +477,38 @@ func publishWorkspaceCompileCommands(wc *config.WorkspaceContext, buildRoot stri
 		}
 	}
 	return nil
+}
+
+func workspaceHasMember(wc *config.WorkspaceContext, name string) bool {
+	return wc.Member(name) != nil || (name == graph.RootMemberName && len(wc.RootConfig.Targets) > 0)
+}
+
+// workspaceBuildMembers includes the selected member's transitive providers in
+// topological order, so a clean checkout can build a consumer directly.
+func workspaceBuildMembers(workspace model.WorkspaceProject, selected string) []string {
+	if selected == "" {
+		return append([]string(nil), workspace.Order...)
+	}
+	needed := map[string]bool{}
+	var visit func(string)
+	visit = func(name string) {
+		if needed[name] {
+			return
+		}
+		needed[name] = true
+		member, ok := workspace.Member(name)
+		if ok {
+			for _, provider := range member.DependsOn {
+				visit(provider)
+			}
+		}
+	}
+	visit(selected)
+	result := []string{}
+	for _, name := range workspace.Order {
+		if needed[name] {
+			result = append(result, name)
+		}
+	}
+	return result
 }

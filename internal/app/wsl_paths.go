@@ -10,25 +10,35 @@ import (
 
 func translateWSLArguments(ctx context.Context, distribution string, buildPlan *plan.BuildPlan) error {
 	cache := map[string]string{}
-	convert := func(value string) (string, error) {
+	convert := func(distribution, value string) (string, error) {
 		if err := toolchain.ValidateWSLPath(distribution, value); err != nil {
 			return "", err
 		}
 		if filepath.VolumeName(value) == "" && !strings.HasPrefix(value, `\\`) {
 			return strings.ReplaceAll(value, `\`, "/"), nil
 		}
-		if mapped, ok := cache[value]; ok {
+		if mapped, ok := cache[distribution+"\x00"+value]; ok {
 			return mapped, nil
 		}
 		mapped, err := toolchain.WSLPath(ctx, distribution, value)
 		if err != nil {
 			return "", err
 		}
-		cache[value] = mapped
+		cache[distribution+"\x00"+value] = mapped
 		return mapped, nil
 	}
 	for i := range buildPlan.Actions {
-		if err := translateWSLAction(&buildPlan.Actions[i], convert); err != nil {
+		action := &buildPlan.Actions[i]
+		selectedDistribution := distribution
+		for j, arg := range action.Command.Args {
+			if arg == "--exec" {
+				break
+			}
+			if arg == "-d" && j+1 < len(action.Command.Args) {
+				selectedDistribution = action.Command.Args[j+1]
+			}
+		}
+		if err := translateWSLAction(action, func(value string) (string, error) { return convert(selectedDistribution, value) }); err != nil {
 			return err
 		}
 	}
@@ -54,6 +64,9 @@ func translateWSLAction(action *plan.Action, convert func(string) (string, error
 	for j := argumentStart; j < len(action.Command.Args); j++ {
 		arg := action.Command.Args[j]
 		prefix, path := splitWSLArgument(arg)
+		if path == "" {
+			continue
+		}
 		if prefix == "" && filepath.VolumeName(arg) == "" && !strings.HasPrefix(arg, `\\`) {
 			continue
 		}

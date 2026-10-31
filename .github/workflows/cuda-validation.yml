@@ -1,0 +1,41 @@
+name: CUDA Validation
+
+on:
+  workflow_dispatch:
+    inputs:
+      architecture:
+        description: CUDA architecture supported by the installed toolkit
+        required: true
+        default: sm_75
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  cuda:
+    # A hosted runner has no toolkit. This explicit lane must run on a machine
+    # with NVCC, MSVC, Ninja and CUDA static runtime libraries installed.
+    runs-on: [self-hosted, Windows, X64, cuda]
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - name: Require CUDA and run standalone/workspace whole/RDC builds
+        shell: pwsh
+        env:
+          TRESTLE_TEST_CUDA: '1'
+          TRESTLE_TEST_CUDA_ARCH: ${{ inputs.architecture }}
+        run: |
+          New-Item -ItemType Directory -Force quality-logs | Out-Null
+          go test -count=1 -v -timeout=12m ./internal/app -run TestRealCUDAStarterAndIncrementalBuild 2>&1 | Tee-Object quality-logs/cuda-integration.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: cuda-validation-logs
+          path: quality-logs/
+          if-no-files-found: error

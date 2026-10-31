@@ -55,6 +55,10 @@ func TestRealNativeCPPBuild(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "src", "main.cpp"), []byte("#include <iostream>\nint main(){ std::cout << \"native OK\\n\"; }\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
+	beforeRecords, err := runlog.List(path)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := BuildWithProgress(context.Background(), path, nil); err != nil {
 		integrationError(t, err)
 	}
@@ -72,7 +76,7 @@ func TestRealNativeCPPBuild(t *testing.T) {
 		t.Fatalf("run: %s %v", output, err)
 	}
 	records, err := runlog.List(path)
-	if err != nil || len(records) != 1 || records[0].Status != "succeeded" {
+	if err != nil || len(records) != len(beforeRecords)+1 || records[0].Status != "succeeded" {
 		t.Fatalf("history: %+v %v", records, err)
 	}
 	// Packaging must rebuild its own selection, even when an older artifact

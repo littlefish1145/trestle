@@ -3,6 +3,7 @@ package graph
 import (
 	"context"
 	"fmt"
+	"maps"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -118,6 +119,8 @@ func OrderWorkspaceMembers(wc *config.WorkspaceContext) ([]string, error) {
 // so they resolve against the member's directory instead of the process working
 // directory (which is the workspace root when a workspace builds).
 func rebaseConfigPaths(cfg *config.Config, root string) {
+	cfg.Targets = maps.Clone(cfg.Targets)
+	cfg.Packages = maps.Clone(cfg.Packages)
 	rebase := func(paths []string) []string {
 		if len(paths) == 0 {
 			return paths

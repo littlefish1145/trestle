@@ -29,17 +29,15 @@ type buildState struct {
 	runtimeCopies map[string]string
 }
 
-// checkToolchain verifies that a C++ compiler is available, unless the project
-// contains a shader target, which only needs the Vulkan toolchain.
+// checkToolchain requires a C++ compiler for every non-shader project.
+// A project containing only shaders needs the Vulkan SDK alone.
 func checkToolchain(project model.ResolvedProject, options Options) error {
 	for _, target := range project.Targets {
-		if target.Type == model.Shader {
-			return nil
+		if target.Type != model.Shader && options.Toolchain.CXX == "" {
+			return fmt.Errorf("E_TOOLCHAIN_MISSING: no C++ compiler is configured")
 		}
 	}
-	if options.Toolchain.CXX == "" {
-		return fmt.Errorf("E_TOOLCHAIN_MISSING: no C++ compiler is configured")
-	}
+
 	return nil
 }
 
@@ -97,6 +95,9 @@ func (s *buildState) emitShader(target model.ResolvedTarget) error {
 	if !s.cfg.Build.AutoCompileShaders {
 		return nil
 	}
+	if len(target.Sources) != 1 {
+		return fmt.Errorf("E_VULKAN_SHADER_SOURCE: target %s must resolve to exactly one source, got %d", target.ID, len(target.Sources))
+	}
 	if s.options.Vulkan == nil {
 		return fmt.Errorf("E_VULKAN_SDK_NOT_FOUND: shader target %s requires a Vulkan SDK", target.ID)
 	}
@@ -105,12 +106,14 @@ func (s *buildState) emitShader(target model.ResolvedTarget) error {
 		return err
 	}
 	source := relative(s.options.Root, s.buildDir, target.Sources[0])
-	shader, err := s.options.Vulkan.Compile(vulkan.ShaderSpec{Source: source, Output: relative(s.options.Root, s.buildDir, output), Stage: vulkan.Stage(target.ShaderStage), EntryPoint: target.ShaderEntry, TargetEnv: target.ShaderTargetEnv, Tool: target.ShaderTool})
+	relativeOutput := relative(s.options.Root, s.buildDir, output)
+	depfile := relativeOutput + ".d"
+	shader, err := s.options.Vulkan.Compile(vulkan.ShaderSpec{Source: source, Output: relativeOutput, Includes: relativeAll(s.options.Root, s.buildDir, target.CompileSelf.IncludeDirs), Defines: target.CompileSelf.Defines, Depfile: depfile, Stage: vulkan.Stage(target.ShaderStage), EntryPoint: target.ShaderEntry, TargetEnv: target.ShaderTargetEnv, Tool: target.ShaderTool})
 	if err != nil {
 		return err
 	}
 	s.outputs[target.ID] = relative(s.options.Root, s.buildDir, output)
-	s.result.Actions = append(s.result.Actions, Action{ID: ActionID("shader", string(target.ID)), Rule: ActionID("shader", string(target.ID)), Command: Command{Exe: shader.Exe, Args: shader.Args}, Inputs: []string{source}, Outputs: []string{s.outputs[target.ID]}})
+	s.result.Actions = append(s.result.Actions, Action{ID: ActionID("shader", string(target.ID)), Rule: ActionID("shader", string(target.ID)), Command: Command{Exe: shader.Exe, Args: shader.Args}, Inputs: []string{source}, Outputs: []string{s.outputs[target.ID]}, Depfile: &DepfileSpec{Path: depfile}})
 	return nil
 }
 
@@ -134,13 +137,13 @@ func (s *buildState) emitSource(target model.ResolvedTarget, source string) erro
 	}
 	action := Action{
 		ID:      ActionID("compile", string(target.ID), sourceID(source)),
-		Rule:    ActionID("compile", sourceID(source)),
+		Rule:    ActionID("compile", string(target.ID), sourceID(source)),
 		Command: Command{Exe: exe, Args: args},
 		Inputs:  []string{relativeSource},
 		Outputs: []string{relativeObject},
 		Pool:    "compile_pool",
 	}
-	if s.options.Toolchain.Kind == toolchain.MSVC {
+	if s.options.Toolchain.Kind == toolchain.MSVC && !strings.EqualFold(filepath.Ext(source), ".cu") {
 		action.Deps = "msvc"
 	} else {
 		action.Depfile = &DepfileSpec{Path: relativeObject + ".d"}
@@ -177,7 +180,7 @@ func (s *buildState) compileOptions(target model.ResolvedTarget, source string) 
 		optionsForCompile = append(optionsForCompile, target.CXXFlags...)
 	}
 	optionsForCompile = append(optionsForCompile, target.CompileSelf.Options...)
-	if target.Type == model.SharedLibrary && s.options.Toolchain.Kind != toolchain.MSVC && !strings.EqualFold(filepath.Ext(source), ".cu") && !containsPICOption(optionsForCompile) {
+	if target.Type == model.SharedLibrary && s.options.Toolchain.Kind != toolchain.MSVC && !containsPICOption(optionsForCompile) {
 		optionsForCompile = append(optionsForCompile, "-fPIC")
 	}
 	return optionsForCompile
@@ -258,7 +261,7 @@ func (s *buildState) compileObject(target model.ResolvedTarget, source, relative
 			if s.options.CUDA == nil {
 				return "", nil, fmt.Errorf("E_CUDA_NOT_CONFIGURED: source %s requires a CUDA toolchain", source)
 			}
-			exe, args, err = s.options.CUDA.Compile(toolchain.CompileSpec{Source: relativeSource, Output: relativeObject, Includes: relativeAll(s.options.Root, s.buildDir, target.CompileSelf.IncludeDirs), Defines: target.CompileSelf.Defines, Options: optionsForCompile, CXXStandard: cxxStandard})
+			exe, args, err = s.options.CUDA.Compile(toolchain.CompileSpec{Source: relativeSource, Output: relativeObject, Includes: relativeAll(s.options.Root, s.buildDir, target.CompileSelf.IncludeDirs), Defines: target.CompileSelf.Defines, Options: optionsForCompile, CXXStandard: cxxStandard, Depfile: depfile})
 		} else {
 			compiler := s.options.Toolchain.CXX
 			if strings.EqualFold(filepath.Ext(source), ".c") {
@@ -309,14 +312,15 @@ func (s *buildState) emitArtifact(target model.ResolvedTarget) error {
 // and returns the link inputs with the device object appended, when the CUDA
 // toolchain uses separate compilation.
 func (s *buildState) emitDeviceLink(target model.ResolvedTarget, linkInputs []string) ([]string, error) {
-	if len(s.cudaObjects[target.ID]) > 0 && target.Type != model.StaticLibrary && s.options.CUDA != nil && s.options.CUDA.Mode == cuda.SeparateCompilation {
+	cudaInputs := s.cudaLinkInputs(target)
+	if len(cudaInputs) > 0 && target.Type != model.StaticLibrary && s.options.CUDA != nil && s.options.CUDA.Mode == cuda.SeparateCompilation {
 		deviceObject := filepath.Join(s.buildDir, "obj", string(target.ID), "device-link.o")
 		deviceRelative := relative(s.options.Root, s.buildDir, deviceObject)
-		exe, args, err := s.options.CUDA.DeviceLink(s.cudaObjects[target.ID], deviceRelative)
+		exe, args, err := s.options.CUDA.DeviceLink(cudaInputs, deviceRelative)
 		if err != nil {
 			return nil, err
 		}
-		s.result.Actions = append(s.result.Actions, Action{ID: ActionID("device-link", string(target.ID)), Rule: ActionID("device-link", string(target.ID)), Command: Command{Exe: exe, Args: args}, Inputs: s.cudaObjects[target.ID], Outputs: []string{deviceRelative}})
+		s.result.Actions = append(s.result.Actions, Action{ID: ActionID("device-link", string(target.ID)), Rule: ActionID("device-link", string(target.ID)), Command: Command{Exe: exe, Args: args}, Inputs: cudaInputs, Outputs: []string{deviceRelative}})
 		linkInputs = append(linkInputs, deviceRelative)
 	}
 	return linkInputs, nil
@@ -367,9 +371,17 @@ func (s *buildState) linkOrArchive(target model.ResolvedTarget, linkInputs []str
 			})
 			linkOptions = append(linkOptions, "/DEF:"+definitionFile)
 		}
+		libraryDirs := relativeAll(s.options.Root, s.buildDir, target.LinkSelf.LibraryDirs)
+		if s.options.CUDA != nil && len(s.cudaLinkInputs(target)) > 0 {
+			dir, runtimeLibs := s.options.CUDA.RuntimeLibraries()
+			// Keep SDK paths absolute: deep Windows test/build roots can exceed
+			// the linker path limit before a long ../ chain is normalized.
+			libraryDirs = append(libraryDirs, filepath.ToSlash(dir))
+			libraries = append(libraries, runtimeLibs...)
+		}
 		exe, args, err := s.options.Toolchain.Link(toolchain.LinkSpec{
 			Inputs: linkInputs, Output: s.outputs[target.ID], Shared: target.Type == model.SharedLibrary,
-			ImportLibrary: importLibrary, LibraryDirs: relativeAll(s.options.Root, s.buildDir, target.LinkSelf.LibraryDirs), Libraries: libraries, Options: linkOptions,
+			ImportLibrary: importLibrary, LibraryDirs: libraryDirs, Libraries: libraries, Options: linkOptions,
 		})
 		if err != nil {
 			return Action{}, err
@@ -451,4 +463,29 @@ func (s *buildState) emitTestTargets() {
 		}
 	}
 	s.result.Actions = append(s.result.Actions, Action{ID: "test", Rule: "phony", Command: Command{Exe: "ninja"}, Inputs: testInputs, Outputs: []string{"test"}, Pool: "console_pool"})
+}
+
+func (s *buildState) cudaLinkInputs(target model.ResolvedTarget) []string {
+	result := append([]string{}, s.cudaObjects[target.ID]...)
+	for _, id := range s.project.LinkClosure[target.ID] {
+		provider := s.project.ByID[id]
+		if provider.Type != model.StaticLibrary {
+			continue
+		}
+		for _, source := range provider.Sources {
+			if strings.EqualFold(filepath.Ext(source), ".cu") {
+				output := s.outputs[id]
+				if output == "" {
+					if workspaceOutput, ok := s.options.WorkspaceOutputs[string(id)]; ok {
+						output = relative(s.options.Root, s.buildDir, workspaceOutput)
+					}
+				}
+				if output != "" {
+					result = append(result, output)
+				}
+				break
+			}
+		}
+	}
+	return result
 }

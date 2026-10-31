@@ -18,6 +18,9 @@ import (
 // ports but no versions/ directory — cannot answer this and is skipped rather
 // than failed.
 func TestPortVersionsReadsRealCheckout(t *testing.T) {
+	if os.Getenv("TRESTLE_TEST_LIVE") != "1" {
+		t.Skip("set TRESTLE_TEST_LIVE=1 to exercise installed package managers and remote services")
+	}
 	client, err := NewClient("")
 	if err != nil {
 		t.Skipf("vcpkg is not installed: %v", err)
@@ -72,6 +75,9 @@ func TestPortVersionsReadsRealCheckout(t *testing.T) {
 }
 
 func TestPortVersionsRejectsUnknownPort(t *testing.T) {
+	if os.Getenv("TRESTLE_TEST_LIVE") != "1" {
+		t.Skip("set TRESTLE_TEST_LIVE=1 to exercise installed package managers and remote services")
+	}
 	client := Client{Root: t.TempDir()}
 	if _, err := client.PortVersions(context.Background(), "fmt"); err == nil {
 		t.Fatal("expected an error without a version database")
@@ -82,6 +88,9 @@ func TestPortVersionsRejectsUnknownPort(t *testing.T) {
 // expected path is built with the platform separator instead of a literal, so
 // the test holds on non-Windows hosts as well.
 func TestVersionDatabasePathShardsByFirstLetter(t *testing.T) {
+	if os.Getenv("TRESTLE_TEST_LIVE") != "1" {
+		t.Skip("set TRESTLE_TEST_LIVE=1 to exercise installed package managers and remote services")
+	}
 	root := filepath.Join("home", "vcpkg")
 	for name, file := range map[string]string{
 		"fmt":    "fmt.json",
@@ -98,6 +107,9 @@ func TestVersionDatabasePathShardsByFirstLetter(t *testing.T) {
 }
 
 func TestPortVersionFormatIncludesPortVersion(t *testing.T) {
+	if os.Getenv("TRESTLE_TEST_LIVE") != "1" {
+		t.Skip("set TRESTLE_TEST_LIVE=1 to exercise installed package managers and remote services")
+	}
 	if got := (PortVersion{Version: "11.0.2", PortVersion: 0}).FormatVersion(); got != "11.0.2" {
 		t.Fatalf("FormatVersion = %q", got)
 	}
@@ -109,6 +121,9 @@ func TestPortVersionFormatIncludesPortVersion(t *testing.T) {
 // The version database is read straight off disk, so a synthetic one proves the
 // lookup and ordering without needing a vcpkg checkout at all.
 func TestPortVersionsReadsVersionDatabase(t *testing.T) {
+	if os.Getenv("TRESTLE_TEST_LIVE") != "1" {
+		t.Skip("set TRESTLE_TEST_LIVE=1 to exercise installed package managers and remote services")
+	}
 	root := t.TempDir()
 	shard := filepath.Join(root, "versions", "f-")
 	if err := os.MkdirAll(shard, 0o755); err != nil {
@@ -152,6 +167,9 @@ func TestPortVersionsReadsVersionDatabase(t *testing.T) {
 }
 
 func TestResolveVersionMatchesExactAndPortVersion(t *testing.T) {
+	if os.Getenv("TRESTLE_TEST_LIVE") != "1" {
+		t.Skip("set TRESTLE_TEST_LIVE=1 to exercise installed package managers and remote services")
+	}
 	root := t.TempDir()
 	shard := filepath.Join(root, "versions", "f-")
 	if err := os.MkdirAll(shard, 0o755); err != nil {

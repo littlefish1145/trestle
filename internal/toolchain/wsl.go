@@ -122,7 +122,7 @@ func WSLExecutable(ctx context.Context, distribution string, names ...string) (s
 		} else if ctx.Err() != nil {
 			return "", fmt.Errorf("WSL probe %q in %q: %w", name, distribution, ctx.Err())
 		} else if exitErr, ok := runErr.(*exec.ExitError); ok {
-			detail = compactWSLOutput(exitErr.Stderr)
+			detail = compactWSLOutput(append(out, exitErr.Stderr...))
 		}
 	}
 	return "", fmt.Errorf("command not found in WSL distribution %q: %s; %s", distribution, strings.Join(names, ", "), detail)

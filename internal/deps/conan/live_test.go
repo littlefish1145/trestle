@@ -1,6 +1,7 @@
 package conan
 
 import (
+	"os"
 	"os/exec"
 	"testing"
 )
@@ -9,6 +10,9 @@ import (
 // actually prints, so the remote-keyed shape can never drift again. It is
 // skipped when conan is unavailable.
 func TestParseRealConanOutput(t *testing.T) {
+	if os.Getenv("TRESTLE_TEST_LIVE") != "1" {
+		t.Skip("set TRESTLE_TEST_LIVE=1 to exercise installed package managers and remote services")
+	}
 	if _, err := exec.LookPath("conan"); err != nil {
 		t.Skip("conan is not installed")
 	}

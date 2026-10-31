@@ -32,6 +32,9 @@ func vcpkgWithHistory(t *testing.T) vcpkg.Client {
 // path against an installed vcpkg checkout: the query must resolve through the
 // version database and come back with that release marked as requested.
 func TestNameVersionQueryResolvesRealVcpkgHistory(t *testing.T) {
+	if os.Getenv("TRESTLE_TEST_LIVE") != "1" {
+		t.Skip("set TRESTLE_TEST_LIVE=1 to exercise installed package managers and remote services")
+	}
 	client := vcpkgWithHistory(t)
 	all, err := client.PortVersions(context.Background(), "fmt")
 	if err != nil {
@@ -80,6 +83,9 @@ func TestNameVersionQueryResolvesRealVcpkgHistory(t *testing.T) {
 // is installed: either it errors, or it returns rows without the bogus version
 // marked as requested.
 func TestNameVersionQueryRejectsUnknownVersion(t *testing.T) {
+	if os.Getenv("TRESTLE_TEST_LIVE") != "1" {
+		t.Skip("set TRESTLE_TEST_LIVE=1 to exercise installed package managers and remote services")
+	}
 	root := t.TempDir()
 	path := filepath.Join(root, "trestle.toml")
 	cfg := config.Default("demo")
@@ -99,6 +105,9 @@ func TestNameVersionQueryRejectsUnknownVersion(t *testing.T) {
 
 // A bare search must yield each package name once, whichever providers answer.
 func TestBareSearchStillMergesBothProviders(t *testing.T) {
+	if os.Getenv("TRESTLE_TEST_LIVE") != "1" {
+		t.Skip("set TRESTLE_TEST_LIVE=1 to exercise installed package managers and remote services")
+	}
 	root := t.TempDir()
 	path := filepath.Join(root, "trestle.toml")
 	if err := config.Save(path, config.Default("demo")); err != nil {

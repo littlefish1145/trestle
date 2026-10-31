@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -14,6 +15,9 @@ import (
 // against the installed conan, so a remote-only recipe really shows up. It is
 // skipped when conan is not installed.
 func TestSearchPackagesQueriesRealConanRemotes(t *testing.T) {
+	if os.Getenv("TRESTLE_TEST_LIVE") != "1" {
+		t.Skip("set TRESTLE_TEST_LIVE=1 to exercise installed package managers and remote services")
+	}
 	root := t.TempDir()
 	path := filepath.Join(root, "trestle.toml")
 	cfg := config.Default("demo")

@@ -120,12 +120,22 @@ func command(action plan.Action) string {
 }
 
 func replacePaths(value string, inputs, outputs []string) string {
-	for _, input := range inputs {
-		value = strings.ReplaceAll(value, input, "$in")
+	// $in expands every input, so substituting individual inputs duplicates them.
+	if len(inputs) == 1 && value == inputs[0] {
+		return "$in"
 	}
-	for _, output := range outputs {
-		value = strings.ReplaceAll(value, output, "$out")
+	if len(outputs) == 1 {
+		output := outputs[0]
+		if value == output {
+			return "$out"
+		}
+		for _, prefix := range []string{"/Fo", "/Fe", "/OUT:", "/IMPLIB:"} {
+			if value == prefix+output {
+				return prefix + "$out"
+			}
+		}
 	}
+
 	return value
 }
 
