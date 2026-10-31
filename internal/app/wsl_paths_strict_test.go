@@ -36,3 +36,27 @@ func TestWSLArgumentTranslationUsesEachShaderRunnerDistribution(t *testing.T) {
 		t.Fatalf("shader used wrong distribution: %v", err)
 	}
 }
+
+func TestWindowsWSLPathSyntaxIndependentOfHost(t *testing.T) {
+	for _, value := range []string{`C:/source/main.cpp`, `d:\build space\out.o`, `C:relative`, `\\server\share\file`, `//wsl.localhost/Ubuntu/file`} {
+		if !isWindowsWSLPath(value) {
+			t.Errorf("Windows path not recognized: %q", value)
+		}
+	}
+	for _, value := range []string{"", "/usr/include", "../src/main.cpp", "-DVALUE=C:/data", "https://example.com", "1:/invalid"} {
+		if isWindowsWSLPath(value) {
+			t.Errorf("non-Windows path misclassified: %q", value)
+		}
+	}
+	for _, runner := range []string{"wsl.exe", `C:\Windows\System32\wsl.exe`, "C:/Windows/System32/WSL.EXE"} {
+		action := plan.Action{Command: plan.Command{Exe: runner, Args: []string{"--exec", "/usr/bin/glslc", "C:/source/main.comp"}}}
+		calls := 0
+		err := translateWSLAction(&action, func(value string) (string, error) {
+			calls++
+			return "/mnt/c/source/main.comp", nil
+		})
+		if err != nil || calls != 1 || action.Command.Args[2] != "/mnt/c/source/main.comp" {
+			t.Errorf("runner %q failed to translate its Windows argument: %+v, calls=%d, err=%v", runner, action, calls, err)
+		}
+	}
+}

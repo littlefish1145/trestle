@@ -125,3 +125,18 @@ go test -count=1 -v -timeout=10m ./internal/app -run TestRealWSLVulkanBuildAndIn
 本次 WSL 内验证使用 Windows Go 交叉构建的 Linux 测试二进制，直接在 ArchLinux 执行；与 Windows Go 再创建 WSL 子进程的执行方式有区别。相关日志为 `.trestle/vulkan-linux-pass.log`、`vulkan-device.log`、`vulkan-probe.log`、`vulkan-final-all.log`、`vulkan-final-cover.out`、`vulkan-race-final.log`、`vulkan-stress-final.log`、`vulkan-vet.log`。
 
 CI 已增加 Linux 上两种真实 shader 编译器与 SPIR-V 验证工具，并新增手动 WSL Vulkan 工作流；本次没有触发远程 CI。
+
+## CI 跨平台失败修正
+
+根据 macOS Actions 的实际失败日志，`TestTranslateWSLShaderActionPathsPrecisely` 在 Unix 宿主仅转换了 include 参数，没有识别 `C:/...`。原因是使用了依赖宿主语法的 `filepath.VolumeName`。现在按 Windows 驱动器/UNC 语法识别参数，并按同样的跨平台规则识别绝对 `wsl.exe` 路径；Windows、Linux 都执行同一套断言，没有跳过 Unix 测试。
+
+工作流补充了以下约束：
+
+- actionlint 固定版本 1.7.7 作为前置检查，声明 CUDA/WSL Vulkan 自托管标签，检查表达式和内嵌脚本。发布说明中的变量引用问题已由 ShellCheck 检出并修复。
+- 原生测试矩阵明确使用 Linux `g++`、Windows `clang-cl`、macOS `clang++`；检查编译器和 Ninja 后再运行真实构建。初始化中 `auto` 的多编译器告警不是这次测试退出的原因，真实原生构建使用显式选择。
+- Ninja 优先使用 runner 已安装的版本；缺少时安装到临时 venv，避免修改全局 Python 环境，并分别处理 Windows Git Bash PATH 与 GITHUB_PATH。
+- PR 执行质量门禁；手动运行执行检查和打包；只有 `main` push 能发布 release。日志上传工作流也仅处理 push 的正式发布，避免手动检查后查找不存在的 release。
+
+修复后的本地验证：Windows 全仓库 `go test -count=1 -timeout=8m ./...`、Windows 20 次乱序 race 路径回归、`go vet ./...` 通过；使用 Go 1.26.0 交叉编译的全部 Linux 测试二进制在 Ubuntu-24.04 WSL 实际执行通过，g++ 原生程序与 Workspace 构建/运行通过；同一 Linux 路径回归执行 20 次通过；Linux 上 actionlint 与 ShellCheck 0.10.0 对所有工作流检查通过。
+
+Linux 的独立 Go 1.26 工具链下载遇到 TLS 超时，因此该轮 Linux 测试使用本机 Go 1.26 交叉编译，测试中调用的 `go version` 等辅助命令使用 WSL 已安装的 Go。macOS 尚需 Actions 实际重跑确认，不能将交叉构建或 Linux 运行表述为 macOS 通过。日志保存在 `.trestle/ci-fix-windows.log` 和 `.trestle/ci-fix-linux.log`。

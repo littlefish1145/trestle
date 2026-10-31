@@ -2,7 +2,7 @@ package app
 
 import (
 	"context"
-	"path/filepath"
+	"path"
 	"strings"
 	"trestle/internal/plan"
 	"trestle/internal/toolchain"
@@ -14,7 +14,7 @@ func translateWSLArguments(ctx context.Context, distribution string, buildPlan *
 		if err := toolchain.ValidateWSLPath(distribution, value); err != nil {
 			return "", err
 		}
-		if filepath.VolumeName(value) == "" && !strings.HasPrefix(value, `\\`) {
+		if !isWindowsWSLPath(value) {
 			return strings.ReplaceAll(value, `\`, "/"), nil
 		}
 		if mapped, ok := cache[distribution+"\x00"+value]; ok {
@@ -48,7 +48,7 @@ func translateWSLArguments(ctx context.Context, distribution string, buildPlan *
 // translateWSLAction rewrites the host paths embedded in one WSL command's
 // arguments, leaving any other action untouched.
 func translateWSLAction(action *plan.Action, convert func(string) (string, error)) error {
-	if !strings.EqualFold(filepath.Base(action.Command.Exe), "wsl.exe") {
+	if !strings.EqualFold(path.Base(strings.ReplaceAll(action.Command.Exe, `\`, "/")), "wsl.exe") {
 		return nil
 	}
 	argumentStart := -1
@@ -67,7 +67,7 @@ func translateWSLAction(action *plan.Action, convert func(string) (string, error
 		if path == "" {
 			continue
 		}
-		if prefix == "" && filepath.VolumeName(arg) == "" && !strings.HasPrefix(arg, `\\`) {
+		if prefix == "" && !isWindowsWSLPath(arg) {
 			continue
 		}
 		mapped, err := convert(path)
@@ -77,6 +77,16 @@ func translateWSLAction(action *plan.Action, convert func(string) (string, error
 		action.Command.Args[j] = prefix + mapped
 	}
 	return nil
+}
+
+// WSL arguments use Windows path syntax even when a build plan is inspected
+// on Linux or macOS. filepath.VolumeName follows the host's syntax instead.
+func isWindowsWSLPath(value string) bool {
+	if strings.HasPrefix(value, `\\`) || strings.HasPrefix(value, "//") {
+		return true
+	}
+	return len(value) >= 2 && value[1] == ':' &&
+		(value[0] >= 'A' && value[0] <= 'Z' || value[0] >= 'a' && value[0] <= 'z')
 }
 
 // splitWSLArgument separates a Clang-style path flag into its literal prefix and
