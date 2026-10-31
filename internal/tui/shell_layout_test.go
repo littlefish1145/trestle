@@ -39,13 +39,17 @@ func TestWorkspaceShellFitsAllRoutesAndPaneStates(t *testing.T) {
 	base, _ := freshConsole(t)
 	for _, size := range [][2]int{{40, 12}, {68, 20}, {80, 24}, {100, 30}, {160, 50}} {
 		for _, route := range routes {
-			for state := 0; state < 4; state++ {
+			for state := 0; state < 8; state++ {
 				t.Run(fmt.Sprintf("%dx%d/%s/%d", size[0], size[1], route, state), func(t *testing.T) {
 					model := base
 					model.width, model.height, model.route = size[0], size[1], route
 					model.sidebarVisible = state&1 != 0
 					if state&2 != 0 {
 						model.workflowLog = []string{strings.Repeat("构建 output ", 20), "last line"}
+					}
+					if state&4 != 0 {
+						model.openInput("setting", "Edit setting")
+						model.inputText = strings.Repeat("长输入", 30)
 					}
 					assertFrameFits(t, model)
 				})
@@ -68,6 +72,8 @@ func assertFrameFits(t *testing.T, model dashboardModel) {
 	hint := "? help"
 	if model.commandsOpen {
 		hint = "esc close"
+	} else if model.inputMode {
+		hint = "enter save"
 	}
 	if !strings.Contains(lines[len(lines)-1], hint) {
 		t.Fatal("footer was clipped")

@@ -159,7 +159,7 @@ func (model dashboardModel) logTotal() int {
 	}
 	return len(model.logRows())
 }
-func (model dashboardModel) mainHeight() int { return max(1, model.height-7) }
+func (model dashboardModel) mainHeight() int { return max(1, model.height-5) }
 
 // Output occupies space only when there is work to inspect or the user focuses it.
 func (model dashboardModel) showOutput() bool {
@@ -255,7 +255,7 @@ func (model dashboardModel) renderDashboard(p palette) string {
 	}
 	header := strings.Split(model.header(p, width), "\n")[0]
 	footer := model.focusShortcut(p, width)
-	return fitRows(strings.Split(header+"\n\n"+main+"\n\n"+model.actionDock(p, width)+"\n"+footer, "\n"), width, height)
+	return fitRows(strings.Split(header+"\n\n"+main+"\n\n"+model.footerStatus(p, width)+"\n"+footer, "\n"), width, height)
 }
 
 // overlayContent builds the title and body lines for whichever full-screen
@@ -362,23 +362,16 @@ func (model dashboardModel) focusShortcut(p palette, width int) string {
 	return p.faint.Render(left + strings.Repeat(" ", max(1, width-ansi.StringWidth(left)-ansi.StringWidth(right))) + right)
 }
 
-// actionDock keeps prompts and the active build context in one fixed location.
-func (model dashboardModel) actionDock(p palette, width int) string {
-	context := p.accent.Render("Build") + p.faint.Render(" · ") + p.text.Render(fallback(model.config.Build.Profile, "auto"))
-	context += p.faint.Render(" · " + fallback(model.scopedConfig().Toolchain.CXX, "auto compiler"))
-	if model.isWorkspace() {
-		context += p.faint.Render(" · pkg: " + fallback(model.member, "all"))
+// footerStatus is an unobtrusive status row; only an active input shows a prompt.
+func (model dashboardModel) footerStatus(p palette, width int) string {
+	inner := max(1, width-2)
+	if model.inputMode || width < 68 {
+		return " " + model.statusLine(p, inner)
 	}
-	inner := max(1, width-4)
-	rows := []string{model.statusLine(p, inner), "", context}
-	marker := lipgloss.NewStyle().Foreground(lipgloss.Color(p.borderFocus)).Render("▎")
-	background := ansi.Style{}.BackgroundColor(lipgloss.Color(p.pillBg)).String()
-	resets := strings.NewReplacer(ansi.ResetStyle, ansi.ResetStyle+background, "\x1b[0m", "\x1b[0m"+background)
-	for i, row := range rows {
-		content := fitRows([]string{" " + ansi.Truncate(row, inner, "…")}, max(1, width-1), 1)
-		rows[i] = marker + background + resets.Replace(content) + ansi.ResetStyle
-	}
-	return strings.Join(rows, "\n")
+	compiler := ansi.Truncate(fallback(model.scopedConfig().Toolchain.CXX, "auto compiler"), max(1, width/3), "…")
+	left := model.statusLine(p, max(1, inner-ansi.StringWidth(compiler)-3))
+	space := max(1, inner-ansi.StringWidth(left)-ansi.StringWidth(compiler))
+	return " " + left + strings.Repeat(" ", space) + p.faint.Render(compiler) + " "
 }
 
 func (model *dashboardModel) showDetails() {
