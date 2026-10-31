@@ -288,7 +288,7 @@ func (model dashboardModel) handleEnterKey() (tea.Model, tea.Cmd, bool) {
 		return updated, cmd, true
 	case TasksRoute:
 		return model.enterTasks()
-	case TargetsRoute, BuildRoute:
+	case OverviewRoute, TargetsRoute, BuildRoute:
 		updated, cmd := model.startSelectedTargetBuild()
 		return updated, cmd, true
 	case TestsRoute:
@@ -415,7 +415,7 @@ func (model dashboardModel) enterDoctor() (tea.Model, tea.Cmd, bool) {
 // handleListKeys dispatches the per-screen list actions: install or search
 // packages, add or remove dependencies, and save presets.
 func (model dashboardModel) handleListKeys(key tea.Key) (tea.Model, tea.Cmd, bool) {
-	if (model.route == TargetsRoute || model.route == BuildRoute) && key.String() == "/" {
+	if (model.route == OverviewRoute || model.route == TargetsRoute || model.route == BuildRoute) && key.String() == "/" {
 		model.openInput("target-search", "Filter targets by name (member:target; empty clears)")
 		model.inputText = model.targetQuery
 		return model, nil, true
@@ -446,7 +446,7 @@ func (model dashboardModel) addKey() (tea.Model, tea.Cmd, bool) {
 	case model.route == TestsRoute:
 		updated, cmd := model.startTests(TestSelection{All: true}, "All tests")
 		return updated, cmd, true
-	case model.route == TargetsRoute || model.route == BuildRoute:
+	case model.route == OverviewRoute || model.route == TargetsRoute || model.route == BuildRoute:
 		updated, cmd := model.startTargetBuild(nil, true, "Build all targets")
 		return updated, cmd, true
 	case model.route == PresetsRoute:
@@ -516,7 +516,7 @@ func (model dashboardModel) installKey() (tea.Model, tea.Cmd, bool) {
 // featuresKey force-builds the selected target, toggles the tests job/file view,
 // or opens the feature prompt for the selected package.
 func (model dashboardModel) featuresKey() (tea.Model, tea.Cmd, bool) {
-	if model.route == TargetsRoute || model.route == BuildRoute {
+	if model.route == OverviewRoute || model.route == TargetsRoute || model.route == BuildRoute {
 		if row, ok := model.selectedTargetRow(); ok {
 			updated, cmd := model.startForcedTargetBuild(row)
 			return updated, cmd, true
@@ -558,7 +558,7 @@ func (model dashboardModel) deleteKey() (tea.Model, tea.Cmd, bool) {
 			return updated, cmd, true
 		}
 		model.openInput("remove", "Remove configured package")
-	case model.route == TargetsRoute:
+	case model.route == OverviewRoute || model.route == TargetsRoute:
 		if row, ok := model.selectedTargetRow(); ok {
 			if row.member != "" && row.member != model.member {
 				// An aggregate row from another member: make that member the

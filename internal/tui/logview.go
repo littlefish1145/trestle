@@ -241,6 +241,8 @@ func (model dashboardModel) renderDashboard(p palette) string {
 	mainHeight := model.mainHeight()
 	var main string
 	switch {
+	case model.commandsOpen:
+		main = model.commandPanel(p, width, mainHeight)
 	case model.help || model.details || model.history:
 		title, lines := model.overlayContent(p, width)
 		main = fittedPanel(p, title, sliceViewport(lines, model.overlayScroll, max(1, mainHeight-3)), width, mainHeight, true)
@@ -355,17 +357,25 @@ func (model dashboardModel) navigationPanel(p palette, width, height int) string
 }
 
 func (model dashboardModel) focusShortcut(p palette, width int) string {
+	if model.commandsOpen {
+		return ansi.Truncate(p.faint.Render("? help  ↑↓ select   enter run   esc close   ctrl+u clear"), width, "")
+	}
 	if model.inputMode {
 		return ansi.Truncate(p.faint.Render(" enter save   esc cancel   ctrl+u clear   ctrl+w delete word"), width, "")
 	}
-	if model.focus == focusLog {
-		return ansi.Truncate(p.faint.Render("? help  / search  End follow  F2 full  Tab page  q quit"), width, "")
-	}
 	context := model.shortcutContext()
-	if model.focus == focusNavigation {
+	if model.focus == focusLog {
+		context = "/ search   End follow   F2 full   Tab page"
+	} else if model.focus == focusNavigation {
 		context = "↑↓ navigate   enter open   ctrl+b hide navigation"
 	}
-	return ansi.Truncate(p.faint.Render("? help  "+context+"   ctrl+b navigation"), width, "")
+	left := "? help  " + context
+	right := "ctrl+p commands "
+	if width < 55 {
+		left = "? help  b build"
+	}
+	left = ansi.Truncate(left, max(1, width-ansi.StringWidth(right)-2), "…")
+	return p.faint.Render(left + strings.Repeat(" ", max(1, width-ansi.StringWidth(left)-ansi.StringWidth(right))) + right)
 }
 
 // actionDock keeps prompts and the active build context in one fixed location.

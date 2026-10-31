@@ -309,7 +309,9 @@ func (model dashboardModel) applyMouseWheel(wheel tea.MouseWheelMsg) dashboardMo
 		delta = 3
 	}
 	if delta != 0 {
-		if model.help || model.details || model.history {
+		if model.commandsOpen {
+			model.commandCursor = min(max(0, len(model.matchingCommands())-1), max(0, model.commandCursor+delta))
+		} else if model.help || model.details || model.history {
 			model.overlayScroll = max(0, model.overlayScroll+delta)
 		} else if model.showOutput() && (model.fullLog || model.mouseInOutput(mouse.X, mouse.Y) || model.focus == focusLog) {
 			model.focus = focusLog
@@ -327,7 +329,7 @@ func (model dashboardModel) applyMouseWheel(wheel tea.MouseWheelMsg) dashboardMo
 func (model dashboardModel) applyMouseClick(click tea.MouseClickMsg) dashboardModel {
 	if click.Mouse().Button == tea.MouseLeft {
 		mouse := click.Mouse()
-		if model.help || model.details || model.history || mouse.Y < 2 || mouse.Y >= 2+model.mainHeight() {
+		if model.commandsOpen || model.help || model.details || model.history || mouse.Y < 2 || mouse.Y >= 2+model.mainHeight() {
 			return model
 		}
 		model.focus = focusContent

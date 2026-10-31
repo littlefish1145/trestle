@@ -280,6 +280,9 @@ type dashboardModel struct {
 	pendingTaskPreview config.TaskPreview
 	lightBackground    bool
 	sidebarVisible     bool
+	commandsOpen       bool
+	commandQuery       string
+	commandCursor      int
 }
 
 type palette struct {
@@ -395,6 +398,24 @@ func (model dashboardModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		return model.applyMouseClick(value), nil
 	case tea.KeyPressMsg:
 		return model.handleKey(value)
+	case tea.PasteMsg:
+		text := strings.Map(func(char rune) rune {
+			if char == '\n' || char == '\r' || char == '\t' {
+				return ' '
+			}
+			if char < 32 || char == 127 {
+				return -1
+			}
+			return char
+		}, value.Content)
+		if model.commandsOpen {
+			model.commandQuery += text
+			model.commandCursor = 0
+		} else if model.inputMode {
+			model.inputText += text
+			model.updateInputFilter()
+		}
+		return model, nil
 	}
 	return model, nil
 }
@@ -403,6 +424,13 @@ func (model dashboardModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 // active screen's key groups, in the order the overlays take precedence.
 func (model dashboardModel) handleKey(message tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	key := message.Key()
+	if model.commandsOpen {
+		return model.handleCommandKey(key)
+	}
+	if key.String() == "ctrl+p" && !model.inputMode && model.pendingTask == "" {
+		model.commandsOpen, model.commandQuery, model.commandCursor = true, "", 0
+		return model, nil
+	}
 	if !model.inputMode && model.pendingTask == "" {
 		if updated, cmd, handled := model.handlePanels(key.String()); handled {
 			return updated, cmd
@@ -479,6 +507,11 @@ func (model dashboardModel) handleInput(key tea.Key) (tea.Model, tea.Cmd) {
 			model.inputText += key.Text
 		}
 	}
+	model.updateInputFilter()
+	return model, nil
+}
+
+func (model *dashboardModel) updateInputFilter() {
 	if model.inputMode && model.inputKind == "settings-search" {
 		model.settingsQuery = model.inputText
 		model.settingsCategory = ""
@@ -488,7 +521,6 @@ func (model dashboardModel) handleInput(key tea.Key) (tea.Model, tea.Cmd) {
 		model.targetQuery = model.inputText
 		model.cursor, model.scroll = 0, 0
 	}
-	return model, nil
 }
 
 func callOne(action func(string) error, value, service string) error {
@@ -1089,6 +1121,7 @@ func (model *dashboardModel) keepCursorVisible() {
 // itemCounters maps each screen to the function that counts its selectable
 // rows, so itemCount stays a single lookup.
 var itemCounters = map[Route]func(dashboardModel) int{
+	OverviewRoute:     func(model dashboardModel) int { return len(model.targetRows()) },
 	TargetsRoute:      func(model dashboardModel) int { return len(model.targetRows()) },
 	TasksRoute:        func(model dashboardModel) int { return len(model.scopedTasks()) },
 	DependenciesRoute: dashboardModel.dependencyCount,
@@ -1437,27 +1470,15 @@ func (model dashboardModel) loadingLines(p palette) []string {
 }
 
 func (model dashboardModel) overviewLines(p palette, width int) []string {
-	lines := []string{p.muted.Render(fmt.Sprintf("%d targets · %d sources · %d packages", model.probe.Targets, model.probe.Sources, len(model.scopedConfig().Packages)))}
-	ready := 0
-	for _, component := range model.probe.Components {
-		if component.Ready {
-			ready++
-		}
+	lines := []string{
+		p.muted.Render(fmt.Sprintf("%d targets · %d sources · %d packages", len(model.targetRows()), model.probe.Sources, len(model.scopedConfig().Packages))),
+		p.faint.Render("Last build: " + model.lastRun),
 	}
-	lines = append(lines,
-		"", p.title.Render("Build"),
-		p.text.Render("b build default targets")+p.faint.Render(" · p switch debug / release"),
-		p.muted.Render("Last build: "+model.lastRun),
-		"", p.title.Render("Environment"),
-		statusRow(p, model.probe.Ninja, "Ninja backend", "not found on PATH"),
-		statusRow(p, model.probe.Vulkan, "Vulkan SDK", "optional; not detected"),
-		statusRow(p, ready > 0, fmt.Sprintf("%d development components detected", ready), "no compiler or SDK detected"),
-		statusRow(p, model.probe.Vcpkg, "vcpkg package installer", "online search works; installation needs vcpkg on PATH"),
-	)
 	if model.probe.Error != nil {
 		lines = append(lines, "", p.danger.Render("Fix project configuration before building"), p.muted.Render(model.probe.Error.Error()))
 	}
-	return lines
+	lines = append(lines, "", p.title.Render("Targets")+p.faint.Render(" · enter builds the selection · b builds defaults"))
+	return append(lines, model.targetLines(p, width)...)
 }
 
 func (model dashboardModel) stat(p palette, value, label string) string {
@@ -2100,7 +2121,10 @@ func (model dashboardModel) statusLine(p palette, width int) string {
 	}
 	line := icon + "  " + style.Render(model.message)
 	if model.inputMode {
-		line = p.faint.Render(model.inputLabel()+"  ") + p.accent.Render("› ") + p.text.Render(model.inputText) + p.accent.Render("▏") + p.faint.Render("   enter save · esc cancel")
+		label := ansi.Truncate(model.inputLabel(), max(1, width/3), "…")
+		prefix := p.faint.Render(label+"  ") + p.accent.Render("› ")
+		text := inputTail(model.inputText, max(1, width-ansi.StringWidth(prefix)-1))
+		line = prefix + p.text.Render(text) + p.accent.Render("▏")
 	}
 	return ansi.Truncate(line, width, "…")
 }
@@ -2141,6 +2165,7 @@ func (model dashboardModel) inputLabel() string {
 
 // shortcutContexts is the route-specific key hint shown in the footer.
 var shortcutContexts = map[Route]string{
+	OverviewRoute:   "b build   ↵ selected   / filter   p profile",
 	ToolchainsRoute: "↵ native or WSL compiler/SDK   c CUDA   v Vulkan   x apply preset",
 	PresetsRoute:    "↵ apply   n save current   d delete",
 	ImportRoute:     "↵ / i auto import CMake/Xmake   r refresh",
