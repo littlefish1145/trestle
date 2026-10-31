@@ -109,26 +109,43 @@ func (model dashboardModel) backKey() (tea.Model, tea.Cmd) {
 // content and log panes.
 func (model dashboardModel) handleFocusKeys(key tea.Key) (tea.Model, tea.Cmd, bool) {
 	switch key.String() {
-	case "tab":
-		model.focus = (model.focus + 1) % 3
-		if model.focus == focusContent {
-			model.keepCursorVisible()
+	case "ctrl+b":
+		model.sidebarVisible = !model.sidebarVisible
+		if model.sidebarVisible {
+			model.focus = focusNavigation
+		} else {
+			model.focus = focusContent
 		}
-		return model, nil, true
-	case "shift+tab":
-		model.focus = (model.focus + 2) % 3
-		if model.focus == focusContent {
-			model.keepCursorVisible()
+	case "tab", "shift+tab":
+		panes := []focusArea{focusContent}
+		if model.sidebarVisible {
+			panes = append([]focusArea{focusNavigation}, panes...)
 		}
-		return model, nil, true
+		if model.showOutput() {
+			panes = append(panes, focusLog)
+		}
+		index := 0
+		for i, pane := range panes {
+			if model.focus == pane {
+				index = i
+				break
+			}
+		}
+		delta := 1
+		if key.String() == "shift+tab" {
+			delta = len(panes) - 1
+		}
+		model.focus = panes[(index+delta)%len(panes)]
 	case "left", "h":
+		model.sidebarVisible = true
 		model.focus = focusNavigation
-		return model, nil, true
 	case "right", "l":
 		model.focus = focusContent
-		return model, nil, true
+	default:
+		return model, nil, false
 	}
-	return model, nil, false
+	model.keepCursorVisible()
+	return model, nil, true
 }
 
 // handleMoveKeys dispatches cursor and viewport movement, including the

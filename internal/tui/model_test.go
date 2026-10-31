@@ -32,7 +32,9 @@ func TestModelTransitions(t *testing.T) {
 
 func TestDashboardNavigationAndFocus(t *testing.T) {
 	model := newDashboard("trestle.toml", Services{})
-	updated, _ := model.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyDown}))
+	updated, _ := model.Update(tea.KeyPressMsg(tea.Key{Code: 'b', Mod: tea.ModCtrl}))
+	model = updated.(dashboardModel)
+	updated, _ = model.Update(tea.KeyPressMsg(tea.Key{Code: tea.KeyDown}))
 	model = updated.(dashboardModel)
 	if model.route != TargetsRoute {
 		t.Fatalf("down should select Targets, got %s", model.route)
@@ -342,7 +344,7 @@ func TestDashboardSettingsAndReleasePages(t *testing.T) {
 	model.config.CompilerPresets["fast"] = config.CompilerPreset{CXX: "clang++", CXXFlags: []string{"-march=native"}}
 	model.route = SettingsRoute
 	view := ansi.Strip(model.View().Content)
-	for _, expected := range []string{"Project", "Toolchain & SDKs", "Dependencies", "Target · app", "/ search"} {
+	for _, expected := range []string{"Project", "Toolchain & SDKs", "vcpkg", "conan", "Target · app", "/ search"} {
 		if !strings.Contains(view, expected) {
 			t.Fatalf("settings missing %q:\n%s", expected, view)
 		}

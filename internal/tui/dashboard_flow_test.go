@@ -585,7 +585,7 @@ func TestUpdateMouseTargets(t *testing.T) {
 	model.route, model.workflowRoute = BuildRoute, BuildRoute
 	model.workflowLog = []string{"line 1", "line 2", "line 3"}
 
-	next, _ := model.Update(tea.MouseClickMsg(tea.Mouse{X: 20, Y: 40, Button: tea.MouseLeft}))
+	next, _ := model.Update(tea.MouseClickMsg(tea.Mouse{X: 20, Y: 2 + model.mainHeight() - 1, Button: tea.MouseLeft}))
 	model = next.(dashboardModel)
 	if model.focus != focusLog {
 		t.Fatal("a click inside the log area must focus the log")

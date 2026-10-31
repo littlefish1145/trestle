@@ -57,14 +57,14 @@ func TestPaletteLeavesProseToTheTerminalTheme(t *testing.T) {
 func TestDarkPalettePinsTheSignatureColors(t *testing.T) {
 	palette := newPalette(false)
 	assertFg(t, palette.brand.GetForeground(), "#67e8f9")
-	assertFg(t, palette.muted.GetForeground(), "#94a3b8")
-	assertFg(t, palette.faint.GetForeground(), "#64748b")
+	assertFg(t, palette.muted.GetForeground(), "#a3a3a3")
+	assertFg(t, palette.faint.GetForeground(), "#737373")
 	assertFg(t, palette.accent.GetForeground(), "#7dd3fc")
 	assertFg(t, palette.good.GetForeground(), "#86efac")
 	assertFg(t, palette.warning.GetForeground(), "#fcd34d")
 	assertFg(t, palette.danger.GetForeground(), "#fda4af")
 	assertFg(t, palette.selected.GetForeground(), "#ecfeff")
-	assertBg(t, palette.selected.GetBackground(), "#17324d")
+	assertBg(t, palette.selected.GetBackground(), "#262626")
 	for name, hex := range map[string]string{"pillBg": palette.pillBg, "borderMuted": palette.borderMuted, "borderFocus": palette.borderFocus} {
 		if hex == "" {
 			t.Fatalf("%s must stay hardcoded, got empty", name)
@@ -84,7 +84,7 @@ func TestLightPaletteSwapsToReadableVariants(t *testing.T) {
 	assertFg(t, light.good.GetForeground(), "#15803d")
 	assertFg(t, light.warning.GetForeground(), "#b45309")
 	assertFg(t, light.danger.GetForeground(), "#be123c")
-	assertBg(t, light.selected.GetBackground(), "#0e7490")
+	assertBg(t, light.selected.GetBackground(), "#e2e8f0")
 	if light.pillBg == dark.pillBg || light.borderMuted == dark.borderMuted || light.borderFocus == dark.borderFocus {
 		t.Fatal("light palette borders and chips must differ from dark")
 	}

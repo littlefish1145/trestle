@@ -53,6 +53,7 @@ func (model dashboardModel) applyInstallBatch(batch installBatch) (tea.Model, te
 // to its bottom.
 func (model dashboardModel) applyWindowSize(size tea.WindowSizeMsg) dashboardModel {
 	model.width, model.height = size.Width, size.Height
+	model.keepCursorVisible()
 	if model.logFollow && model.hasLog() {
 		model.logScroll = model.maxLogScroll()
 	}
@@ -310,7 +311,7 @@ func (model dashboardModel) applyMouseWheel(wheel tea.MouseWheelMsg) dashboardMo
 	if delta != 0 {
 		if model.help || model.details || model.history {
 			model.overlayScroll = max(0, model.overlayScroll+delta)
-		} else if model.hasLog() && (model.fullLog || mouse.Y >= model.height-model.logHeight()-2 || model.focus == focusLog) {
+		} else if model.showOutput() && (model.fullLog || model.mouseInOutput(mouse.X, mouse.Y) || model.focus == focusLog) {
 			model.focus = focusLog
 			model.scrollLog(delta)
 		} else {
@@ -325,10 +326,24 @@ func (model dashboardModel) applyMouseWheel(wheel tea.MouseWheelMsg) dashboardMo
 // content pane otherwise.
 func (model dashboardModel) applyMouseClick(click tea.MouseClickMsg) dashboardModel {
 	if click.Mouse().Button == tea.MouseLeft {
+		mouse := click.Mouse()
+		if model.help || model.details || model.history || mouse.Y < 2 || mouse.Y >= 2+model.mainHeight() {
+			return model
+		}
 		model.focus = focusContent
-		if model.hasLog() && (model.fullLog || click.Mouse().Y >= model.height-model.logHeight()-2) {
+		if model.showOutput() && (model.fullLog || model.mouseInOutput(mouse.X, mouse.Y)) {
 			model.focus = focusLog
 		}
 	}
 	return model
+}
+
+func (model dashboardModel) mouseInOutput(x, y int) bool {
+	if model.showSidebar() && x <= sidebarWidth(model.width) {
+		return false
+	}
+	if model.height < 20 && model.focus != focusLog {
+		return false
+	}
+	return y >= 2+model.mainHeight()-model.logHeight() && y < 2+model.mainHeight()
 }

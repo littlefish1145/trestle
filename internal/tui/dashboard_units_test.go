@@ -332,10 +332,10 @@ func TestDiagnosticsLogRoutingAndNavigation(t *testing.T) {
 	if navigationKey(0) != "1" || navigationKey(8) != "9" || navigationKey(9) != "0" || navigationKey(10) != " " {
 		t.Fatal("navigation keys wrong")
 	}
-	if width := sidebarWidth(60); width != 30 {
+	if width := sidebarWidth(60); width != 24 {
 		t.Fatalf("narrow sidebar = %d", width)
 	}
-	if width := sidebarWidth(200); width != 34 {
+	if width := sidebarWidth(200); width != 28 {
 		t.Fatalf("wide sidebar = %d", width)
 	}
 	if key := routeIndex(TasksRoute); key < 0 || routes[key] != TasksRoute {

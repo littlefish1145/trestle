@@ -93,7 +93,7 @@ func TestWorkspaceTreeStartsWithOnlyRootExpanded(t *testing.T) {
 func TestFlatNavigationShowsMarkersBeyondTen(t *testing.T) {
 	model, _ := freshConsole(t)
 	side := ansi.Strip(model.sidebar(newPalette(false), 44, 60))
-	for _, expected := range []string{"0  ▶  Build", "·  ◆  Release", "·  ✚  Doctor", "·  ≡  Settings"} {
+	for _, expected := range []string{"0 Build", "· Release", "· Doctor", "· Settings"} {
 		if !strings.Contains(side, expected) {
 			t.Fatalf("flat navigation missing %q:\n%s", expected, side)
 		}

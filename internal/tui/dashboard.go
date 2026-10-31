@@ -279,6 +279,7 @@ type dashboardModel struct {
 	pendingTask        string
 	pendingTaskPreview config.TaskPreview
 	lightBackground    bool
+	sidebarVisible     bool
 }
 
 type palette struct {
@@ -301,11 +302,11 @@ func newPalette(light bool) palette {
 			muted:       lipgloss.NewStyle().Foreground(lipgloss.Color("#64748b")),
 			faint:       lipgloss.NewStyle().Foreground(lipgloss.Color("#94a3b8")),
 			accent:      lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#0284c7")),
-			selected:    lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#ecfeff")).Background(lipgloss.Color("#0e7490")),
+			selected:    lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#0e7490")).Background(lipgloss.Color("#e2e8f0")),
 			good:        lipgloss.NewStyle().Foreground(lipgloss.Color("#15803d")),
 			warning:     lipgloss.NewStyle().Foreground(lipgloss.Color("#b45309")),
 			danger:      lipgloss.NewStyle().Foreground(lipgloss.Color("#be123c")),
-			pillBg:      "#e2e8f0",
+			pillBg:      "#eef0f2",
 			borderMuted: "#cbd5e1",
 			borderFocus: "#0284c7",
 			border:      lipgloss.RoundedBorder(),
@@ -315,16 +316,16 @@ func newPalette(light bool) palette {
 		brand:       lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#67e8f9")),
 		title:       lipgloss.NewStyle().Bold(true),
 		text:        lipgloss.NewStyle(),
-		muted:       lipgloss.NewStyle().Foreground(lipgloss.Color("#94a3b8")),
-		faint:       lipgloss.NewStyle().Foreground(lipgloss.Color("#64748b")),
+		muted:       lipgloss.NewStyle().Foreground(lipgloss.Color("#a3a3a3")),
+		faint:       lipgloss.NewStyle().Foreground(lipgloss.Color("#737373")),
 		accent:      lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#7dd3fc")),
-		selected:    lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#ecfeff")).Background(lipgloss.Color("#17324d")),
+		selected:    lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#ecfeff")).Background(lipgloss.Color("#262626")),
 		good:        lipgloss.NewStyle().Foreground(lipgloss.Color("#86efac")),
 		warning:     lipgloss.NewStyle().Foreground(lipgloss.Color("#fcd34d")),
 		danger:      lipgloss.NewStyle().Foreground(lipgloss.Color("#fda4af")),
-		pillBg:      "#111d2e",
-		borderMuted: "#334155",
-		borderFocus: "#38bdf8",
+		pillBg:      "#1c1c1c",
+		borderMuted: "#404040",
+		borderFocus: "#60a5fa",
 		border:      lipgloss.RoundedBorder(),
 	}
 }
@@ -342,7 +343,7 @@ func RunDashboard(path string, services Services) error {
 
 func newDashboard(path string, services Services) dashboardModel {
 	return dashboardModel{
-		path: path, services: services, route: OverviewRoute, focus: focusNavigation,
+		path: path, services: services, route: OverviewRoute, focus: focusContent,
 		width: 100, height: 30, probing: true, discovering: true, wslDiscovering: true, lastRun: "No build in this session",
 		message: "Reading project configuration…", navCursor: 1,
 	}
@@ -1066,12 +1067,12 @@ func (model *dashboardModel) clampCursor() {
 func (model *dashboardModel) keepCursorVisible() {
 	row := 0
 	found := false
-	for _, line := range model.contentLines(model.palette(), max(1, model.contentWidth()-2)) {
+	for _, line := range model.contentLines(model.palette(), max(1, model.contentWidth()-4)) {
 		if strings.HasPrefix(strings.TrimSpace(ansi.Strip(line)), "› ") {
 			found = true
 			break
 		}
-		row += len(wrapText(line, max(1, model.contentWidth()-2)))
+		row += len(wrapText(line, max(1, model.contentWidth()-4)))
 	}
 	if !found {
 		return
@@ -1150,7 +1151,7 @@ func (model dashboardModel) settingsItemCount() int {
 
 func (model dashboardModel) viewportHeight() int {
 	height := model.mainHeight()
-	if model.height >= 20 && !model.fullLog {
+	if model.height >= 20 && !model.fullLog && model.showOutput() {
 		height -= model.logHeight()
 	}
 	return max(1, height-3)
@@ -1163,8 +1164,8 @@ func (model *dashboardModel) scrollContent(delta int) {
 
 func (model dashboardModel) maxContentScroll() int {
 	var wrapped []string
-	for _, line := range model.contentLines(model.palette(), max(1, model.contentWidth()-2)) {
-		wrapped = append(wrapped, wrapText(line, max(1, model.contentWidth()-2))...)
+	for _, line := range model.contentLines(model.palette(), max(1, model.contentWidth()-4)) {
+		wrapped = append(wrapped, wrapText(line, max(1, model.contentWidth()-4))...)
 	}
 	return max(0, len(wrapped)-model.viewportHeight())
 }
@@ -1189,14 +1190,16 @@ func (model *dashboardModel) followVisibleLog(route Route) {
 }
 
 func (model dashboardModel) contentWidth() int {
-	if model.width < 96 {
+	if !model.showSidebar() {
 		return model.width
 	}
 	navWidth := sidebarWidth(model.width)
 	return max(30, model.width-navWidth-1)
 }
 
-func sidebarWidth(total int) int { return min(34, max(30, total/5)) }
+func sidebarWidth(total int) int { return min(28, max(24, total/5)) }
+
+func (model dashboardModel) showSidebar() bool { return model.sidebarVisible && model.width >= 80 }
 
 func navigationLabel(route Route) string {
 	switch route {
@@ -1274,6 +1277,7 @@ func (model dashboardModel) header(p palette, width int) string {
 		right = model.pill(p, "pkg: "+fallback(model.member, "all"), "accent") + " "
 	}
 	right += model.pill(p, fallback(model.config.Build.Profile, "auto"), "accent") + " " + model.pill(p, model.activityLabel(), model.activityTone())
+	left = ansi.Truncate(left, max(1, width-lipgloss.Width(right)-1), "…")
 	space := max(1, width-lipgloss.Width(left)-lipgloss.Width(right))
 	first := left + strings.Repeat(" ", space) + right
 	return ansi.Truncate(first, width, "") + "\n" + ansi.Truncate(p.faint.Render(" Unified workspace / build / dependency console"), width, "")
@@ -1331,7 +1335,7 @@ func (model dashboardModel) sidebar(p palette, width, height int) string {
 	}
 	lines := []string{p.faint.Render(" WORKSPACE"), ""}
 	for index, route := range routes {
-		label := fmt.Sprintf(" %s  %s  %s", navigationKeyLabel(index), routeGlyph[route], navigationLabel(route))
+		label := fmt.Sprintf("%s %s", navigationKeyLabel(index), navigationLabel(route))
 		if route == model.route {
 			marker := "  "
 			if model.focus == focusNavigation {
@@ -1365,16 +1369,12 @@ func (model dashboardModel) compactNavigation(p palette, width int) string {
 }
 
 func (model dashboardModel) contentPanel(p palette, width, height int) string {
-	innerWidth, innerHeight := max(18, width-4), max(3, height-4)
 	title, subtitle := model.routeHeading()
-	heading := p.title.Render(routeGlyph[model.route]+"  "+title) + "  " + p.faint.Render(subtitle)
-	lines := sliceViewport(model.contentLines(p, innerWidth), model.scroll, max(1, innerHeight-2))
-	body := heading + "\n" + p.faint.Render(strings.Repeat("─", max(1, min(innerWidth, 72)))) + "\n" + strings.Join(lines, "\n")
-	borderColor := p.borderMuted
-	if model.focus == focusContent {
-		borderColor = p.borderFocus
+	var lines []string
+	for _, line := range model.contentLines(p, max(1, width-4)) {
+		lines = append(lines, wrapText(line, max(1, width-4))...)
 	}
-	return lipgloss.NewStyle().Border(p.border).BorderForeground(lipgloss.Color(borderColor)).Padding(0, 1).Width(width - 4).Height(max(1, height-2)).Render(body)
+	return fittedPanel(p, title+" · "+subtitle, sliceViewport(lines, model.scroll, max(1, height-3)), width, height, model.focus == focusContent)
 }
 
 // routeHeadings names each screen's panel title and subtitle.
@@ -1437,13 +1437,7 @@ func (model dashboardModel) loadingLines(p palette) []string {
 }
 
 func (model dashboardModel) overviewLines(p palette, width int) []string {
-	stats := []string{model.stat(p, fmt.Sprint(model.probe.Targets), "targets"), model.stat(p, fmt.Sprint(model.probe.Sources), "sources"), model.stat(p, fmt.Sprint(len(model.config.Packages)), "packages")}
-	var lines []string
-	if width >= 55 {
-		lines = append(lines, lipgloss.JoinHorizontal(lipgloss.Top, stats[0], "  ", stats[1], "  ", stats[2]))
-	} else {
-		lines = append(lines, stats...)
-	}
+	lines := []string{p.muted.Render(fmt.Sprintf("%d targets · %d sources · %d packages", model.probe.Targets, model.probe.Sources, len(model.scopedConfig().Packages)))}
 	ready := 0
 	for _, component := range model.probe.Components {
 		if component.Ready {
@@ -1451,20 +1445,17 @@ func (model dashboardModel) overviewLines(p palette, width int) []string {
 		}
 	}
 	lines = append(lines,
-		"", p.title.Render("Getting started"),
-		p.text.Render("Toolchains → Doctor → Packages → Build"),
-		p.muted.Render("Select a compiler, check readiness, install dependencies, then build."),
+		"", p.title.Render("Build"),
+		p.text.Render("b build default targets")+p.faint.Render(" · p switch debug / release"),
+		p.muted.Render("Last build: "+model.lastRun),
 		"", p.title.Render("Environment"),
 		statusRow(p, model.probe.Ninja, "Ninja backend", "not found on PATH"),
 		statusRow(p, model.probe.Vulkan, "Vulkan SDK", "optional; not detected"),
 		statusRow(p, ready > 0, fmt.Sprintf("%d development components detected", ready), "no compiler or SDK detected"),
 		statusRow(p, model.probe.Vcpkg, "vcpkg package installer", "online search works; installation needs vcpkg on PATH"),
-		"", p.title.Render("Next action"),
 	)
 	if model.probe.Error != nil {
-		lines = append(lines, p.danger.Render("Fix project configuration before building"), p.muted.Render(model.probe.Error.Error()))
-	} else {
-		lines = append(lines, p.text.Render("Press b to build the active profile"), p.muted.Render("Configuration, environment diagnostics, and actions stay in one console."))
+		lines = append(lines, "", p.danger.Render("Fix project configuration before building"), p.muted.Render(model.probe.Error.Error()))
 	}
 	return lines
 }

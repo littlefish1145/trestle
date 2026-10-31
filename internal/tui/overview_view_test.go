@@ -75,12 +75,10 @@ func TestViewOverlayPanorama(t *testing.T) {
 func TestContentPanelFraming(t *testing.T) {
 	model, _ := freshConsole(t)
 	model.route = OverviewRoute
+	model.focus = focusNavigation
 	pane := model.contentPanel(model.palette(), 110, 34)
 	if !strings.Contains(compactLine(pane), "Project overview") {
 		t.Fatalf("panel heading missing: %q", compactLine(pane))
-	}
-	if model.focus == focusContent {
-		t.Fatal("fresh console must not start focused on content")
 	}
 	model.focus = focusContent
 	if pane == model.contentPanel(model.palette(), 110, 34) {

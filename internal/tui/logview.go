@@ -136,9 +136,9 @@ func (model dashboardModel) hasLog() bool {
 }
 func (model dashboardModel) logWidth() int {
 	if model.fullLog {
-		return max(1, model.width-2)
+		return max(1, model.width-4)
 	}
-	return max(1, model.contentWidth()-2)
+	return max(1, model.contentWidth()-4)
 }
 func (model dashboardModel) logRows() []string {
 	var result []string
@@ -159,7 +159,12 @@ func (model dashboardModel) logTotal() int {
 	}
 	return len(model.logRows())
 }
-func (model dashboardModel) mainHeight() int { return max(1, model.height-4) }
+func (model dashboardModel) mainHeight() int { return max(1, model.height-7) }
+
+// Output occupies space only when there is work to inspect or the user focuses it.
+func (model dashboardModel) showOutput() bool {
+	return model.hasLog() || model.workflowCancel != nil || model.installCancel != nil || model.focus == focusLog
+}
 func (model dashboardModel) logHeight() int {
 	if model.logsCollapsed && !model.fullLog {
 		return 3
@@ -167,7 +172,7 @@ func (model dashboardModel) logHeight() int {
 	if model.fullLog || model.height < 20 {
 		return model.mainHeight()
 	}
-	return max(4, model.mainHeight()*3/5)
+	return max(4, model.mainHeight()/2)
 }
 func (model dashboardModel) logCapacity() int  { return max(1, model.logHeight()-3) }
 func (model dashboardModel) maxLogScroll() int { return max(0, model.logTotal()-model.logCapacity()) }
@@ -208,13 +213,15 @@ func fittedPanel(p palette, title string, lines []string, width, height int, foc
 	if height < 3 || width < 4 {
 		return fitRows(append([]string{title}, lines...), width, height)
 	}
-	inner := width - 2
-	color := p.borderMuted
+	marker := p.faint.Render("▎")
 	if focused {
-		color = p.borderFocus
+		marker = lipgloss.NewStyle().Foreground(lipgloss.Color(p.borderFocus)).Render("▎")
 	}
-	body := fitRows(append([]string{p.title.Render(title)}, lines...), inner, height-2)
-	return lipgloss.NewStyle().Border(p.border).BorderForeground(lipgloss.Color(color)).Width(width).Height(height).MaxWidth(width).MaxHeight(height).Render(body)
+	rows := []string{marker + " " + p.title.Render(title), ""}
+	for _, line := range lines {
+		rows = append(rows, "  "+ansi.Truncate(line, max(1, width-4), ""))
+	}
+	return fitRows(rows, width, height)
 }
 
 func fitRows(lines []string, width, height int) string {
@@ -244,7 +251,7 @@ func (model dashboardModel) renderDashboard(p palette) string {
 	}
 	header := strings.Split(model.header(p, width), "\n")[0]
 	footer := model.focusShortcut(p, width)
-	return fitRows(strings.Split(header+"\n"+model.navigationStrip(p, width)+"\n"+main+"\n"+model.statusLine(p, width)+"\n"+footer, "\n"), width, height)
+	return fitRows(strings.Split(header+"\n\n"+main+"\n\n"+model.actionDock(p, width)+"\n"+footer, "\n"), width, height)
 }
 
 // overlayContent builds the title and body lines for whichever full-screen
@@ -254,7 +261,7 @@ func (model dashboardModel) overlayContent(p palette, width int) (string, []stri
 	switch {
 	case model.help:
 		title := "Keyboard reference · ? / Esc close"
-		return title, wrapText("Tab / Shift+Tab: navigation, page, output\nF2: full output\nF3: complete error / item details\nF4: operation history\nF5: collapse or expand output\n↑↓ / j k: navigate focused panel\nPgUp/PgDn: page\nHome/End: first/last output (End resumes follow)\n/ in output: search · n next match\nb: build · r: refresh · p: profile · w workspace member · z fold · workspaces: Enter folds a member header\nEnter: selected action · 1…9 / 0: page\nEsc / Ctrl+C: cancel active operation\nq: stop operation and quit\nInputs: Enter save · Esc cancel · Ctrl+U clear\nTasks: Enter preview · y confirm · n cancel\nPackages: / search · Enter install · f features\nTargets: Enter build · f force · d default\nToolchains: Enter connect · c CUDA · v Vulkan\nTests: Enter selected · g group · a all\nSettings: Enter category / edit · / search all · Esc back · v rules", max(1, width-2))
+		return title, wrapText("Ctrl+B: toggle navigation\nTab / Shift+Tab: switch visible panes\nF2: full output\nF3: complete error / item details\nF4: operation history\nF5: collapse or expand output\n↑↓ / j k: navigate focused panel\nPgUp/PgDn: page\nHome/End: first/last output (End resumes follow)\n/ in output: search · n next match\nb: build · r: refresh · p: profile · w workspace member · z fold · workspaces: Enter folds a member header\nEnter: selected action · 1…9 / 0: page\nEsc / Ctrl+C: cancel active operation\nq: stop operation and quit\nInputs: Enter save · Esc cancel · Ctrl+U clear\nTasks: Enter preview · y confirm · n cancel\nPackages: / search · Enter install · f features\nTargets: Enter build · f force · d default\nToolchains: Enter connect · c CUDA · v Vulkan\nTests: Enter selected · g group · a all\nSettings: Enter category / edit · / search all · Esc back · v rules", max(1, width-4))
 	case model.details:
 		return "Complete details · F3 / Esc close", wrapText(model.detailText, max(1, width-2))
 	case model.history:
@@ -277,10 +284,13 @@ func (model dashboardModel) overlayContent(p palette, width int) (string, []stri
 // workspaceMain renders the normal frame: the navigation sidebar, the active
 // screen's content, and, when there is room, the output panel beneath it.
 func (model dashboardModel) workspaceMain(p palette, width, height, mainHeight int) string {
+	if model.sidebarVisible && width < 80 && model.focus == focusNavigation {
+		return model.navigationPanel(p, width, mainHeight)
+	}
 	contentWidth := width
 	nav := ""
 	navWidth := 0
-	if width >= 96 {
+	if model.showSidebar() {
 		navWidth = sidebarWidth(width)
 		contentWidth = width - navWidth - 1
 		nav = model.navigationPanel(p, navWidth, mainHeight)
@@ -290,14 +300,14 @@ func (model dashboardModel) workspaceMain(p palette, width, height, mainHeight i
 		subtitle = "member " + model.member + " · " + subtitle
 	}
 	pageHeight := mainHeight
-	showLog := true
+	showLog := model.showOutput()
 	if showLog && height >= 20 {
 		pageHeight = mainHeight - model.logHeight()
 	}
-	lines := model.contentLines(p, max(1, contentWidth-2))
+	lines := model.contentLines(p, max(1, contentWidth-4))
 	var wrapped []string
 	for _, line := range lines {
-		wrapped = append(wrapped, wrapText(line, max(1, contentWidth-2))...)
+		wrapped = append(wrapped, wrapText(line, max(1, contentWidth-4))...)
 	}
 	page := fittedPanel(p, title+" · "+subtitle, sliceViewport(wrapped, model.scroll, max(1, pageHeight-3)), contentWidth, pageHeight, model.focus == focusContent)
 	if showLog && height < 20 {
@@ -345,11 +355,34 @@ func (model dashboardModel) navigationPanel(p palette, width, height int) string
 }
 
 func (model dashboardModel) focusShortcut(p palette, width int) string {
-	if model.focus == focusLog {
-		return ansi.Truncate(p.faint.Render("? help  F2 full  / search  End follow  Esc cancel  q quit"), width, "")
+	if model.inputMode {
+		return ansi.Truncate(p.faint.Render(" enter save   esc cancel   ctrl+u clear   ctrl+w delete word"), width, "")
 	}
-	line := ansi.Strip(model.shortcutLine(p, max(width, 160)))
-	return ansi.Truncate(p.faint.Render("? help  "+strings.TrimSpace(strings.Split(line, "? help")[0])+"  F2 log  F3 details  F5 collapse"), width, "")
+	if model.focus == focusLog {
+		return ansi.Truncate(p.faint.Render("? help  / search  End follow  F2 full  Tab page  q quit"), width, "")
+	}
+	context := model.shortcutContext()
+	if model.focus == focusNavigation {
+		context = "↑↓ navigate   enter open   ctrl+b hide navigation"
+	}
+	return ansi.Truncate(p.faint.Render("? help  "+context+"   ctrl+b navigation"), width, "")
+}
+
+// actionDock keeps prompts and the active build context in one fixed location.
+func (model dashboardModel) actionDock(p palette, width int) string {
+	context := p.accent.Render("Build") + p.faint.Render(" · ") + p.text.Render(fallback(model.config.Build.Profile, "auto"))
+	context += p.faint.Render(" · " + fallback(model.scopedConfig().Toolchain.CXX, "auto compiler"))
+	if model.isWorkspace() {
+		context += p.faint.Render(" · pkg: " + fallback(model.member, "all"))
+	}
+	inner := max(1, width-4)
+	rows := []string{model.statusLine(p, inner), "", context}
+	marker := lipgloss.NewStyle().Foreground(lipgloss.Color(p.borderFocus)).Render("▎")
+	surface := lipgloss.NewStyle().Background(lipgloss.Color(p.pillBg)).Width(max(1, width-1))
+	for i, row := range rows {
+		rows[i] = marker + surface.Render(" "+ansi.Truncate(row, inner, "…"))
+	}
+	return strings.Join(rows, "\n")
 }
 
 func (model *dashboardModel) showDetails() {
