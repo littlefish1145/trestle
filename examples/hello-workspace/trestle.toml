@@ -1,4 +1,3 @@
-
 schema_version = 7
 
 [project]
@@ -17,7 +16,7 @@ schema_version = 7
 [toolchain]
   msvc = "14.44.35207~14.44.35207"
   c = "auto"
-  cxx = "clang++"
+  cxx = "clang-cl"
   archiver = "auto"
   linker = "auto"
   setup = ""

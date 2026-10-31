@@ -1,0 +1,125 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Trestle: Build",
+      "type": "shell",
+      "command": "trestle",
+      "args": [
+        "build"
+      ],
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared"
+      },
+      "options": {
+        "cwd": "${workspaceFolder}"
+      }
+    },
+    {
+      "label": "Trestle: Build All",
+      "type": "shell",
+      "command": "trestle",
+      "args": [
+        "build",
+        "--all"
+      ],
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared"
+      },
+      "options": {
+        "cwd": "${workspaceFolder}"
+      }
+    },
+    {
+      "label": "Trestle: Build Current Target",
+      "type": "shell",
+      "command": "trestle",
+      "args": [
+        "build",
+        "${input:trestleTarget}"
+      ],
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared"
+      },
+      "options": {
+        "cwd": "${workspaceFolder}"
+      }
+    },
+    {
+      "label": "Trestle: Run app",
+      "type": "process",
+      "command": "${workspaceFolder}/build/release/bin/.",
+      "dependsOn": "Trestle: Build",
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "focus": true
+      },
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "windows": {
+        "command": "${workspaceFolder}/build/release/bin/..exe"
+      }
+    },
+    {
+      "label": "Trestle: Test",
+      "type": "shell",
+      "command": "trestle",
+      "args": [
+        "test",
+        "--all"
+      ],
+      "group": {
+        "kind": "test",
+        "isDefault": true
+      },
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared"
+      },
+      "options": {
+        "cwd": "${workspaceFolder}"
+      }
+    },
+    {
+      "label": "Trestle: Release",
+      "type": "shell",
+      "command": "trestle",
+      "args": [
+        "release"
+      ],
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared"
+      },
+      "options": {
+        "cwd": "${workspaceFolder}"
+      }
+    }
+  ],
+  "inputs": [
+    {
+      "id": "trestleTarget",
+      "type": "pickString",
+      "description": "Select the Trestle target to build",
+      "options": [
+        "app"
+      ],
+      "default": "app"
+    }
+  ]
+}

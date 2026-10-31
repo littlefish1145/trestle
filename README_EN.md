@@ -7,7 +7,7 @@
 </p>
 
 <p align="center">
-  <a href="README.md">中文</a> · <a href="LICENSE">MIT License</a>
+  <a href="README.md">中文</a> · <a href="LICENSE">MIT License</a> · <a href="#sponsor">Sponsor</a>
 </p>
 
 # Trestle
@@ -316,6 +316,19 @@ testdata/             Test fixtures
 ## Design
 
 Trestle emits a conventional Ninja graph and keeps complete commands available for inspection. Project configuration, generated files, and the active toolchain stay clearly separated: configuration can be versioned, build directories can be recreated at any time, and compiler or dependency failures are reported by target and stage.
+
+## Sponsor
+
+Trestle is free and open source. All features and releases are available for free. If it has saved you time setting up toolchains, managing dependencies, or packaging releases, you can support ongoing maintenance, compatibility testing, and documentation with a voluntary contribution.
+
+- [Support Trestle on Afdian](https://afdian.com/a/trestledev)
+- WeChat: scan the reward code below with WeChat.
+
+<p align="center">
+  <img src="assets/wechat-sponsor.png" alt="WeChat reward code: support Trestle development" width="300">
+</p>
+
+Sponsorship is entirely optional and does not affect access to any features or guarantee a delivery date for specific requests. Thank you for your support!
 
 ## License
 

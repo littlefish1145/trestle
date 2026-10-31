@@ -7,7 +7,7 @@
 </p>
 
 <p align="center">
-  <a href="README_EN.md">English</a> · <a href="LICENSE">MIT License</a>
+  <a href="README_EN.md">English</a> · <a href="LICENSE">MIT License</a> · <a href="#赞助">赞助</a>
 </p>
 
 # Trestle
@@ -326,6 +326,19 @@ testdata/             测试夹具
 ## 设计原则
 
 Trestle 生成普通 Ninja 构建图，并保留完整命令供检查。项目配置、生成文件和真实工具链之间保持清晰边界：配置可版本控制，构建目录可随时删除重建，编译器及依赖错误会以目标和阶段为单位报告。
+
+## 赞助
+
+Trestle 免费开源，所有功能和发行版本均可免费使用。如果它帮你省下了配置工具链、处理依赖或打包发布的时间，欢迎自愿赞助，支持后续维护、兼容性测试和文档完善。
+
+- [通过爱发电支持 Trestle](https://afdian.com/a/trestledev)
+- 微信赞赏：使用微信扫描下方赞赏码。
+
+<p align="center">
+  <img src="assets/wechat-sponsor.png" alt="微信赞赏码：感谢支持 Trestle 开发" width="300">
+</p>
+
+赞助完全自愿，不影响任何功能的使用，也不承诺特定需求的完成时间。感谢你的支持！
 
 ## 许可证
 
