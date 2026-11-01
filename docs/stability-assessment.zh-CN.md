@@ -140,3 +140,14 @@ CI 已增加 Linux 上两种真实 shader 编译器与 SPIR-V 验证工具，并
 修复后的本地验证：Windows 全仓库 `go test -count=1 -timeout=8m ./...`、Windows 20 次乱序 race 路径回归、`go vet ./...` 通过；使用 Go 1.26.0 交叉编译的全部 Linux 测试二进制在 Ubuntu-24.04 WSL 实际执行通过，g++ 原生程序与 Workspace 构建/运行通过；同一 Linux 路径回归执行 20 次通过；Linux 上 actionlint 与 ShellCheck 0.10.0 对所有工作流检查通过。
 
 Linux 的独立 Go 1.26 工具链下载遇到 TLS 超时，因此该轮 Linux 测试使用本机 Go 1.26 交叉编译，测试中调用的 `go version` 等辅助命令使用 WSL 已安装的 Go。macOS 尚需 Actions 实际重跑确认，不能将交叉构建或 Linux 运行表述为 macOS 通过。日志保存在 `.trestle/ci-fix-windows.log` 和 `.trestle/ci-fix-linux.log`。
+
+## macOS 原生归档器与初始化回归（2026-11-01）
+
+后续 macOS 原生集成日志暴露了另外两处问题：Clang 的默认归档器被固定为 `llvm-ar`，缺少该程序时静态库的 readiness 检查失败；初始化生成的 `cxx = "auto"` 在同时存在 `clang++` 与 `g++` 时产生歧义。初始化只将编译失败打印为警告，原生测试随后调用 Configure，导致初始化验证失败没有被测试断言捕获。
+
+- macOS Clang 优先查找 `ar`，再查找 `llvm-ar`；其他宿主的 Clang 优先 `llvm-ar`，缺少时回退 `ar`。同名工具优先使用编译器相邻目录，再使用 PATH；Unix 相邻工具不再错误追加 `.exe`。GCC、MSVC 保留各自归档器类型，显式配置的 archiver 仍由配置覆盖。
+- Unix 初始化将检测到的 C/C++ 编译器保存为可移植名称，独立项目和 Workspace 共用这一选择；Workspace 成员继续继承根配置。没有编译器时保留默认 `auto`；Windows 保留已有 Visual Studio setup 与 CUDA 的自动选择逻辑。用户手写的 `auto` 歧义检查没有放宽。
+- 隔离 PATH 的回归测试覆盖 macOS 仅有 `ar`、双归档器优先级、相邻目录及空格路径、缺失工具、目录冒充程序，以及 Apple Clang 同时通过 `clang++`/`g++` 暴露时的配置保存和 Workspace 继承。
+- 原生集成测试明确断言 Init 输出 `Example compiled successfully`，在 Configure 之前拦截验证失败；另增初始化 Workspace 的实际构建与程序输出断言。新增测试名称匹配现有 CI 的原生测试选择表达式，无需改动工作流。
+
+本轮验证：Windows 全仓库 `go test -count=1 -timeout=8m ./...`、三项真实原生构建测试和 `go vet ./...` 通过；Ubuntu-24.04 WSL 中应用与工具链完整测试、Clang/GCC 两组真实原生构建及运行通过；归档器与 Unix 初始化回归分别完成 20 次乱序运行；macOS ARM64 的应用与工具链测试二进制交叉编译通过。WSL 继续使用 Go 1.26 交叉构建的 Linux 测试二进制。初次 Windows 全量测试受沙箱的本地网络/子进程限制失败，获准在沙箱外重跑后通过。未在本机执行 macOS 二进制，仍需远端 Actions 确认。日志为 `.trestle/macos-fix-windows-all.log`、`macos-fix-native-windows.log` 和 `macos-fix-linux.log`。

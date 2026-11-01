@@ -582,22 +582,32 @@ func findArchiverInEnvironment(kind Kind, compiler string, environment map[strin
 }
 
 func findArchiver(kind Kind, compiler string) string {
+	return findArchiverForHost(kind, compiler, runtime.GOOS)
+}
+
+func findArchiverForHost(kind Kind, compiler, host string) string {
 	if kind == MSVC {
 		if path, err := exec.LookPath("lib"); err == nil {
 			return path
 		}
 		return "lib"
 	}
-	name := "llvm-ar"
+	// Apple Command Line Tools ship ar, not llvm-ar. Other Clang installs
+	// prefer llvm-ar but can archive ordinary objects with the system ar too.
+	names := []string{"llvm-ar", "ar"}
 	if kind == GCC {
-		name = "ar"
+		names = []string{"ar"}
+	} else if host == "darwin" {
+		names = []string{"ar", "llvm-ar"}
 	}
-	if path, err := exec.LookPath(name); err == nil {
-		return path
+	for _, name := range names {
+		sibling := filepath.Join(filepath.Dir(compiler), executableName(name))
+		if path, err := exec.LookPath(sibling); err == nil {
+			return path
+		}
+		if path, err := exec.LookPath(name); err == nil {
+			return path
+		}
 	}
-	candidate := filepath.Join(filepath.Dir(compiler), name+".exe")
-	if path, err := exec.LookPath(candidate); err == nil {
-		return path
-	}
-	return name
+	return names[0]
 }

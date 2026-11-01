@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"charm.land/huh/v2"
@@ -316,6 +317,16 @@ func detectImportables(root string) []string {
 // starter example (rather than scanned targets) was generated.
 func buildInitConfig(root, name string, choices initChoices, output *os.File) (config.Config, bool, error) {
 	cfg := config.Default(name)
+	// Unix hosts commonly expose both clang++ and g++ (on macOS g++ can
+	// even be another Apple Clang driver). Record the detected compiler's
+	// portable name instead of leaving the new project ambiguous. Windows
+	// keeps its setup-aware auto selection for Visual Studio and CUDA.
+	if runtime.GOOS != "windows" {
+		if candidates := toolchain.List(context.Background()); len(candidates) > 0 {
+			cfg.Toolchain.CXX = toolchain.PortableSelector(candidates[0].CXX)
+			cfg.Toolchain.C = toolchain.PortableSelector(candidates[0].CC)
+		}
+	}
 	applyInitToolchains(&cfg, choices, output)
 	switch {
 	case choices.Workspace:

@@ -45,9 +45,7 @@ func TestRealNativeCPPBuild(t *testing.T) {
 		t.Skip("set TRESTLE_TEST_NATIVE=1 to require an actual native C++ build and run")
 	}
 	root := t.TempDir()
-	if err := Init(root, "hello-native", nil, nil); err != nil {
-		t.Fatal(err)
-	}
+	initNativeExample(t, root, "hello-native", false)
 	path := filepath.Join(root, config.DefaultFileName)
 	if err := Configure(ConfigureOptions{Path: path, Compiler: integrationCompiler(), Profile: "debug"}); err != nil {
 		t.Fatal(err)
@@ -138,6 +136,68 @@ func TestRealNativeCPPBuild(t *testing.T) {
 	output, err = exec.Command(extracted).CombinedOutput()
 	if err != nil || strings.TrimSpace(string(output)) != "package OK" {
 		t.Fatalf("run packaged binary: %s %v", output, err)
+	}
+}
+
+// Init reports verification errors as warnings. Integration must inspect the
+// result before Configure can conceal an unusable generated configuration.
+func initNativeExample(t *testing.T, root, name string, workspace bool) {
+	t.Helper()
+	files := t.TempDir()
+	answers := "n\nn\nn\ny\n"
+	if workspace {
+		answers = "n\nn\ny\ny\n"
+	}
+	inputPath := filepath.Join(files, "answers")
+	if err := os.WriteFile(inputPath, []byte(answers), 0600); err != nil {
+		t.Fatal(err)
+	}
+	input, err := os.Open(inputPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer input.Close()
+	outputPath := filepath.Join(files, "init.log")
+	output, err := os.Create(outputPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	initErr := Init(root, name, input, output)
+	closeErr := output.Close()
+	data, readErr := os.ReadFile(outputPath)
+	if initErr != nil || closeErr != nil || readErr != nil {
+		t.Fatalf("init=%v, close=%v, read=%v\n%s", initErr, closeErr, readErr, data)
+	}
+	if !strings.Contains(string(data), "Example compiled successfully") || strings.Contains(string(data), "Example did not compile") {
+		t.Fatalf("initialization did not verify the unmodified example:\n%s", data)
+	}
+}
+
+func TestRealNativeCPPBuildInitializedWorkspace(t *testing.T) {
+	if os.Getenv("TRESTLE_TEST_NATIVE") != "1" {
+		t.Skip("set TRESTLE_TEST_NATIVE=1 to require the initialized workspace to build and run")
+	}
+	root := filepath.Join(t.TempDir(), "initialized workspace space")
+	if err := os.MkdirAll(root, 0755); err != nil {
+		t.Fatal(err)
+	}
+	initNativeExample(t, root, "hello-workspace", true)
+	path := filepath.Join(root, config.DefaultFileName)
+	wc, err := config.ParseWorkspace(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	member := wc.Member(StarterMember)
+	if member == nil {
+		t.Fatal("initialized workspace lost its starter member")
+	}
+	program := filepath.Join(wc.RootConfig.Build.BuildDir, member.Build.Profile, StarterMember, "bin", member.Targets["app"].OutputName)
+	if runtime.GOOS == "windows" {
+		program += ".exe"
+	}
+	output, err := exec.CommandContext(t.Context(), program).CombinedOutput()
+	if err != nil || strings.TrimSpace(string(output)) != "Hello from Trestle!" {
+		t.Fatalf("initialized example run: %s %v", output, err)
 	}
 }
 
