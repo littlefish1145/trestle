@@ -53,6 +53,17 @@ func TestConvertEntriesHandleEmptyInput(t *testing.T) {
 	}
 }
 
+func TestConvertEntriesSeparatesPortRevisionForCrossProviderSorting(t *testing.T) {
+	entries := ConvertEntries([]vcpkg.Port{{Name: "fmt", Version: "11.0.0#3"}})
+	if entries[0].Version != "11.0.0" || entries[0].PortVersion != 3 {
+		t.Fatalf("revision not preserved separately: %+v", entries)
+	}
+	entries = append(entries, PackageEntry{Name: "fmt", Version: "10.0.0", Provider: "conan"})
+	if got := Merge(entries)[0].Candidates[0]; got.Version != "11.0.0" || got.Provider != "vcpkg" {
+		t.Fatalf("revised release must sort by upstream version: %+v", got)
+	}
+}
+
 // A library available from both providers must appear once, with a candidate
 // per provider, rather than as two separate rows.
 func TestMergeCollapsesSameNameAcrossProviders(t *testing.T) {
@@ -99,14 +110,52 @@ func TestMergeOrdersCandidatesNewestFirstPerProvider(t *testing.T) {
 	}
 }
 
-func TestMergePrefersInstalledCandidateWithinProvider(t *testing.T) {
+func TestMergeKeepsNewerVersionsAboveInstalledCandidates(t *testing.T) {
 	packages := Merge([]PackageEntry{
 		{Name: "zlib", Version: "1.3.1", Provider: "conan", Source: "conancenter"},
 		{Name: "zlib", Version: "1.2.13", Provider: "conan", Source: "local", Installed: true},
 	})
 	first := packages[0].Candidates[0]
-	if !first.Installed || first.Version != "1.2.13" || first.Source != "local" {
-		t.Fatalf("installed candidate must lead its provider group: %+v", packages[0].Candidates)
+	if first.Installed || first.Version != "1.3.1" {
+		t.Fatalf("newest candidate must lead even when an older release is installed: %+v", packages[0].Candidates)
+	}
+}
+
+func TestMergeInterleavesMatchingVersionsAcrossProviders(t *testing.T) {
+	packages := Merge([]PackageEntry{
+		{Name: "fmt", Version: "9.1.0", Provider: "conan", Installed: true},
+		{Name: "fmt", Version: "11.0.0", Provider: "conan", Source: "remote"},
+		{Name: "fmt", Version: "11.0.0", Provider: "conan", Source: "local", Installed: true},
+		{Name: "fmt", Version: "10.2.0", Provider: "vcpkg"},
+		{Name: "fmt", Version: "11.0.0", Provider: "vcpkg", PortVersion: 0},
+		{Name: "fmt", Version: "12.0.0", Provider: "vcpkg"},
+		{Name: "fmt", Version: "11.0.0", Provider: "vcpkg", PortVersion: 2},
+	})
+	got := packages[0].Candidates
+	wantVersions := []string{"12.0.0", "11.0.0", "11.0.0", "11.0.0", "11.0.0", "10.2.0", "9.1.0"}
+	wantProviders := []string{"vcpkg", "conan", "vcpkg", "conan", "vcpkg", "vcpkg", "conan"}
+	for index := range wantVersions {
+		if got[index].Version != wantVersions[index] || got[index].Provider != wantProviders[index] {
+			t.Fatalf("candidate %d = %+v; all: %+v", index, got[index], got)
+		}
+	}
+	if !got[1].Installed || got[2].PortVersion != 2 || got[4].PortVersion != 0 {
+		t.Fatalf("same-version installed/revision ordering lost: %+v", got)
+	}
+}
+
+func TestCompareVersionOrdersDatesLabelsAndPrereleases(t *testing.T) {
+	for _, pair := range [][2]string{
+		{"2025-10-01", "2024-12-01"},
+		{"2025-10-01", "2025-02-01"},
+		{"release-b", "release-a"},
+		{"2.0.0-rc1", "1.10.0"},
+		{"2.0.0", "2.0.0-rc1"},
+		{"1.10.0", "1.2.0"},
+	} {
+		if compareVersion(pair[0], pair[1]) <= 0 || compareVersion(pair[1], pair[0]) >= 0 {
+			t.Errorf("expected %q newer than %q", pair[0], pair[1])
+		}
 	}
 }
 

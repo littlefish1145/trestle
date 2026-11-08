@@ -28,15 +28,32 @@ type PortVersion struct {
 	License      string
 	Homepage     string
 	Dependencies []string
+	Features     []string
 }
 
 // versionDatabaseEntry mirrors one record of a versions/<letter>/<port>.json
 // file. The file is maintained by vcpkg itself and is the authoritative list of
 // every published version, unlike the working tree, which only holds the newest.
 type versionDatabaseEntry struct {
-	GitTree     string `json:"git-tree"`
-	Version     string `json:"version"`
-	PortVersion int    `json:"port-version"`
+	GitTree       string `json:"git-tree"`
+	Version       string `json:"version"`
+	VersionSemver string `json:"version-semver"`
+	VersionDate   string `json:"version-date"`
+	VersionString string `json:"version-string"`
+	PortVersion   int    `json:"port-version"`
+}
+
+func (entry versionDatabaseEntry) upstreamVersion() string {
+	return firstVersion(entry.Version, entry.VersionSemver, entry.VersionDate, entry.VersionString)
+}
+
+func firstVersion(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 type versionDatabase struct {
@@ -63,6 +80,19 @@ func versionDatabasePath(root, name string) string {
 // A vcpkg checkout that is not a git repository still yields the versions
 // recorded in the database, without their dates or port metadata.
 func (client Client) PortVersions(ctx context.Context, name string) ([]PortVersion, error) {
+	versions, err := client.portVersionSummaries(name)
+	if err != nil {
+		return nil, err
+	}
+	if err := client.fillVersionDetails(ctx, name, versions); err != nil {
+		return versions, err
+	}
+	return versions, nil
+}
+
+// portVersionSummaries reads history without spawning git for every release.
+// Searches use these summaries; exact lookups also resolve historical metadata.
+func (client Client) portVersionSummaries(name string) ([]PortVersion, error) {
 	name = strings.TrimSpace(name)
 	if name == "" {
 		return nil, fmt.Errorf("E_VCPKG_HISTORY: port name is required")
@@ -75,10 +105,49 @@ func (client Client) PortVersions(ctx context.Context, name string) ([]PortVersi
 	installed := client.IsInstalled(name)
 	versions := buildPortVersions(name, database.Versions, manifest, installed)
 	sortPortVersions(versions)
-	if err := client.fillVersionDetails(ctx, name, versions); err != nil {
-		return versions, err
-	}
 	return versions, nil
+}
+
+// ExpandPortVersions adds local history to search results, including cached web
+// results. Ports without usable history retain their original search entry.
+func (client Client) ExpandPortVersions(ctx context.Context, ports []Port) ([]PortVersion, error) {
+	var result []PortVersion
+	for _, port := range ports {
+		if err := ctx.Err(); err != nil {
+			return result, err
+		}
+		versions, _ := client.portVersionSummaries(port.Name)
+		base, revision := splitPortVersion(port.Version)
+		revision = max(0, revision)
+		currentFound := false
+		for index := range versions {
+			version := &versions[index]
+			version.Current = version.Version == base && version.PortVersion == revision
+			version.Installed = version.Current && port.Installed
+			version.Features = port.Features
+			currentFound = currentFound || version.Current
+			if version.Description == "" {
+				version.Description = port.Description
+			}
+			if version.Current {
+				version.Date = port.Updated
+				version.License = port.License
+				version.Homepage = port.Homepage
+				version.Dependencies = port.Dependencies
+			}
+		}
+		if !currentFound {
+			versions = append(versions, PortVersion{
+				Port: port.Name, Version: base, PortVersion: revision, Current: true,
+				Installed: port.Installed, Description: port.Description,
+				Date: port.Updated, License: port.License, Homepage: port.Homepage,
+				Dependencies: port.Dependencies, Features: port.Features, PackageURL: port.PackageURL,
+			})
+		}
+		sortPortVersions(versions)
+		result = append(result, versions...)
+	}
+	return result, nil
 }
 
 // loadVersionDatabase reads and parses the version database file for a port,
@@ -108,19 +177,21 @@ func buildPortVersions(name string, entries []versionDatabaseEntry, manifest *po
 	packageURL := "https://vcpkg.io/en/package/" + name + ".html"
 	versions := make([]PortVersion, 0, len(entries))
 	for _, entry := range entries {
-		if entry.Version == "" {
+		upstream := entry.upstreamVersion()
+		if upstream == "" {
 			continue
 		}
 		version := PortVersion{
 			Port:        name,
-			Version:     entry.Version,
+			Version:     upstream,
 			PortVersion: entry.PortVersion,
 			GitTree:     entry.GitTree,
-			Installed:   installed && manifest != nil && manifest.Version == entry.Version,
+			Installed:   installed && manifest != nil && manifest.Version == upstream && manifest.PortVersion == entry.PortVersion,
 			PackageURL:  packageURL,
 		}
-		if manifest != nil && manifest.Version == entry.Version && manifest.VersionDate == "" {
+		if manifest != nil && manifest.Version == upstream && manifest.PortVersion == entry.PortVersion {
 			version.Current = true
+			applyManifestToVersion(&version, manifest)
 		}
 		versions = append(versions, version)
 	}
@@ -129,14 +200,16 @@ func buildPortVersions(name string, entries []versionDatabaseEntry, manifest *po
 
 // portManifest is the subset of vcpkg.json needed to describe a version.
 type portManifest struct {
-	Name         string          `json:"name"`
-	Version      string          `json:"version"`
-	VersionDate  string          `json:"version-date"`
-	VersionField string          `json:"version-string"`
-	Description  json.RawMessage `json:"description"`
-	Homepage     string          `json:"homepage"`
-	License      string          `json:"license"`
-	Dependencies json.RawMessage `json:"dependencies"`
+	Name          string          `json:"name"`
+	Version       string          `json:"version"`
+	VersionSemver string          `json:"version-semver"`
+	PortVersion   int             `json:"port-version"`
+	VersionDate   string          `json:"version-date"`
+	VersionField  string          `json:"version-string"`
+	Description   json.RawMessage `json:"description"`
+	Homepage      string          `json:"homepage"`
+	License       string          `json:"license"`
+	Dependencies  json.RawMessage `json:"dependencies"`
 }
 
 func (m portManifest) date() string {
@@ -208,7 +281,7 @@ func (client Client) manifestFromTree(ctx context.Context, tree string) (*portMa
 		return nil, err
 	}
 	if manifest.Version == "" {
-		manifest.Version = manifest.VersionField
+		manifest.Version = firstVersion(manifest.VersionSemver, manifest.VersionDate, manifest.VersionField)
 	}
 	return &manifest, nil
 }
@@ -223,7 +296,7 @@ func (client Client) currentManifest(name string) *portManifest {
 		return nil
 	}
 	if manifest.Version == "" {
-		manifest.Version = manifest.VersionField
+		manifest.Version = firstVersion(manifest.VersionSemver, manifest.VersionDate, manifest.VersionField)
 	}
 	return &manifest
 }

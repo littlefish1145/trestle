@@ -242,6 +242,9 @@ func candidateMarker(candidate deps.Candidate, requested string) string {
 // candidate, truncated to the available width.
 func candidateLabel(candidate deps.Candidate, requested string, width int) string {
 	version := fallback(candidate.Version, "latest")
+	if candidate.PortVersion > 0 {
+		version += fmt.Sprintf("#%d", candidate.PortVersion)
+	}
 	row := fmt.Sprintf("%s  %-16s %s", candidateMarker(candidate, requested), version, providerTag(candidate))
 	return ansi.Truncate(row, width-3, "…")
 }

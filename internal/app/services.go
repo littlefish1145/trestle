@@ -1207,37 +1207,46 @@ func searchPackages(ctx context.Context, cfg config.Config, root string, parsed 
 	query := parsed.SearchTerm()
 	var entries []deps.PackageEntry
 	var failures []string
-	if conanClient, conanErr := conanClientFor(cfg); conanErr == nil {
-		// Search the local cache and every configured remote, so the page can
-		// offer both installed recipes and upstream versions to install.
-		remotes, remotesErr := conanClient.Remotes(ctx)
-		if remotesErr != nil {
-			failures = append(failures, "conan remotes: "+remotesErr.Error())
-		}
-		installed, localErr := conanClient.Search(ctx, query)
-		if localErr == nil {
-			entries = append(entries, deps.ConvertConanEntries(installed)...)
-		} else {
-			failures = append(failures, "conan: "+localErr.Error())
-		}
-		if len(remotes) > 0 {
-			remote, remoteErr := conanClient.SearchRemotes(ctx, query, remotes)
-			if remoteErr == nil {
-				entries = append(entries, deps.ConvertConanEntries(remote)...)
+	if parsed.Provider != "vcpkg" {
+		if conanClient, conanErr := conanClientFor(cfg); conanErr == nil {
+			// Search the local cache and every configured remote, so the page can
+			// offer both installed recipes and upstream versions to install.
+			remotes, remotesErr := conanClient.Remotes(ctx)
+			if remotesErr != nil {
+				failures = append(failures, "conan remotes: "+remotesErr.Error())
+			}
+			installed, localErr := conanClient.Search(ctx, query)
+			if localErr == nil {
+				entries = append(entries, deps.ConvertConanEntries(installed)...)
 			} else {
-				failures = append(failures, "conan remote: "+remoteErr.Error())
+				failures = append(failures, "conan: "+localErr.Error())
+			}
+			if len(remotes) > 0 {
+				remote, remoteErr := conanClient.SearchRemotes(ctx, query, remotes)
+				if remoteErr == nil {
+					entries = append(entries, deps.ConvertConanEntries(remote)...)
+				} else {
+					failures = append(failures, "conan remote: "+remoteErr.Error())
+				}
 			}
 		}
 	}
+	if parsed.Provider == "conan" {
+		if len(entries) == 0 && len(failures) > 0 {
+			return nil, fmt.Errorf("%s", strings.Join(failures, "; "))
+		}
+		return entries, nil
+	}
 	registry := vcpkg.WebRegistry{CachePath: filepath.Join(root, ".trestle", "cache", "vcpkg-index.json")}
 	client, clientErr := vcpkg.NewClient(cfg.Vcpkg.Root)
+	var vcpkgPorts []vcpkg.Port
 	if ports, cached := registry.SearchCached(query, 0); cached {
 		if clientErr == nil {
 			for index := range ports {
 				ports[index].Installed = client.IsInstalled(ports[index].Name)
 			}
 		}
-		entries = append(entries, deps.ConvertEntries(ports)...)
+		vcpkgPorts = ports
 	} else if clientErr == nil {
 		ports, localErr := client.SearchPorts(ctx, query)
 		if localErr == nil {
@@ -1246,7 +1255,7 @@ func searchPackages(ctx context.Context, cfg config.Config, root string, parsed 
 				defer cancel()
 				_ = registry.Refresh(refreshCtx)
 			}()
-			entries = append(entries, deps.ConvertEntries(ports)...)
+			vcpkgPorts = ports
 		} else {
 			failures = append(failures, "vcpkg: "+localErr.Error())
 		}
@@ -1255,8 +1264,17 @@ func searchPackages(ctx context.Context, cfg config.Config, root string, parsed 
 		if webErr != nil {
 			failures = append(failures, fmt.Sprintf("vcpkg online search failed (%v); local fallback unavailable (%v)", webErr, clientErr))
 		} else {
-			entries = append(entries, deps.ConvertEntries(ports)...)
+			vcpkgPorts = ports
 		}
+	}
+	if clientErr == nil {
+		versions, historyErr := client.ExpandPortVersions(ctx, vcpkgPorts)
+		if historyErr != nil {
+			return nil, historyErr
+		}
+		entries = append(entries, deps.ConvertPortVersionEntries(versions)...)
+	} else {
+		entries = append(entries, deps.ConvertEntries(vcpkgPorts)...)
 	}
 	if len(entries) == 0 && len(failures) > 0 {
 		return nil, fmt.Errorf("%s", strings.Join(failures, "; "))

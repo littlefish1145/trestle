@@ -28,6 +28,33 @@ func vcpkgWithHistory(t *testing.T) vcpkg.Client {
 	return client
 }
 
+func TestBareVcpkgSearchIncludesRealHistory(t *testing.T) {
+	if os.Getenv("TRESTLE_TEST_LIVE") != "1" {
+		t.Skip("set TRESTLE_TEST_LIVE=1 to exercise installed package managers")
+	}
+	client := vcpkgWithHistory(t)
+	path := filepath.Join(t.TempDir(), "trestle.toml")
+	cfg := config.Default("demo")
+	cfg.Vcpkg.Root = client.Root
+	if err := config.Save(path, cfg); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := SearchPackages(context.Background(), path, "vcpkg:fmt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var versions []string
+	for _, entry := range entries {
+		if entry.Name == "fmt" && entry.Provider == "vcpkg" {
+			versions = append(versions, entry.Version)
+		}
+	}
+	if len(versions) < 3 {
+		t.Fatalf("expected historical fmt releases, got %+v", entries)
+	}
+	t.Logf("bare search returned %d fmt releases; newest=%s oldest=%s", len(versions), versions[0], versions[len(versions)-1])
+}
+
 // TestNameVersionQueryResolvesRealVcpkgHistory walks the whole "fmt:11.0.2"
 // path against an installed vcpkg checkout: the query must resolve through the
 // version database and come back with that release marked as requested.

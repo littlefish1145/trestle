@@ -92,24 +92,22 @@ func TestPortVersionsSkipsEmptyEntriesAndMarksCurrentAndInstalled(t *testing.T) 
 	}
 }
 
-// A manifest carrying both a version and a version-date cannot be the current
-// tree entry, because the entry matched only on the version field.
-func TestPortVersionsKeepsCurrentFalseWhenManifestHasVersionDate(t *testing.T) {
+func TestPortVersionsMarksDateSchemeCurrent(t *testing.T) {
 	root := t.TempDir()
-	writeVersionDatabase(t, root, "demo", `{"versions":[{"git-tree":"aaa","version":"5.0","port-version":0}]}`)
+	writeVersionDatabase(t, root, "demo", `{"versions":[{"git-tree":"aaa","version-date":"2023-01-01","port-version":0}]}`)
 	portDir := filepath.Join(root, "ports", "demo")
 	if err := os.MkdirAll(portDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(portDir, "vcpkg.json"), []byte(`{"name":"demo","version":"5.0","version-date":"2023-01-01"}`), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(portDir, "vcpkg.json"), []byte(`{"name":"demo","version-date":"2023-01-01"}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	versions, err := (Client{Root: root}).PortVersions(context.Background(), "demo")
 	if err != nil {
 		t.Fatalf("history: %v", err)
 	}
-	if len(versions) != 1 || versions[0].Current {
-		t.Fatalf("versions = %+v, want one non-current entry", versions)
+	if len(versions) != 1 || !versions[0].Current || versions[0].Version != "2023-01-01" {
+		t.Fatalf("versions = %+v, want current date-scheme entry", versions)
 	}
 }
 
@@ -184,7 +182,7 @@ func gitRepository(t *testing.T) (string, func(args ...string) string) {
 // failing the history.
 func TestPortVersionsResolvesGitTreeDetails(t *testing.T) {
 	root, git := gitRepository(t)
-	manifest := `{"name":"demo","version-string":"1.0.0","description":"detailed demo","homepage":"https://demo.example","license":"MIT","dependencies":["dep","other"]}`
+	manifest := `{"name":"demo","version-string":"1.0.0","port-version":2,"description":"detailed demo","homepage":"https://demo.example","license":"MIT","dependencies":["dep","other"]}`
 	if err := os.WriteFile(filepath.Join(root, "vcpkg.json"), []byte(manifest), 0o644); err != nil {
 		t.Fatal(err)
 	}

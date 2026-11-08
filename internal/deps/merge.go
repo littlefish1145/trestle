@@ -11,6 +11,7 @@ import (
 // package row instead of appearing as a separate entry.
 type Candidate struct {
 	Version      string
+	PortVersion  int
 	Provider     string
 	Source       string
 	Installed    bool
@@ -33,8 +34,7 @@ type Package struct {
 }
 
 // Merge collapses flat provider results into one Package per name. Candidates
-// are ordered newest-first per provider so the default pick is the newest
-// available version, and installed candidates lead their own provider group.
+// are ordered newest-first across providers, with matching versions interleaved.
 func Merge(entries []PackageEntry) []Package {
 	index := map[string]int{}
 	var packages []Package
@@ -81,6 +81,7 @@ func mergeCandidate(target *Package, entry PackageEntry) {
 func candidateFromEntry(entry PackageEntry) Candidate {
 	return Candidate{
 		Version:      entry.Version,
+		PortVersion:  entry.PortVersion,
 		Provider:     entry.Provider,
 		Source:       entry.Source,
 		Installed:    entry.Installed,
@@ -159,28 +160,71 @@ func (pkg Package) bestOverall() int {
 	return best
 }
 
-// sortCandidates orders each provider group newest-version-first, keeping
-// already-installed options above the rest so the current state is obvious.
+// sortCandidates orders upstream versions newest first, then alternates providers
+// within each version so local/remote duplicates cannot hide the other provider.
 func sortCandidates(candidates []Candidate) {
 	sort.SliceStable(candidates, func(i, j int) bool {
+		if order := compareVersion(candidates[i].Version, candidates[j].Version); order != 0 {
+			return order > 0
+		}
 		if candidates[i].Provider != candidates[j].Provider {
 			return candidates[i].Provider < candidates[j].Provider
+		}
+		if candidates[i].PortVersion != candidates[j].PortVersion {
+			return candidates[i].PortVersion > candidates[j].PortVersion
 		}
 		if candidates[i].Installed != candidates[j].Installed {
 			return candidates[i].Installed
 		}
-		return compareVersion(candidates[i].Version, candidates[j].Version) > 0
+		return candidates[i].Source < candidates[j].Source
 	})
+	for start := 0; start < len(candidates); {
+		end := start + 1
+		for end < len(candidates) && compareVersion(candidates[start].Version, candidates[end].Version) == 0 {
+			end++
+		}
+		var groups [][]Candidate
+		for index := start; index < end; {
+			next := index + 1
+			for next < end && candidates[next].Provider == candidates[index].Provider {
+				next++
+			}
+			groups = append(groups, candidates[index:next])
+			index = next
+		}
+		if len(groups) > 1 {
+			interleaved := make([]Candidate, 0, end-start)
+			for offset := 0; len(interleaved) < end-start; offset++ {
+				for _, group := range groups {
+					if offset < len(group) {
+						interleaved = append(interleaved, group[offset])
+					}
+				}
+			}
+			copy(candidates[start:end], interleaved)
+		}
+		start = end
+	}
 }
 
 // compareVersion reports whether left is newer than right. Version strings come
-// from different providers, so an unparsable value falls back to reverse
-// lexical order rather than interleaving across providers.
+// from different providers; numeric releases and prereleases compare by their
+// numeric core, while dates and arbitrary labels use their natural lexical order.
 func compareVersion(left, right string) int {
-	leftParts, leftOK := versionNumbers(left)
-	rightParts, rightOK := versionNumbers(right)
+	left, _, _ = strings.Cut(strings.TrimPrefix(left, "v"), "+")
+	right, _, _ = strings.Cut(strings.TrimPrefix(right, "v"), "+")
+	leftBase, leftSuffix, leftPre := strings.Cut(left, "-")
+	rightBase, rightSuffix, rightPre := strings.Cut(right, "-")
+	leftParts, leftOK := versionNumbers(leftBase)
+	rightParts, rightOK := versionNumbers(rightBase)
 	if !leftOK || !rightOK {
-		return strings.Compare(right, left)
+		if leftOK {
+			return 1
+		}
+		if rightOK {
+			return -1
+		}
+		return strings.Compare(left, right)
 	}
 	for index := 0; index < len(leftParts) || index < len(rightParts); index++ {
 		a, b := 0, 0
@@ -194,7 +238,13 @@ func compareVersion(left, right string) int {
 			return a - b
 		}
 	}
-	return 0
+	if leftPre != rightPre {
+		if leftPre {
+			return -1
+		}
+		return 1
+	}
+	return strings.Compare(leftSuffix, rightSuffix)
 }
 
 func versionNumbers(value string) ([]int, bool) {

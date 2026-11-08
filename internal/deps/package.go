@@ -4,6 +4,7 @@
 package deps
 
 import (
+	"strconv"
 	"strings"
 
 	"trestle/internal/deps/conan"
@@ -16,6 +17,7 @@ import (
 type PackageEntry struct {
 	Name         string
 	Version      string
+	PortVersion  int
 	Description  string
 	Installed    bool
 	Provider     string
@@ -37,9 +39,16 @@ type PackageEntry struct {
 func ConvertEntries(values []vcpkg.Port) []PackageEntry {
 	result := make([]PackageEntry, 0, len(values))
 	for _, value := range values {
+		version, revision := value.Version, 0
+		if base, suffix, found := strings.Cut(version, "#"); found {
+			if parsed, err := strconv.Atoi(suffix); err == nil && parsed >= 0 {
+				version, revision = base, parsed
+			}
+		}
 		result = append(result, PackageEntry{
 			Name:         value.Name,
-			Version:      value.Version,
+			Version:      version,
+			PortVersion:  revision,
 			Description:  value.Description,
 			Installed:    value.Installed,
 			Provider:     "vcpkg",
@@ -69,6 +78,7 @@ func ConvertPortVersionEntries(values []vcpkg.PortVersion) []PackageEntry {
 		result = append(result, PackageEntry{
 			Name:         value.Port,
 			Version:      value.Version,
+			PortVersion:  value.PortVersion,
 			Description:  value.Description,
 			Installed:    value.Installed,
 			Provider:     "vcpkg",
@@ -77,6 +87,7 @@ func ConvertPortVersionEntries(values []vcpkg.PortVersion) []PackageEntry {
 			PackageURL:   value.PackageURL,
 			License:      value.License,
 			Updated:      value.Date,
+			Features:     value.Features,
 			Dependencies: value.Dependencies,
 		})
 	}

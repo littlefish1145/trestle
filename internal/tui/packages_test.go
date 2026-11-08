@@ -24,6 +24,25 @@ func packageModelWith(t *testing.T, entries []deps.PackageEntry) dashboardModel 
 	return model
 }
 
+func TestPackageVersionPickerShowsInterleavedVersionsAndRevisions(t *testing.T) {
+	model := packageModelWith(t, []deps.PackageEntry{
+		{Name: "fmt", Version: "10.0.0", Provider: "conan", Installed: true},
+		{Name: "fmt", Version: "11.0.0", Provider: "vcpkg", PortVersion: 2},
+		{Name: "fmt", Version: "11.0.0", Provider: "conan", Source: "remote"},
+		{Name: "fmt", Version: "12.0.0", Provider: "vcpkg"},
+	})
+	model = pressEnter(t, model)
+	lines := ansi.Strip(strings.Join(model.packageCandidateLines(newPalette(false), 100), "\n"))
+	previous := -1
+	for _, label := range []string{"12.0.0", "11.0.0", "11.0.0#2", "10.0.0"} {
+		position := strings.Index(lines, label)
+		if position <= previous {
+			t.Fatalf("version %s missing or out of order in picker:\n%s", label, lines)
+		}
+		previous = position
+	}
+}
+
 // pressKey delivers one key through handleKey, matching how the dashboard
 // routes keys in the real program.
 func pressKey(t *testing.T, model dashboardModel, key tea.Key) dashboardModel {
@@ -206,7 +225,7 @@ func TestPackageEnterOnCandidateInstallsExactReference(t *testing.T) {
 		return nil
 	}
 	model = pressEnter(t, model)
-	// The newest conan recipe leads its provider group, so the reference must
+	// The newest recipe leads the version list, so the reference must
 	// carry the version: a bare "fmt" would install an arbitrary version.
 	model = pressEnterAndRun(t, model)
 	if installed != "fmt/11.1.4" {
@@ -225,7 +244,7 @@ func TestPackageVcpkgCandidateInstallsBarePortName(t *testing.T) {
 		return nil
 	}
 	model = pressEnter(t, model)
-	// Move to the vcpkg candidate, which sorts after the conan group.
+	// Move to the older vcpkg candidate.
 	model = pressDown(t, model)
 	model = pressDown(t, model)
 	model = pressEnterAndRun(t, model)
