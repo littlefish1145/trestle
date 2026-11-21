@@ -46,6 +46,11 @@ schema_version = 7
   crt_linkage = ""
   library_linkage = ""
 
+[conan]
+  root = ""
+  build_root = ""
+  profile = "default"
+
 [compiler_presets]
 
 [targets]

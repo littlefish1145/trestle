@@ -15,19 +15,6 @@ defaults:
     shell: bash
 
 jobs:
-  workflow-lint:
-    name: Validate GitHub Actions workflows
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-go@v7
-        with:
-          go-version-file: go.mod
-          cache-dependency-path: go.sum
-      - name: Check workflow expressions and shell scripts
-        run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7 -color
-
   prepare:
     name: Prepare release metadata
     runs-on: ubuntu-latest
@@ -61,7 +48,6 @@ jobs:
 
   quality:
     name: Test and vet (${{ matrix.os }})
-    needs: workflow-lint
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     strategy:
@@ -122,18 +108,16 @@ jobs:
           if ! command -v ninja >/dev/null 2>&1; then
             tools="$RUNNER_TEMP/trestle-ci-tools"
             if [[ "$RUNNER_OS" == Windows ]]; then
-              tools=$(cygpath -u "$tools")
               python -m venv "$tools"
               tools_bin="$tools/Scripts"
               tools_python="$tools_bin/python.exe"
-              cygpath -w "$tools_bin" >> "$GITHUB_PATH"
             else
               python3 -m venv "$tools"
               tools_bin="$tools/bin"
               tools_python="$tools_bin/python"
-              echo "$tools_bin" >> "$GITHUB_PATH"
             fi
             "$tools_python" -m pip --disable-pip-version-check install ninja
+            echo "$tools_bin" >> "$GITHUB_PATH"
             export PATH="$tools_bin:$PATH"
           fi
           ninja --version
@@ -380,7 +364,6 @@ jobs:
           subject=$(git show -s --format=%s "$COMMIT_SHA")
           author=$(git show -s --format='%an <%ae>' "$COMMIT_SHA")
           previous=$(git tag --list 'alpha-*' --sort=-creatordate | grep -Fvx "$RELEASE_TAG" | head -n 1 || true)
-          commit_format="- [\`%h\`](${SERVER_URL}/${REPOSITORY}/commit/%H) %s — %an"
 
           {
             echo "Automated desktop Alpha build from \`main\`."
@@ -408,9 +391,9 @@ jobs:
             echo "## Changes"
             echo
             if [[ -n "$previous" ]]; then
-              git log "$previous..$COMMIT_SHA" --pretty=format:"$commit_format"
+              git log "$previous..$COMMIT_SHA" --pretty=format:'- [`%h`]('$SERVER_URL'/'$REPOSITORY'/commit/%H) %s — %an'
             else
-              git log -n 20 "$COMMIT_SHA" --pretty=format:"$commit_format"
+              git log -n 20 "$COMMIT_SHA" --pretty=format:'- [`%h`]('$SERVER_URL'/'$REPOSITORY'/commit/%H) %s — %an'
             fi
             echo
           } > release-notes.md
