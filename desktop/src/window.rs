@@ -579,6 +579,24 @@ impl Desktop {
         );
     }
 
+    fn open_saved_log(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        let check = cx
+            .background_executor()
+            .spawn(async move { (path.is_file(), path) });
+        cx.spawn(async move |this, cx| {
+            let (exists, path) = check.await;
+            let _ = this.update(cx, |this, cx| {
+                if exists {
+                    cx.open_with_system(&path);
+                } else {
+                    this.error = Some(format!("Saved log is unavailable: {}", path.display()));
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
     fn get_history(&mut self) {
         if let Some(id) = self.active.clone() {
             self.send(

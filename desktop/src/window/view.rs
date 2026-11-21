@@ -1207,7 +1207,9 @@ impl Desktop {
                         theme,
                         false,
                     )
-                    .on_click(move |_, _, cx| cx.open_with_system(&path)),
+                    .on_click(
+                        cx.listener(move |this, _, _, cx| this.open_saved_log(path.clone(), cx)),
+                    ),
                 );
             }
             if state.log_capped {

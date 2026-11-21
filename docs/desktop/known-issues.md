@@ -19,8 +19,8 @@
   outside that DAG, scheduling delays, failed-action durations and external
   cache hits remain unavailable. A replaced or incompatible journal produces
   no attributed timing.
-- Full logs use the project's existing Go Core log archive. Desktop summaries
-  are capped but the underlying Core log retention policy is unchanged.
+- New Desktop logs expire according to the retention limits in the development
+  guide. A persisted build summary can outlive a project log.
 - Path entry and search use the platform text input handler with UTF-16
   composition and clipboard support. Tab and Shift+Tab navigate controls.
   Native IME sessions, high-DPI behavior and accessibility still need

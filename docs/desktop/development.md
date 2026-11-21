@@ -64,9 +64,10 @@ Recent paths, window appearance preferences and up to 24 terminal operation summ
 `%LOCALAPPDATA%\trestle-desktop`, or
 `~/Library/Application Support/trestle-desktop`. The history is versioned JSON
 with one file per run. Desktop replay files are capped and temporary.
-Full logs use the existing per-project `.trestle/runs` archive, with the
-same retention behavior as the CLI. Clear those archives separately when
-they are no longer needed.
+New Desktop operations retain the latest 32 finished logs per project under
+`.trestle/runs`, up to 32 MiB of output per run. A capped file ends with a
+retention marker. CLI, TUI and pre-existing run archives follow their original
+retention policy.
 
 GPUI 0.2.2 currently depends on a package path that uses `xattr` 0.2.3.
 The lockfile retains a compatible `libc`, `mio`, and `command-fds`.

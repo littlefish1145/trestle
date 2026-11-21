@@ -25,30 +25,43 @@ import (
 // Record is the persisted metadata of one operation run: what ran, when, its
 // status, and where the full log lives.
 type Record struct {
-	ID          string     `json:"id"`
-	Operation   string     `json:"operation"`
-	Started     time.Time  `json:"started"`
-	Finished    *time.Time `json:"finished,omitempty"`
-	Status      string     `json:"status"`
-	Fingerprint string     `json:"config_fingerprint"`
-	LogPath     string     `json:"log_path"`
-	Error       string     `json:"error,omitempty"`
+	ID           string     `json:"id"`
+	Operation    string     `json:"operation"`
+	Started      time.Time  `json:"started"`
+	Finished     *time.Time `json:"finished,omitempty"`
+	Status       string     `json:"status"`
+	Fingerprint  string     `json:"config_fingerprint"`
+	LogPath      string     `json:"log_path"`
+	Error        string     `json:"error,omitempty"`
+	Origin       string     `json:"origin,omitempty"`
+	LogTruncated bool       `json:"log_truncated,omitempty"`
 }
 
 // Run is one live operation: its record, the log file being written, and the
 // lock that marks it active.
 type Run struct {
-	Record Record
-	path   string
-	file   *os.File
-	lock   *fsx.Lock
-	mu     sync.Mutex
-	err    error
+	Record  Record
+	path    string
+	file    *os.File
+	lock    *fsx.Lock
+	mu      sync.Mutex
+	err     error
+	limit   int64
+	written int64
 }
 
 // Start begins a new operation run, creating its log directory and active lock
 // under the project's .trestle/runs directory.
 func Start(configPath, operation string) (*Run, error) {
+	return start(configPath, operation, "", 0)
+}
+
+// StartDesktop records a Desktop operation with bounded raw output.
+func StartDesktop(configPath, operation string) (*Run, error) {
+	return start(configPath, operation, "desktop", 32<<20)
+}
+
+func start(configPath, operation, origin string, limit int64) (*Run, error) {
 	root, err := filepath.Abs(filepath.Join(filepath.Dir(configPath), ".trestle", "runs"))
 	if err != nil {
 		return nil, err
@@ -58,6 +71,9 @@ func Start(configPath, operation string) (*Run, error) {
 		return nil, err
 	}
 	id := time.Now().UTC().Format("20060102T150405.000000000") + "-" + hex.EncodeToString(nonce[:])
+	if origin == "desktop" {
+		id = "desktop-" + id
+	}
 	dir := filepath.Join(root, id)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, err
@@ -77,7 +93,7 @@ func Start(configPath, operation string) (*Run, error) {
 		lock.Close()
 		return nil, err
 	}
-	run := &Run{Record: Record{ID: id, Operation: operation, Started: time.Now().UTC(), Status: "running", Fingerprint: fingerprint, LogPath: file.Name()}, path: filepath.Join(dir, "record.json"), file: file, lock: lock}
+	run := &Run{Record: Record{ID: id, Operation: operation, Started: time.Now().UTC(), Status: "running", Fingerprint: fingerprint, LogPath: file.Name(), Origin: origin}, path: filepath.Join(dir, "record.json"), file: file, lock: lock, limit: limit}
 	if err := run.save(); err != nil {
 		file.Close()
 		lock.Close()
@@ -102,7 +118,23 @@ func (run *Run) Write(data []byte) (int, error) {
 	if run.err != nil {
 		return 0, run.err
 	}
+	if run.Record.LogTruncated {
+		return len(data), nil
+	}
+	original := len(data)
+	capped := run.limit > 0 && run.written+int64(len(data)) > run.limit
+	if capped {
+		data = data[:run.limit-run.written]
+	}
 	n, err := run.file.Write(data)
+	run.written += int64(n)
+	if err == nil && capped {
+		_, err = io.WriteString(run.file, "\n[trestle] Desktop log limit reached; remaining output was not retained.\n")
+		if err == nil {
+			run.Record.LogTruncated = true
+			n = original
+		}
+	}
 	if err == nil {
 		err = run.file.Sync()
 	}

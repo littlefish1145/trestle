@@ -55,12 +55,18 @@ func runOperation(ctx context.Context, path, label string, progress func(string)
 	if ctx.Value(operationKey{}) != nil {
 		return action(ctx, progress)
 	}
-	run, err := runlog.Start(path, label)
+	observer, _ := ctx.Value(buildObserverKey{}).(BuildObserver)
+	start := runlog.Start
+	if observer.Log != nil {
+		start = runlog.StartDesktop
+	}
+	run, err := start(path, label)
 	if err != nil {
 		return runlog.LogError(filepath.Join(filepath.Dir(path), ".trestle", "runs"), err)
 	}
-	if observer, _ := ctx.Value(buildObserverKey{}).(BuildObserver); observer.Log != nil {
+	if observer.Log != nil {
 		observer.Log(run.Record.LogPath)
+		defer runlog.PruneDesktop(path)
 	}
 	child, cancel := context.WithCancel(context.WithValue(ctx, operationKey{}, run))
 	defer cancel()
