@@ -21,8 +21,9 @@
   no attributed timing.
 - Full logs use the project's existing Go Core log archive. Desktop summaries
   are capped but the underlying Core log retention policy is unchanged.
-- Search and path entry support basic key input and clipboard paste. Native IME,
-  complete keyboard traversal, persisted UI settings, DPI validation and
-  accessibility testing need further work.
+- Path entry and search use the platform text input handler with UTF-16
+  composition and clipboard support. Tab and Shift+Tab navigate controls.
+  Native IME sessions, high-DPI behavior and accessibility still need
+  platform-specific manual testing.
 - A future Rust release may reject a construct in the transitive
   `proc-macro-error2` package. The checked locked toolchain builds it.

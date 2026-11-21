@@ -1,5 +1,5 @@
 use gpui::*;
-use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use std::{
     collections::HashMap,
@@ -16,11 +16,20 @@ use trestle_desktop::{
     },
 };
 
+mod text_entry;
 pub(crate) mod view;
 
 actions!(
     trestle,
-    [OpenWorkspace, BuildSelected, Commands, Search, CloseWindow]
+    [
+        OpenWorkspace,
+        BuildSelected,
+        Commands,
+        Search,
+        CloseWindow,
+        TabNext,
+        TabPrevious
+    ]
 );
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -77,6 +86,9 @@ pub struct Desktop {
     client: Option<Client>,
     requests: HashMap<u64, (Instant, Pending)>,
     focus: FocusHandle,
+    input_focus: FocusHandle,
+    focus_input: bool,
+    entry_selection: text_entry::Selection,
     ready: bool,
     connecting: bool,
     closing: bool,
@@ -126,6 +138,12 @@ pub struct Desktop {
     pub graph_expanded: Option<Rc<Vec<bool>>>,
 }
 
+#[derive(Deserialize, Serialize)]
+struct Preferences {
+    light: bool,
+    drawer_height: f32,
+}
+
 impl Desktop {
     pub fn new(initial: Option<PathBuf>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus = cx.focus_handle();
@@ -149,6 +167,9 @@ impl Desktop {
             client: None,
             requests: HashMap::new(),
             focus,
+            input_focus: cx.focus_handle(),
+            focus_input: false,
+            entry_selection: Default::default(),
             ready: false,
             connecting: false,
             closing: false,
@@ -198,14 +219,17 @@ impl Desktop {
             graph_expanded: None,
         };
         let load = cx.background_executor().spawn(async {
-            recent_path()
-                .and_then(|path| std::fs::read(path).ok())
-                .and_then(|data| serde_json::from_slice::<Vec<String>>(&data).ok())
-                .unwrap_or_default()
+            let recent: Vec<String> = load_state("recent.json").unwrap_or_default();
+            let preferences: Option<Preferences> = load_state("preferences.json");
+            (recent, preferences)
         });
         cx.spawn(async move |this, cx| {
-            let saved = load.await;
+            let (saved, preferences) = load.await;
             let _ = this.update(cx, |this, cx| {
+                if let Some(preferences) = preferences {
+                    this.light = preferences.light;
+                    this.drawer_height = preferences.drawer_height.clamp(118., 1400.);
+                }
                 for path in saved.into_iter().take(12) {
                     if !this.recent.contains(&path) {
                         this.recent.push(path);
@@ -260,13 +284,17 @@ impl Desktop {
             return;
         }
         self.closing = true;
-        let Some(client) = self.client.take() else {
-            window.remove_window();
-            return;
+        let client = self.client.take();
+        let preferences = Preferences {
+            light: self.light,
+            drawer_height: self.drawer_height,
         };
-        let shutdown = cx
-            .background_executor()
-            .spawn(async move { client.shutdown() });
+        let shutdown = cx.background_executor().spawn(async move {
+            save_state("preferences.json", &preferences);
+            if let Some(client) = client {
+                let _ = client.shutdown();
+            }
+        });
         cx.spawn_in(window, async move |_this, cx| {
             let _ = shutdown.await;
             let _ = cx.update(|window, _| window.remove_window());
@@ -363,7 +391,7 @@ impl Desktop {
                     }
                     Ok(Err(error)) => {
                         this.error = Some(format!("File picker unavailable: {error}"));
-                        this.input = Input::Path;
+                        this.show_input(Input::Path);
                     }
                     _ => {}
                 }
@@ -409,19 +437,7 @@ impl Desktop {
         let recent = self.recent.clone();
         cx.background_executor()
             .spawn(async move {
-                if let Some(file) = recent_path() {
-                    let result = (|| -> std::io::Result<()> {
-                        if let Some(parent) = file.parent() {
-                            std::fs::create_dir_all(parent)?;
-                        }
-                        let temporary = file.with_extension(format!("{}.tmp", std::process::id()));
-                        std::fs::write(&temporary, serde_json::to_vec(&recent)?)?;
-                        std::fs::rename(temporary, file)
-                    })();
-                    if let Err(error) = result {
-                        eprintln!("Cannot persist recent workspaces: {error}");
-                    }
-                }
+                save_state("recent.json", &recent);
             })
             .detach();
     }
@@ -939,6 +955,27 @@ fn decode<T: DeserializeOwned>(value: Value) -> Result<T, String> {
     serde_json::from_value(value).map_err(|error| format!("Core returned unexpected data: {error}"))
 }
 
-fn recent_path() -> Option<PathBuf> {
-    desktop_state_dir().map(|root| root.join("recent.json"))
+fn load_state<T: DeserializeOwned>(name: &str) -> Option<T> {
+    let file = desktop_state_dir()?.join(name);
+    let bytes = std::fs::read(file).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+fn save_state(name: &str, value: &impl Serialize) {
+    static WRITES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let Some(root) = desktop_state_dir() else {
+        return;
+    };
+    let file = root.join(name);
+    let nonce = WRITES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let temporary = file.with_extension(format!("{}-{nonce}.tmp", std::process::id()));
+    let result = (|| -> std::io::Result<()> {
+        std::fs::create_dir_all(root)?;
+        std::fs::write(&temporary, serde_json::to_vec(value)?)?;
+        std::fs::rename(&temporary, file)
+    })();
+    if let Err(error) = result {
+        let _ = std::fs::remove_file(temporary);
+        eprintln!("Cannot save Desktop state {name}: {error}");
+    }
 }

@@ -67,6 +67,10 @@ pub fn control(
 ) -> Stateful<Div> {
     div()
         .id(id)
+        .tab_index(0)
+        .border_1()
+        .border_color(gpui::transparent_black())
+        .focus(move |style| style.border_color(theme.accent))
         .px_2()
         .py_1()
         .rounded_md()
@@ -91,6 +95,9 @@ fn title(text: impl Into<SharedString>) -> Div {
 
 impl Render for Desktop {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if std::mem::take(&mut self.focus_input) {
+            self.input_focus.focus(window);
+        }
         let theme = Theme::new(self.light);
         let viewport = window.viewport_size();
         let compact = f32::from(viewport.width) < 1050.;
@@ -125,11 +132,15 @@ impl Render for Desktop {
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &Search, _, cx| {
-                this.input = Input::Find;
+                this.show_input(Input::Find);
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &CloseWindow, window, cx| this.close(window, cx)))
-            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| this.input_key(event, cx)))
+            .on_action(|_: &TabNext, window, _| window.focus_next())
+            .on_action(|_: &TabPrevious, window, _| window.focus_prev())
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                this.input_key(event, window, cx)
+            }))
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
                 if let Some((at, height)) = this.resize_at {
                     let max = f32::from(window.viewport_size().height) * 0.53;
@@ -382,8 +393,8 @@ impl Desktop {
                 control("command-path", "Open path…", theme, false).on_click(cx.listener(
                     |this, _, _, cx| {
                         this.commands = false;
-                        this.input = Input::Path;
                         this.path_input.clear();
+                        this.show_input(Input::Path);
                         cx.notify();
                     },
                 )),
@@ -419,10 +430,10 @@ impl Desktop {
     }
 
     fn input_bar(&self, theme: Theme, cx: &mut Context<Self>) -> Div {
-        let (hint, text) = if self.input == Input::Path {
-            ("Workspace path", &self.path_input)
+        let hint = if self.input == Input::Path {
+            "Workspace path"
         } else {
-            ("Find in current view", &self.query)
+            "Find in current view"
         };
         div()
             .flex()
@@ -433,15 +444,7 @@ impl Desktop {
             .border_b_1()
             .border_color(theme.border)
             .child(label(hint, theme))
-            .child(
-                div()
-                    .flex_1()
-                    .rounded_md()
-                    .px_2()
-                    .py_1()
-                    .bg(theme.surface)
-                    .child(format!("{text}▏")),
-            )
+            .child(self.entry_surface(theme, cx))
             .when(self.input == Input::Path, |bar| {
                 bar.child(
                     control("submit-path", "Open", theme, true).on_click(cx.listener(
@@ -463,50 +466,32 @@ impl Desktop {
             )
     }
 
-    fn input_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
+    fn input_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let key = &event.keystroke;
         if key.key == "escape" {
             self.input = Input::None;
             self.query.clear();
             self.commands = false;
+            self.focus.focus(window);
+            cx.stop_propagation();
             cx.notify();
             return;
         }
-        if self.input == Input::None {
+        if self.input == Input::None || !self.input_focus.is_focused(window) {
             return;
         }
-        let is_path = self.input == Input::Path;
-        if key.key == "enter" && is_path {
-            self.open(self.path_input.trim().to_owned(), true);
-            cx.notify();
-            return;
-        }
-        if key.key == "enter" && !is_path && self.page == Page::Graph {
-            self.find_graph_target();
-            cx.notify();
-            return;
-        }
-        let text = if is_path {
-            &mut self.path_input
-        } else {
-            &mut self.query
-        };
-        if key.key == "backspace" {
-            text.pop();
-        } else if (key.modifiers.control || key.modifiers.platform) && key.key == "v" {
-            if let Some(value) = cx.read_from_clipboard().and_then(|item| item.text()) {
-                text.extend(value.chars().filter(|ch| !ch.is_control()).take(4096));
+        if key.key == "enter" {
+            if self.input == Input::Path {
+                self.open(self.path_input.trim().to_owned(), true);
+                self.focus.focus(window);
+            } else if self.page == Page::Graph {
+                self.find_graph_target();
             }
-        } else if !key.modifiers.control
-            && !key.modifiers.platform
-            && let Some(chars) = &key.key_char
-        {
-            text.push_str(chars);
+            cx.stop_propagation();
+            cx.notify();
+            return;
         }
-        if text.len() > 4096 {
-            text.truncate(text.floor_char_boundary(4096));
-        }
-        cx.notify();
+        self.edit_input_key(event, cx);
     }
 
     fn explorer(&self, theme: Theme, cx: &mut Context<Self>) -> Stateful<Div> {
@@ -686,7 +671,7 @@ impl Desktop {
                     )
                     .child(control("path-empty", "Enter path…", theme, false).on_click(
                         cx.listener(|this, _, _, cx| {
-                            this.input = Input::Path;
+                            this.show_input(Input::Path);
                             cx.notify();
                         }),
                     )),
@@ -712,7 +697,7 @@ impl Desktop {
                 .child(
                     control("find-page", "Find", theme, self.input == Input::Find).on_click(
                         cx.listener(|this, _, _, cx| {
-                            this.input = Input::Find;
+                            this.show_input(Input::Find);
                             cx.notify();
                         }),
                     ),
@@ -1182,7 +1167,7 @@ impl Desktop {
             .child(
                 control("find-logs", "Filter", theme, self.input == Input::Find).on_click(
                     cx.listener(|this, _, _, cx| {
-                        this.input = Input::Find;
+                        this.show_input(Input::Find);
                         cx.notify();
                     }),
                 ),

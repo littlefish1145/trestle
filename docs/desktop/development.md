@@ -59,7 +59,7 @@ macOS runtime verification is also pending.
 
 ## Local files
 
-Recent paths and up to 24 terminal operation summaries are stored under
+Recent paths, window appearance preferences and up to 24 terminal operation summaries are stored under
 `$XDG_STATE_HOME/trestle-desktop` (default `~/.local/state/trestle-desktop`),
 `%LOCALAPPDATA%\trestle-desktop`, or
 `~/Library/Application Support/trestle-desktop`. The history is versioned JSON

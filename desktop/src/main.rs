@@ -18,6 +18,8 @@ fn main() {
             KeyBinding::new("secondary-k", Commands, None),
             KeyBinding::new("secondary-f", Search, None),
             KeyBinding::new("secondary-w", CloseWindow, None),
+            KeyBinding::new("tab", TabNext, None),
+            KeyBinding::new("shift-tab", TabPrevious, None),
         ]);
         cx.on_window_closed(|cx| {
             if cx.windows().is_empty() {
