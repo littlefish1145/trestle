@@ -18,6 +18,7 @@ import (
 // BuildObserver receives measurements from an individual Ninja invocation.
 // Callbacks must be safe for concurrent calls and return promptly.
 type BuildObserver struct {
+	Analysis  func(NinjaInvocation)
 	Artifacts func(map[model.TargetID]string)
 	Log       func(path string)
 	Progress  func(member string, value runner.Progress)

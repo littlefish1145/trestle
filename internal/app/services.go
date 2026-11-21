@@ -43,6 +43,7 @@ import (
 // profile, per-target output paths, extra runtime files, and the environment the
 // build needs.
 type BuildResult struct {
+	analysisPlan   *plan.BuildPlan
 	ConfigPath     string
 	Manifest       string
 	Profile        string
@@ -1760,7 +1761,11 @@ func generateWithConfig(ctx context.Context, path string, cfg config.Config) (Bu
 		}
 		observer.Artifacts(absolute)
 	}
-	return BuildResult{ConfigPath: path, Manifest: manifestPath, Profile: cfg.Build.Profile, Outputs: outputs, RuntimeOutputs: buildPlan.RuntimeOutputs, Environment: tc.Env}, nil
+	result := BuildResult{ConfigPath: path, Manifest: manifestPath, Profile: cfg.Build.Profile, Outputs: outputs, RuntimeOutputs: buildPlan.RuntimeOutputs, Environment: tc.Env}
+	if observer, _ := ctx.Value(buildObserverKey{}).(BuildObserver); observer.Analysis != nil {
+		result.analysisPlan = &buildPlan
+	}
+	return result, nil
 }
 
 type compileCommandEntry struct {
@@ -1970,23 +1975,45 @@ func buildTargetsWithOptions(ctx context.Context, path string, targets []string,
 			return err
 		}
 	}
-	if observer.Timings != nil {
-		read := observeNinjaLog(filepath.Dir(result.Manifest))
-		started := time.Now()
-		defer func() {
-			timings := read()
-			targets := make(map[string]model.TargetID, len(result.Outputs))
-			for id, output := range result.Outputs {
-				targets[filepath.Clean(output)] = id
-			}
-			for i := range timings {
-				timings[i].Target = targets[filepath.Clean(timings[i].Output)]
-			}
-			observer.Timings(member, started, timings)
-		}()
+	var readTimings func() []NinjaTiming
+	var started time.Time
+	if observer.Timings != nil || observer.Analysis != nil {
+		readTimings = observeNinjaLog(filepath.Dir(result.Manifest))
+		started = time.Now()
+	}
+	if observer.Analysis != nil {
+		writer.observations = &ninjaObservations{seen: map[string]bool{}}
+		args = append([]string{"-d", "explain"}, args...)
 	}
 	runErr := ninjaRunner.RunWithEvents(ctx, "ninja", args, ninjaOptions, writer)
 	writer.Flush()
+	if readTimings != nil {
+		timings := readTimings()
+		targets := make(map[string]model.TargetID, len(result.Outputs))
+		for id, output := range result.Outputs {
+			targets[filepath.Clean(output)] = id
+		}
+		for i := range timings {
+			timings[i].Target = targets[filepath.Clean(timings[i].Output)]
+		}
+		if observer.Timings != nil {
+			observer.Timings(member, started, timings)
+		}
+		if observer.Analysis != nil {
+			state := "completed"
+			if ctx.Err() != nil {
+				state = "cancelled"
+			} else if runErr != nil {
+				state = "failed"
+			}
+			observations := writer.observations
+			observer.Analysis(NinjaInvocation{
+				Member: member, Status: state, NoWork: runErr == nil && observations.noWork && len(timings) == 0,
+				Reasons: observations.reasons, ReasonsCut: observations.cut,
+				CriticalPath: measuredCriticalPath(result.analysisPlan.Actions, timings),
+			})
+		}
+	}
 	emitBuildSummary(progress, cfg, requested, writer, runErr)
 	return runErr
 }
@@ -2250,6 +2277,7 @@ type progressWriter struct {
 	callback        func(string)
 	statusCallback  func(string)
 	observeProgress func(runner.Progress)
+	observations    *ninjaObservations
 	outputs         map[model.TargetID]string
 	failedTargets   map[string]bool
 	diagnostics     map[string][]string
@@ -2288,6 +2316,9 @@ func (writer *progressWriter) Flush() {
 
 func (writer *progressWriter) emit(data []byte) {
 	line := strings.TrimRight(decodeConsoleOutput(data), "\r\n")
+	if writer.observations != nil {
+		writer.observations.read(line)
+	}
 	writer.observe(line)
 	if writer.callback != nil {
 		writer.callback(line)

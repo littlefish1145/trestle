@@ -105,6 +105,33 @@ pub struct LogPage {
 pub struct Analysis {
     pub build: Build,
     pub timings: Vec<Timing>,
+    #[serde(default)]
+    pub ninja_invocations: Vec<NinjaInvocation>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct NinjaInvocation {
+    pub member: String,
+    pub status: String,
+    pub no_work: bool,
+    #[serde(default)]
+    pub reasons: Vec<String>,
+    #[serde(default)]
+    pub reasons_truncated: bool,
+    pub critical_path: Option<CriticalPath>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct CriticalPath {
+    pub duration_ms: u64,
+    pub actions: Vec<PathStep>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct PathStep {
+    pub action: String,
+    pub output: String,
+    pub duration_ms: u64,
 }
 
 #[derive(Clone, Debug, Deserialize)]

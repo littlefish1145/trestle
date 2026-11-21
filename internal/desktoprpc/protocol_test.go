@@ -209,6 +209,34 @@ func TestBuildLifecycleAndReplay(t *testing.T) {
 	if !strings.Contains(log.Text, "link hello") || !strings.Contains(strings.Join(peer.output, "\n"), "compile") {
 		t.Fatalf("missing real build output: %s", log.Text)
 	}
+	type ninjaAnalysis struct {
+		Invocations []app.NinjaInvocation `json:"ninja_invocations"`
+	}
+	analysis := func(id string) ninjaAnalysis {
+		return rpcResult[ninjaAnalysis](t, peer.call(t, "analysis.summary", map[string]string{"build_id": id}))
+	}
+	first := analysis(build.ID)
+	if len(first.Invocations) != 2 {
+		t.Fatalf("missing Ninja invocations: %+v", first)
+	}
+	for _, invocation := range first.Invocations {
+		if invocation.NoWork || invocation.CriticalPath == nil || len(invocation.CriticalPath.Actions) < 2 || len(invocation.Reasons) == 0 {
+			t.Fatalf("missing dirty reasons or measured action chain: %+v", invocation)
+		}
+	}
+	incremental := rpcResult[buildState](t, peer.call(t, "build.start", options))
+	if result := waitForBuild(t, peer, incremental.ID); result.Status != "completed" || result.TimingCount != 0 {
+		t.Fatalf("unexpected incremental build result: %+v", result)
+	}
+	incrementalAnalysis := analysis(incremental.ID)
+	if len(incrementalAnalysis.Invocations) != 2 {
+		t.Fatalf("missing incremental invocations: %+v", incrementalAnalysis)
+	}
+	for _, invocation := range incrementalAnalysis.Invocations {
+		if !invocation.NoWork || invocation.CriticalPath != nil {
+			t.Fatalf("expected Ninja no-work evidence: %+v", invocation)
+		}
+	}
 	exe := filepath.Join(dir, "build", "debug", "cli", "bin", "hello-workspace")
 	output, err := exec.Command(exe).CombinedOutput()
 	if err != nil || strings.TrimSpace(string(output)) != "Hello, workspace!" {

@@ -23,7 +23,7 @@ are unsupported. Core stderr is diagnostic output.
 | `build.cancel`, `build.status` | `build_id` | Operation snapshot |
 | `build.log` | `build_id`, optional byte `offset` | Output replay page and `next_offset` |
 | `build.history` | `workspace_id` | Retained operation snapshots |
-| `analysis.summary` | `build_id` | Operation snapshot, timing records and nullable cache/critical-path fields |
+| `analysis.summary` | `build_id` | Operation snapshot, timing records and measured per-manifest analysis |
 
 A workspace ID is the Core's canonical config path. Open is read-only; build
 and configure require an existing configuration. Profiles `debug` and
@@ -56,3 +56,17 @@ Example handshake
 ```json
 {"jsonrpc":"2.0","id":1,"method":"system.handshake","params":{"versions":[1]}}
 ```
+
+
+## Ninja analysis
+
+Desktop builds enable Ninja's explain mode. `analysis.summary.ninja_invocations`
+contains up to 256 records with the member name, outcome, explicit no-work
+evidence, reasons reported by Ninja and a measured plan critical path when
+one can be attributed. Reason and path retention is bounded. Full explanations
+remain in the operation logs. A zero-work invocation is an incremental result.
+The optional per-invocation critical path uses the longest measured chain in
+the generated action DAG, with timing from the current Ninja journal. Multiple
+outputs of the same command contribute one interval. Unmeasured actions preserve
+the dependency chain with zero weight. External cache hit rates and an
+end-to-end workspace critical path remain null in v1.

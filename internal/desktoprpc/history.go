@@ -7,13 +7,16 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"trestle/internal/app"
 )
 
 const maxHistoryFileSize = 4 << 20
 
 type storedBuild struct {
-	Build   buildState `json:"build"`
-	Timings []timing   `json:"timings"`
+	Build       buildState            `json:"build"`
+	Timings     []timing              `json:"timings"`
+	Invocations []app.NinjaInvocation `json:"ninja_invocations,omitempty"`
 }
 
 func (s *session) loadHistory(dir string) {
@@ -41,7 +44,7 @@ func (s *session) loadHistory(dir string) {
 		// can still be opened by path after restarting the desktop.
 		stored.Build.LogSize = 0
 		stored.Build.LogCapped = false
-		s.builds[stored.Build.ID] = &job{state: stored.Build, timings: stored.Timings}
+		s.builds[stored.Build.ID] = &job{state: stored.Build, timings: stored.Timings, invocations: stored.Invocations}
 		s.order = append(s.order, stored.Build.ID)
 	}
 }

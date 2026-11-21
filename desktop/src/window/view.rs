@@ -1291,7 +1291,22 @@ impl Desktop {
                 .py_1()
                 .items_center()
                 .child(label(title, theme))
-                .child(label("Cache and critical path unavailable", theme))
+                .child(
+                    control(
+                        "ninja-details",
+                        if self.show_ninja_details {
+                            "Timeline"
+                        } else {
+                            "Ninja details"
+                        },
+                        theme,
+                        self.show_ninja_details,
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.show_ninja_details = !this.show_ninja_details;
+                        cx.notify();
+                    })),
+                )
                 .when_some(self.comparison.as_ref(), |base, comparison| {
                     base.child(label(
                         format!(
@@ -1303,6 +1318,65 @@ impl Desktop {
                     ))
                 }),
         );
+        if self.show_ninja_details {
+            let mut details = div()
+                .id("ninja-detail-list")
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scroll()
+                .px_3()
+                .py_2()
+                .child(label("Compiler cache statistics unavailable", theme));
+            if analysis.ninja_invocations.is_empty() {
+                details = details.child(label("No Ninja invocation data was recorded.", theme));
+            }
+            for invocation in &analysis.ninja_invocations {
+                let name = if invocation.member.is_empty() {
+                    "Project"
+                } else {
+                    &invocation.member
+                };
+                details = details.child(
+                    title(if invocation.no_work {
+                        format!("{name} · up to date")
+                    } else {
+                        format!("{name} · {}", invocation.status)
+                    })
+                    .mt_2(),
+                );
+                if let Some(path) = &invocation.critical_path {
+                    details = details
+                        .child(label(
+                            format!("Measured plan critical path · {} ms", path.duration_ms),
+                            theme,
+                        ))
+                        .children(path.actions.iter().map(|step| {
+                            label(
+                                format!(
+                                    "{} ms · {} · {}",
+                                    step.duration_ms, step.action, step.output
+                                ),
+                                theme,
+                            )
+                        }));
+                }
+                if !invocation.reasons.is_empty() {
+                    details = details.child(title("Rebuild reasons").mt_2()).children(
+                        invocation
+                            .reasons
+                            .iter()
+                            .map(|reason| label(reason.clone(), theme)),
+                    );
+                }
+                if invocation.reasons_truncated {
+                    details = details.child(label(
+                        "More reasons are available in the full build log.",
+                        theme,
+                    ));
+                }
+            }
+            return base.child(details);
+        }
         if indices.is_empty() {
             return base.child(
                 label(

@@ -54,12 +54,14 @@ type timing struct {
 }
 
 type job struct {
-	state    buildState
-	cancel   context.CancelFunc
-	file     *os.File
-	active   bool
-	sequence uint64
-	timings  []timing
+	state          buildState
+	cancel         context.CancelFunc
+	file           *os.File
+	active         bool
+	sequence       uint64
+	timings        []timing
+	invocations    []app.NinjaInvocation
+	analysisBudget int
 }
 
 type session struct {
@@ -235,6 +237,32 @@ func (s *session) run(ctx context.Context, j *job, publish func(string, Event)) 
 	send("status", j.state)
 	s.mu.Unlock()
 	ctx = app.WithBuildObserver(ctx, app.BuildObserver{
+		Analysis: func(value app.NinjaInvocation) {
+			s.mu.Lock()
+			defer s.mu.Unlock()
+			const maxInvocations = 256
+			const maxAnalysisBytes = 1 << 20
+			if len(j.invocations) >= maxInvocations {
+				return
+			}
+			for i, reason := range value.Reasons {
+				j.analysisBudget += len(reason) + 8
+				if j.analysisBudget > maxAnalysisBytes {
+					value.Reasons = value.Reasons[:i]
+					value.ReasonsCut = true
+					break
+				}
+			}
+			if value.CriticalPath != nil {
+				for _, step := range value.CriticalPath.Actions {
+					j.analysisBudget += len(step.Action) + len(step.Output) + 48
+				}
+				if j.analysisBudget > maxAnalysisBytes {
+					value.CriticalPath = nil
+				}
+			}
+			j.invocations = append(j.invocations, value)
+		},
 		Artifacts: func(artifacts map[model.TargetID]string) {
 			s.mu.Lock()
 			defer s.mu.Unlock()
@@ -298,7 +326,7 @@ func (s *session) run(ctx context.Context, j *job, publish func(string, Event)) 
 	j.state.DurationMS = snapshotTime.Sub(now).Milliseconds()
 	j.active = false
 	send("status", j.state)
-	stored := storedBuild{Build: j.state, Timings: j.timings}
+	stored := storedBuild{Build: j.state, Timings: j.timings, Invocations: j.invocations}
 	s.mu.Unlock()
 	s.saveHistory(stored)
 }
@@ -380,6 +408,8 @@ func (s *session) analysis(buildID string) (any, error) {
 		return nil, err
 	}
 	return map[string]any{
-		"build": j.state, "timings": append([]timing{}, j.timings...), "cache": nil, "critical_path": nil,
+		"build": j.state, "timings": append([]timing{}, j.timings...),
+		"ninja_invocations": append([]app.NinjaInvocation{}, j.invocations...),
+		"cache":             nil, "critical_path": nil,
 	}, nil
 }
