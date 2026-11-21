@@ -18,6 +18,7 @@ import (
 	"trestle/internal/app"
 	"trestle/internal/config"
 	"trestle/internal/deps"
+	"trestle/internal/desktoprpc"
 	"trestle/internal/diag"
 	"trestle/internal/policy"
 	"trestle/internal/runlog"
@@ -55,6 +56,18 @@ func main() {
 		return
 	}
 	command := os.Args[1]
+	if command == "desktop-rpc" && len(os.Args) == 2 {
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		protocol := os.Stdout
+		// Legacy Core status writes must never enter the protocol stream.
+		os.Stdout = os.Stderr
+		if err := desktoprpc.Serve(ctx, os.Stdin, protocol); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
 	if command == "-h" || command == "--help" || command == "help" {
 		usage()
 		return

@@ -59,6 +59,9 @@ func runOperation(ctx context.Context, path, label string, progress func(string)
 	if err != nil {
 		return runlog.LogError(filepath.Join(filepath.Dir(path), ".trestle", "runs"), err)
 	}
+	if observer, _ := ctx.Value(buildObserverKey{}).(BuildObserver); observer.Log != nil {
+		observer.Log(run.Record.LogPath)
+	}
 	child, cancel := context.WithCancel(context.WithValue(ctx, operationKey{}, run))
 	defer cancel()
 	emit := func(line string) {

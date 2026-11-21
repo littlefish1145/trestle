@@ -249,6 +249,10 @@ func SetCompileFlags(path, flags string) error {
 // environment setup and re-resolving the toolchain so a bad choice is rejected
 // before it is saved.
 func SetCompiler(path, compiler string) error {
+	return SetCompilerWithContext(context.Background(), path, compiler)
+}
+
+func SetCompilerWithContext(ctx context.Context, path, compiler string) error {
 	cfg, err := config.Load(path)
 	if err != nil {
 		return err
@@ -268,7 +272,10 @@ func SetCompiler(path, compiler string) error {
 		cfg.Toolchain.MSVC = version + "~" + version
 	}
 	cfg.Toolchain.Setup = ""
-	if _, err := detectConfigured(context.Background(), cfg); err != nil {
+	if _, err := detectConfigured(ctx, cfg); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
 		return err
 	}
 	return config.Save(path, cfg)
@@ -1743,6 +1750,16 @@ func generateWithConfig(ctx context.Context, path string, cfg config.Config) (Bu
 	if err != nil {
 		return BuildResult{}, err
 	}
+	if observer, _ := ctx.Value(buildObserverKey{}).(BuildObserver); observer.Artifacts != nil {
+		absolute := make(map[model.TargetID]string, len(outputs))
+		for id, path := range outputs {
+			if !filepath.IsAbs(path) {
+				path = filepath.Join(manifestDir, filepath.FromSlash(path))
+			}
+			absolute[id] = path
+		}
+		observer.Artifacts(absolute)
+	}
 	return BuildResult{ConfigPath: path, Manifest: manifestPath, Profile: cfg.Build.Profile, Outputs: outputs, RuntimeOutputs: buildPlan.RuntimeOutputs, Environment: tc.Env}, nil
 }
 
@@ -1938,9 +1955,37 @@ func buildTargetsWithOptions(ctx context.Context, path string, targets []string,
 	defer writer.Flush()
 	args := []string{"-f", "build.ninja"}
 	args = append(args, goals...)
-	runErr := (runner.Runner{}).RunWithEvents(ctx, "ninja", args, runner.Options{
+	observer, _ := ctx.Value(buildObserverKey{}).(BuildObserver)
+	member, _ := ctx.Value(workspaceMemberKey{}).(string)
+	if observer.Progress != nil {
+		writer.observeProgress = func(value runner.Progress) { observer.Progress(member, value) }
+	}
+	ninjaOptions := runner.Options{
 		Dir: filepath.Dir(result.Manifest), Env: environmentList(result.Environment), Stdout: writer, Stderr: writer, RawOutput: processx.Output(ctx),
-	}, writer)
+	}
+	ninjaRunner := runner.Runner{}
+	if rebuild, _ := ctx.Value(rebuildProjectKey{}).(bool); rebuild {
+		clean := append([]string{"-f", "build.ninja", "-t", "clean"}, goals...)
+		if err := ninjaRunner.RunWithEvents(ctx, "ninja", clean, ninjaOptions, writer); err != nil {
+			return err
+		}
+	}
+	if observer.Timings != nil {
+		read := observeNinjaLog(filepath.Dir(result.Manifest))
+		started := time.Now()
+		defer func() {
+			timings := read()
+			targets := make(map[string]model.TargetID, len(result.Outputs))
+			for id, output := range result.Outputs {
+				targets[filepath.Clean(output)] = id
+			}
+			for i := range timings {
+				timings[i].Target = targets[filepath.Clean(timings[i].Output)]
+			}
+			observer.Timings(member, started, timings)
+		}()
+	}
+	runErr := ninjaRunner.RunWithEvents(ctx, "ninja", args, ninjaOptions, writer)
 	writer.Flush()
 	emitBuildSummary(progress, cfg, requested, writer, runErr)
 	return runErr
@@ -2200,16 +2245,17 @@ func Test(path string) error {
 }
 
 type progressWriter struct {
-	mu             sync.Mutex
-	buffer         bytes.Buffer
-	callback       func(string)
-	statusCallback func(string)
-	outputs        map[model.TargetID]string
-	failedTargets  map[string]bool
-	diagnostics    map[string][]string
-	currentTarget  string
-	currentStage   string
-	currentSource  string
+	mu              sync.Mutex
+	buffer          bytes.Buffer
+	callback        func(string)
+	statusCallback  func(string)
+	observeProgress func(runner.Progress)
+	outputs         map[model.TargetID]string
+	failedTargets   map[string]bool
+	diagnostics     map[string][]string
+	currentTarget   string
+	currentStage    string
+	currentSource   string
 }
 
 var sourceDiagnosticPattern = regexp.MustCompile(`(?i)^([^:]+\.(?:c|cc|cpp|cxx|h|hpp))(?::|\()[0-9]+`)
@@ -2315,6 +2361,9 @@ func (writer *progressWriter) classifyFailure(path string) (target, stage, sourc
 
 // Progress reports aggregate build progress to the status callback.
 func (writer *progressWriter) Progress(value runner.Progress) {
+	if writer.observeProgress != nil {
+		writer.observeProgress(value)
+	}
 	callback := writer.statusCallback
 	if callback == nil {
 		callback = writer.callback
