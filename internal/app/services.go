@@ -1751,7 +1751,11 @@ func generateWithConfig(ctx context.Context, path string, cfg config.Config) (Bu
 	if err != nil {
 		return BuildResult{}, err
 	}
-	if observer, _ := ctx.Value(buildObserverKey{}).(BuildObserver); observer.Artifacts != nil {
+	observer, _ := ctx.Value(buildObserverKey{}).(BuildObserver)
+	if observer.Plan != nil {
+		observer.Plan(manifestPath, buildPlan.Actions)
+	}
+	if observer.Artifacts != nil {
 		absolute := make(map[model.TargetID]string, len(outputs))
 		for id, path := range outputs {
 			if !filepath.IsAbs(path) {

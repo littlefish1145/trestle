@@ -68,8 +68,12 @@ func Build(cfg config.Config, project model.ResolvedProject, options Options) (B
 		return BuildPlan{}, err
 	}
 	for _, target := range project.Targets {
+		first := len(state.result.Actions)
 		if err := state.emitTarget(target); err != nil {
 			return BuildPlan{}, err
+		}
+		for index := first; index < len(state.result.Actions); index++ {
+			state.result.Actions[index].Target = target.ID
 		}
 	}
 	state.emitAllTarget()

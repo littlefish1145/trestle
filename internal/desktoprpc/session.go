@@ -15,6 +15,7 @@ import (
 
 	"trestle/internal/app"
 	"trestle/internal/model"
+	"trestle/internal/plan"
 	"trestle/internal/runner"
 )
 
@@ -62,6 +63,9 @@ type job struct {
 	timings        []timing
 	invocations    []app.NinjaInvocation
 	analysisBudget int
+	generated      map[model.TargetID][]generatedCommand
+	generatedBytes int
+	commandsCut    bool
 }
 
 type session struct {
@@ -237,6 +241,11 @@ func (s *session) run(ctx context.Context, j *job, publish func(string, Event)) 
 	send("status", j.state)
 	s.mu.Unlock()
 	ctx = app.WithBuildObserver(ctx, app.BuildObserver{
+		Plan: func(manifest string, actions []plan.Action) {
+			s.mu.Lock()
+			defer s.mu.Unlock()
+			j.captureCommands(manifest, actions)
+		},
 		Analysis: func(value app.NinjaInvocation) {
 			s.mu.Lock()
 			defer s.mu.Unlock()

@@ -10,7 +10,8 @@ pub struct Node {
 #[derive(Debug)]
 pub struct Graph {
     pub nodes: Vec<Node>,
-    pub edges: Vec<(usize, usize)>,
+    edges: Vec<(usize, usize)>,
+    furthest_end: Vec<usize>,
     pub layers: Vec<Vec<usize>>,
     pub rows: usize,
     dependencies: Vec<Vec<usize>>,
@@ -64,14 +65,67 @@ impl Graph {
         if visited != targets.len() {
             return Err("The Core graph contains a dependency cycle".into());
         }
+        edges.sort_unstable_by_key(|&(from, to)| (nodes[from].layer, nodes[to].layer, from, to));
+        edges.dedup();
+        let mut end = 0;
+        let furthest_end = edges
+            .iter()
+            .map(|&(_, to)| {
+                end = end.max(nodes[to].layer);
+                end
+            })
+            .collect();
         Ok(Self {
             nodes,
             edges,
+            furthest_end,
             layers,
             rows,
             dependencies,
             dependents,
         })
+    }
+
+    /// Skip edges on either side of the viewport, including long edges that
+    /// enter the viewport from an earlier layer.
+    pub fn edges_in_layers(
+        &self,
+        first: usize,
+        last: usize,
+    ) -> impl Iterator<Item = (usize, usize)> + '_ {
+        let end = self
+            .edges
+            .partition_point(|&(from, _)| self.nodes[from].layer <= last);
+        let start = self.furthest_end[..end].partition_point(|&layer| layer < first);
+        self.edges[start..end]
+            .iter()
+            .copied()
+            .filter(move |&(_, to)| self.nodes[to].layer >= first)
+    }
+
+    /// Hide providers behind collapsed consumers. A shared dependency remains
+    /// visible when another uncollapsed path still reaches it.
+    pub fn expanded_nodes(&self, collapsed: &HashSet<usize>) -> Vec<bool> {
+        let mut visible = vec![false; self.nodes.len()];
+        let mut pending: Vec<_> = self
+            .dependents
+            .iter()
+            .enumerate()
+            .filter_map(|(index, consumers)| consumers.is_empty().then_some(index))
+            .collect();
+        while let Some(index) = pending.pop() {
+            if std::mem::replace(&mut visible[index], true) || collapsed.contains(&index) {
+                continue;
+            }
+            pending.extend_from_slice(&self.dependencies[index]);
+        }
+        visible
+    }
+
+    pub fn can_collapse(&self, index: usize) -> bool {
+        self.dependencies
+            .get(index)
+            .is_some_and(|deps| !deps.is_empty())
     }
 
     pub fn related(&self, node: usize, reverse: bool, transitive: bool) -> HashSet<usize> {
@@ -117,6 +171,30 @@ mod tests {
         assert_eq!(graph.related(0, true, false), HashSet::from([1]));
         assert!(
             Graph::layout(&[target(0, vec!["1".into()]), target(1, vec!["0".into()])]).is_err()
+        );
+    }
+
+    #[test]
+    fn collapsing_keeps_shared_providers_and_indexes_crossing_edges() {
+        let targets = [
+            target(0, vec![]),
+            target(1, vec![]),
+            target(2, vec!["0".into(), "1".into()]),
+            target(3, vec!["0".into()]),
+            target(4, vec!["2".into(), "0".into()]),
+        ];
+        let graph = Graph::layout(&targets).unwrap();
+        assert_eq!(
+            graph.expanded_nodes(&HashSet::from([4])),
+            [true, false, false, true, true]
+        );
+        assert_eq!(
+            graph.expanded_nodes(&HashSet::from([4, 3])),
+            [false, false, false, true, true]
+        );
+        assert_eq!(
+            graph.edges_in_layers(2, 2).collect::<HashSet<_>>(),
+            HashSet::from([(2, 4), (0, 4)])
         );
     }
 

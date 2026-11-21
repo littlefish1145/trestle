@@ -15,7 +15,7 @@ var methods = []string{
 	"system.handshake", "system.capabilities",
 	"workspace.open", "workspace.list", "workspace.get", "workspace.targets",
 	"toolchain.list", "toolchain.detect", "toolchain.select",
-	"build.start", "build.configure", "build.cancel", "build.status", "build.log", "build.history",
+	"build.start", "build.configure", "build.cancel", "build.status", "build.log", "build.history", "build.commands",
 	"graph.get", "graph.dependencies", "analysis.summary",
 }
 
@@ -39,15 +39,18 @@ func (c *connection) dispatch(ctx context.Context, req request) (any, error) {
 			return nil, err
 		}
 		return c.jobs.open(ctx, p.Path)
-	case "build.status", "build.cancel", "build.log", "analysis.summary":
+	case "build.status", "build.cancel", "build.log", "build.commands", "analysis.summary":
 		var p struct {
 			ID     string `json:"build_id"`
 			Offset int64  `json:"offset,omitempty"`
+			Target string `json:"target,omitempty"`
 		}
 		if err := decodeParams(req.Params, &p); err != nil {
 			return nil, err
 		}
 		switch req.Method {
+		case "build.commands":
+			return c.jobs.commands(p.ID, p.Target, p.Offset)
 		case "build.log":
 			return c.jobs.log(p.ID, p.Offset)
 		case "analysis.summary":

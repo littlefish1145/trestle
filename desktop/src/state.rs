@@ -326,3 +326,20 @@ mod measurements {
         );
     }
 }
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct GeneratedPage {
+    pub commands: Vec<GeneratedCommand>,
+    pub available: bool,
+    pub truncated: bool,
+    pub next_offset: Option<u64>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct GeneratedCommand {
+    pub action: String,
+    pub executable: String,
+    pub arguments: Option<Vec<String>>,
+    pub directory: String,
+    pub outputs: Vec<String>,
+}

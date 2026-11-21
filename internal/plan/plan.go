@@ -28,6 +28,7 @@ type DepfileSpec struct {
 // command shape, while the remaining fields mirror Ninja's per-edge inputs,
 // outputs, implicit dependencies and pool assignment.
 type Action struct {
+	Target       model.TargetID
 	ID           ID
 	Rule         ID
 	Command      Command

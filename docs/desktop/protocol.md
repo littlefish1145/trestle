@@ -23,6 +23,7 @@ are unsupported. Core stderr is diagnostic output.
 | `build.cancel`, `build.status` | `build_id` | Operation snapshot |
 | `build.log` | `build_id`, optional byte `offset` | Output replay page and `next_offset` |
 | `build.history` | `workspace_id` | Retained operation snapshots |
+| `build.commands` | `build_id`, `target`, optional command `offset` | Up to 16 generated commands with executable, working directory, argument array and outputs |
 | `analysis.summary` | `build_id` | Operation snapshot, timing records and measured per-manifest analysis |
 
 A workspace ID is the Core's canonical config path. Open is read-only; build
@@ -70,3 +71,10 @@ the generated action DAG, with timing from the current Ninja journal. Multiple
 outputs of the same command contribute one interval. Unmeasured actions preserve
 the dependency chain with zero weight. External cache hit rates and an
 end-to-end workspace critical path remain null in v1.
+
+
+Generated command pages refer to the exact translated plan for the selected
+operation. Each page has `available`, `truncated` and optional `next_offset`.
+The Core retains up to 2 MiB per operation for this purpose. Commands describe
+the current Core session. Historical records can still provide their timings
+and artifact paths after reconnecting.

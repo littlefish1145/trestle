@@ -12,12 +12,14 @@ import (
 	"time"
 
 	"trestle/internal/model"
+	"trestle/internal/plan"
 	"trestle/internal/runner"
 )
 
 // BuildObserver receives measurements from an individual Ninja invocation.
 // Callbacks must be safe for concurrent calls and return promptly.
 type BuildObserver struct {
+	Plan      func(manifest string, actions []plan.Action)
 	Analysis  func(NinjaInvocation)
 	Artifacts func(map[model.TargetID]string)
 	Log       func(path string)

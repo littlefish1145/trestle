@@ -11,7 +11,8 @@ use trestle_desktop::{
     graph::Graph,
     protocol::{Client, Message, core_path, desktop_state_dir},
     state::{
-        Analysis, Build, BuildOutput, Component, LogPage, Target, Toolchain, Workspace, problem,
+        Analysis, Build, BuildOutput, Component, GeneratedPage, LogPage, Target, Toolchain,
+        Workspace, problem,
     },
 };
 
@@ -61,6 +62,7 @@ enum Pending {
     Analysis(String),
     Inventory,
     Detect(String, String),
+    TargetCommands(String, String),
 }
 
 #[derive(Default)]
@@ -82,6 +84,8 @@ pub struct Desktop {
     workspaces: Vec<Workspace>,
     active: Option<String>,
     target: Option<String>,
+    project_filter: Option<String>,
+    generated: Option<(String, String, GeneratedPage)>,
     profile: String,
     recent: Vec<String>,
     open_token: u64,
@@ -118,6 +122,8 @@ pub struct Desktop {
     pub artifact_times: HashMap<String, u64>,
     pub graph_drag: Option<Point<Pixels>>,
     pub graph_related: Rc<std::collections::HashSet<usize>>,
+    pub graph_collapsed: std::collections::HashSet<usize>,
+    pub graph_expanded: Option<Rc<Vec<bool>>>,
 }
 
 impl Desktop {
@@ -150,6 +156,8 @@ impl Desktop {
             workspaces: Vec::new(),
             active: None,
             target: None,
+            project_filter: None,
+            generated: None,
             profile: String::new(),
             recent: Vec::new(),
             open_token: 0,
@@ -186,6 +194,8 @@ impl Desktop {
             artifact_times: HashMap::new(),
             graph_drag: None,
             graph_related: Rc::default(),
+            graph_collapsed: Default::default(),
+            graph_expanded: None,
         };
         let load = cx.background_executor().spawn(async {
             recent_path()
@@ -370,6 +380,8 @@ impl Desktop {
         }
         self.active = Some(id);
         self.target = None;
+        self.project_filter = None;
+        self.generated = None;
         self.detected = None;
         self.analysis = None;
         self.artifact_times.clear();
@@ -425,6 +437,8 @@ impl Desktop {
         }
         self.graph_x = 0.;
         self.graph_y = 0.;
+        self.graph_collapsed.clear();
+        self.graph_expanded = None;
         self.refresh_related();
     }
 
@@ -444,6 +458,58 @@ impl Desktop {
         self.graph_related = Rc::new(result);
     }
 
+    fn find_graph_target(&mut self) {
+        let query = self.query.to_lowercase();
+        if query.is_empty() {
+            return;
+        }
+        let Some(workspace) = self.workspace() else {
+            return;
+        };
+        let Some((index, target)) = workspace
+            .targets
+            .iter()
+            .enumerate()
+            .find(|(_, target)| target.id.eq_ignore_ascii_case(&query))
+            .or_else(|| {
+                workspace
+                    .targets
+                    .iter()
+                    .enumerate()
+                    .find(|(_, target)| target.id.to_lowercase().contains(&query))
+            })
+        else {
+            return;
+        };
+        let Some(graph) = &self.graph else { return };
+        let node = graph.nodes[index];
+        self.target = Some(target.id.clone());
+        if self
+            .graph_expanded
+            .as_ref()
+            .is_some_and(|nodes| !nodes[index])
+        {
+            self.graph_collapsed.clear();
+            self.graph_expanded = None;
+        }
+        self.graph_measured_only = false;
+        self.graph_x = -(node.layer as f32 * crate::graph_view::SLOT_X * self.zoom);
+        self.graph_y = -(node.row as f32 * crate::graph_view::SLOT_Y * self.zoom);
+        self.refresh_related();
+    }
+
+    pub fn toggle_branch(&mut self, index: usize) {
+        let Some(graph) = &self.graph else { return };
+        if !graph.can_collapse(index) {
+            return;
+        }
+        if !self.graph_collapsed.remove(&index) {
+            self.graph_collapsed.insert(index);
+        }
+        self.graph_expanded = (!self.graph_collapsed.is_empty())
+            .then(|| Rc::new(graph.expanded_nodes(&self.graph_collapsed)));
+    }
+
     pub fn select_target(&mut self, id: String) {
         self.target = if self.target.as_ref() == Some(&id) {
             None
@@ -454,6 +520,32 @@ impl Desktop {
         if self.page == Page::Toolchains {
             self.detect();
         }
+    }
+
+    fn set_project(&mut self, member: Option<String>) {
+        self.navigate(Page::Targets);
+        self.project_filter = member;
+        self.target = None;
+        self.generated = None;
+        self.refresh_related();
+    }
+
+    fn request_commands(&mut self, offset: u64) {
+        let Some(build) = self.job().and_then(|job| job.state.as_ref()) else {
+            return;
+        };
+        let Some(target) = self.target.clone() else {
+            return;
+        };
+        let build = build.build_id.clone();
+        if self.requests.values().any(|(_, kind)| {
+            matches!(kind, Pending::TargetCommands(active_build, active_target) if active_build == &build && active_target == &target)
+        }) { return; }
+        self.send(
+            "build.commands",
+            json!({"build_id":build,"target":target,"offset":offset}),
+            Pending::TargetCommands(build, target),
+        );
     }
 
     fn detect(&mut self) {
@@ -526,7 +618,9 @@ impl Desktop {
                 let (member, targets) = self
                     .selected_target()
                     .map(|target| (target.member.clone(), vec![target.id.clone()]))
-                    .unwrap_or_default();
+                    .unwrap_or_else(|| {
+                        (self.project_filter.clone().unwrap_or_default(), Vec::new())
+                    });
                 (member, targets, self.profile.clone())
             }
         };
@@ -725,6 +819,7 @@ impl Desktop {
                     },
                 );
                 self.build_at = Some(Instant::now());
+                self.generated = None;
                 self.analysis = None;
                 self.artifact_times.clear();
                 self.graph_measured_only = false;
@@ -786,6 +881,15 @@ impl Desktop {
                     self.analysis = Some(analysis);
                 } else if self.history.iter().any(|build| build.build_id == id) {
                     self.comparison = Some(analysis);
+                }
+            }
+            Pending::TargetCommands(build, target) => {
+                let active = self
+                    .job()
+                    .and_then(|job| job.state.as_ref())
+                    .map(|state| &state.build_id);
+                if active == Some(&build) && self.target.as_ref() == Some(&target) {
+                    self.generated = Some((build, target, decode(value)?));
                 }
             }
             Pending::Inventory => self.inventory = decode(value)?,

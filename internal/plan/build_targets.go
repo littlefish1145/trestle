@@ -451,7 +451,7 @@ func (s *buildState) emitTestTargets() {
 		testOutput := filepath.ToSlash(filepath.Join(pathRelativeTo(s.options.Root, s.buildDir), "test", string(target.ID)+".stamp"))
 		command := testCommand(s.outputs[target.ID], testOutput)
 		s.result.Actions = append(s.result.Actions, Action{
-			ID: ActionID("test", string(target.ID)), Rule: ActionID("test", string(target.ID)), Command: command,
+			Target: target.ID, ID: ActionID("test", string(target.ID)), Rule: ActionID("test", string(target.ID)), Command: command,
 			Inputs:  []string{s.outputs[target.ID]},
 			Outputs: []string{testOutput}, Pool: "console_pool",
 		})

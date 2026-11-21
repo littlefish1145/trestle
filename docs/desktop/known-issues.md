@@ -4,16 +4,14 @@
   Physical GPU, Wayland, Windows and macOS runtime checks remain outstanding.
   The Linux native-file picker depends on a desktop portal. Path entry is
   available independently.
-- The target inspector shows Core-resolved sources and dependencies, configured
-  compiler selectors, effective graph options and configured output names. After generation, it also shows the Core's planned artifact path.
-  It does not reconstruct every generated compiler command, resolved artifact
-  path before generation, or per-target SDK selector.
-- Dependency edges reflect the resolved target graph. The graph highlights
-  direct, transitive and reverse dependencies. The selected-chain view hides
-  unrelated nodes. The measured-artifact filter uses exact Ninja output records
-  to show the final artifact action duration where available. Per-target total
-  timing and cache status are not aggregated. Arbitrary subgraphs cannot be
-  collapsed.
+- Generated command inspection requires a configure or build operation in the
+  current Core session. The inspector can display planned artifacts, executable
+  paths, argument arrays and outputs for its retained plans. Before generation
+  it shows configuration, sources and resolved dependencies.
+- The graph can collapse a selected target's dependency branch while keeping
+  shared providers visible for other branches. The measured-artifact filter
+  shows the final artifact action duration where available. Per-target total
+  timing and external cache hits remain unavailable.
 - The analysis distinguishes Ninja's explicit incremental no-work result
   from compiler cache statistics. Ninja's explain output provides rebuild
   reasons. Its timing journal, correlated with the generated dependency DAG,

@@ -100,8 +100,8 @@ impl Render for Desktop {
             .max(118.);
         let header = self.header(theme, cx);
         let tabs = self.tabs(theme, cx);
-        let page = self.page_content(theme, compact, cx);
-        let inspector = self.inspector(theme);
+        let page = self.page_content(theme, compact, viewport, cx);
+        let inspector = self.inspector(theme, cx);
         let explorer = self.explorer(theme, cx);
         let bottom = self.bottom(theme, cx);
 
@@ -481,6 +481,11 @@ impl Desktop {
             cx.notify();
             return;
         }
+        if key.key == "enter" && !is_path && self.page == Page::Graph {
+            self.find_graph_target();
+            cx.notify();
+            return;
+        }
         let text = if is_path {
             &mut self.path_input
         } else {
@@ -538,30 +543,59 @@ impl Desktop {
                     .text_color(theme.muted)
                     .child(ws.path.clone()),
             );
-            for project in &ws.projects {
+            if ws.projects.len() > 1 {
                 list = list.child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap_1()
-                        .border_b_1()
-                        .border_color(theme.border)
-                        .py_2()
-                        .child(title(if project.name.is_empty() {
-                            ws.name.clone()
-                        } else {
-                            project.name.clone()
-                        }))
-                        .child(label(
-                            format!("{} · {}", project.profile, selector(&project.compiler)),
-                            theme,
-                        ))
-                        .child(label(project.path.clone(), theme).text_ellipsis()),
+                    control(
+                        "all-projects",
+                        "All projects",
+                        theme,
+                        self.page == Page::Targets && self.project_filter.is_none(),
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.set_project(None);
+                        cx.notify();
+                    })),
                 );
             }
-        } else if !self.recent.is_empty() {
+            for project in &ws.projects {
+                let member = project.name.clone();
+                let name = if member.is_empty() {
+                    ws.name.clone()
+                } else {
+                    member.clone()
+                };
+                let active =
+                    self.page == Page::Targets && self.project_filter.as_ref() == Some(&member);
+                list = list.child(
+                    control(
+                        SharedString::from(format!("project-{}", member)),
+                        name,
+                        theme,
+                        active,
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.set_project(Some(member.clone()));
+                        cx.notify();
+                    }))
+                    .child(label(
+                        format!("{} · {}", project.profile, selector(&project.compiler)),
+                        theme,
+                    ))
+                    .child(label(project.path.clone(), theme).text_ellipsis()),
+                );
+            }
+        }
+        if self
+            .recent
+            .iter()
+            .any(|path| !self.workspaces.iter().any(|ws| &ws.path == path))
+        {
             list = list.child(label("RECENT WORKSPACES", theme).mt_3());
-            for path in &self.recent {
+            for path in self
+                .recent
+                .iter()
+                .filter(|path| !self.workspaces.iter().any(|ws| &ws.path == *path))
+            {
                 let path = path.clone();
                 list = list.child(
                     control(SharedString::from(path.clone()), path.clone(), theme, false)
@@ -577,7 +611,13 @@ impl Desktop {
         list
     }
 
-    fn page_content(&self, theme: Theme, compact: bool, cx: &mut Context<Self>) -> Div {
+    fn page_content(
+        &self,
+        theme: Theme,
+        compact: bool,
+        viewport: Size<Pixels>,
+        cx: &mut Context<Self>,
+    ) -> Div {
         let mut base = div().flex_1().min_w_0().flex().flex_col().overflow_hidden();
         if self.page == Page::Settings {
             return base.child(
@@ -686,9 +726,12 @@ impl Desktop {
                     .iter()
                     .enumerate()
                     .filter(|(_, target)| {
-                        query.is_empty()
-                            || target.id.to_lowercase().contains(&query)
-                            || target.member.to_lowercase().contains(&query)
+                        self.project_filter
+                            .as_ref()
+                            .is_none_or(|member| member == &target.member)
+                            && (query.is_empty()
+                                || target.id.to_lowercase().contains(&query)
+                                || target.member.to_lowercase().contains(&query))
                     })
                     .map(|(index, _)| index)
                     .collect();
@@ -777,7 +820,7 @@ impl Desktop {
                     "Dependency graph",
                     format!("{} targets · provider → consumer", ws.targets.len()),
                 ))
-                .child(graph_view::render(self, theme, cx)),
+                .child(graph_view::render(self, theme, viewport, cx)),
             Page::Toolchains => base
                 .child(heading(
                     "Toolchains",
@@ -788,7 +831,7 @@ impl Desktop {
         }
     }
 
-    fn inspector(&self, theme: Theme) -> Stateful<Div> {
+    fn inspector(&self, theme: Theme, cx: &mut Context<Self>) -> Stateful<Div> {
         let mut panel = div()
             .id("inspector")
             .w(px(274.))
@@ -821,6 +864,63 @@ impl Desktop {
                 panel = panel
                     .child(label("Planned artifact", theme))
                     .child(div().text_xs().child(artifact.clone()));
+            }
+            if let Some(build) = self.job().and_then(|job| job.state.as_ref()) {
+                let page = self
+                    .generated
+                    .as_ref()
+                    .filter(|(id, name, _)| id == &build.build_id && name == &target.id)
+                    .map(|(_, _, page)| page);
+                panel = panel.child(
+                    control(
+                        "generated-commands",
+                        if page.is_some() {
+                            "Refresh commands"
+                        } else {
+                            "Generated commands"
+                        },
+                        theme,
+                        false,
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.request_commands(0);
+                        cx.notify();
+                    })),
+                );
+                if let Some(page) = page {
+                    if page.available {
+                        for command in &page.commands {
+                            let args = serde_json::to_string(
+                                &command.arguments.as_deref().unwrap_or_default(),
+                            )
+                            .unwrap_or_default();
+                            panel = panel
+                                .child(title(command.action.clone()).text_xs())
+                                .child(label(command.directory.clone(), theme))
+                                .child(div().text_xs().child(command.executable.clone()))
+                                .child(div().text_xs().child(args))
+                                .child(label(command.outputs.join(", "), theme));
+                        }
+                        if let Some(offset) = page.next_offset {
+                            panel = panel.child(
+                                control("next-commands", "Next commands", theme, false).on_click(
+                                    cx.listener(move |this, _, _, cx| {
+                                        this.request_commands(offset);
+                                        cx.notify();
+                                    }),
+                                ),
+                            );
+                        }
+                        if page.truncated {
+                            panel = panel.child(label("Command retention limit reached.", theme));
+                        }
+                    } else {
+                        panel = panel.child(label(
+                            "Configure or build this target to inspect its commands.",
+                            theme,
+                        ));
+                    }
+                }
             }
             for (name, values) in [
                 ("Sources", &target.sources),
@@ -1278,7 +1378,7 @@ impl Desktop {
             .map(|step| step.end_ms)
             .max()
             .unwrap_or(0);
-        let title = format!(
+        let timing_summary = format!(
             "{} measured outputs · recorded span {} ms",
             analysis.timings.len(),
             span
@@ -1290,7 +1390,7 @@ impl Desktop {
                 .px_2()
                 .py_1()
                 .items_center()
-                .child(label(title, theme))
+                .child(label(timing_summary, theme))
                 .child(
                     control(
                         "ninja-details",

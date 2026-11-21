@@ -197,6 +197,15 @@ func TestBuildLifecycleAndReplay(t *testing.T) {
 	if result := waitForBuild(t, peer, configured.ID); result.Status != "completed" {
 		t.Fatalf("configure failed: %+v", result)
 	}
+	commands := rpcResult[generatedPage](t, peer.call(t, "build.commands", map[string]string{
+		"build_id": configured.ID, "target": "hello",
+	}))
+	if !commands.Available || len(commands.Commands) != 2 ||
+		!strings.Contains(string(commands.Commands[0].Action), "compile") ||
+		!strings.Contains(string(commands.Commands[1].Action), "link") ||
+		!strings.Contains(commands.Commands[1].Directory, "cli") {
+		t.Fatalf("unexpected generated commands: %+v", commands)
+	}
 	build := rpcResult[buildState](t, peer.call(t, "build.start", options))
 	if build.Status != "queued" || build.WorkspaceID != ws.ID {
 		t.Fatalf("unexpected initial state: %+v", build)

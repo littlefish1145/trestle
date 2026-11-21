@@ -4,12 +4,17 @@ use crate::window::{
 };
 use gpui::{prelude::*, *};
 
-const SLOT_X: f32 = 208.;
-const SLOT_Y: f32 = 64.;
+pub(crate) const SLOT_X: f32 = 208.;
+pub(crate) const SLOT_Y: f32 = 64.;
 const NODE_W: f32 = 162.;
 const NODE_H: f32 = 45.;
 
-pub fn render(this: &Desktop, theme: Theme, cx: &mut Context<Desktop>) -> Div {
+pub fn render(
+    this: &Desktop,
+    theme: Theme,
+    viewport: Size<Pixels>,
+    cx: &mut Context<Desktop>,
+) -> Div {
     let Some(graph) = this.graph.clone() else {
         return div().p_4().text_color(theme.muted).child(
             this.graph_error
@@ -106,6 +111,28 @@ pub fn render(this: &Desktop, theme: Theme, cx: &mut Context<Desktop>) -> Div {
     }
 
     let selected = this.selected_index();
+    if let Some(index) = selected.filter(|&index| graph.can_collapse(index)) {
+        let collapsed = this.graph_collapsed.contains(&index);
+        toolbar = toolbar.child(
+            control(
+                "collapse-branch",
+                if collapsed {
+                    "Expand dependencies"
+                } else {
+                    "Collapse dependencies"
+                },
+                theme,
+                collapsed,
+            )
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.toggle_branch(index);
+                cx.notify();
+            })),
+        );
+    }
+    let expanded = this.graph_expanded.clone();
+    let expanded_edges = expanded.clone();
+    let collapsed_edges = this.graph_collapsed.clone();
     let related = this.graph_related.clone();
     let highlight = related.clone();
     let focus = this.graph_focus_only && selected.is_some();
@@ -138,6 +165,9 @@ pub fn render(this: &Desktop, theme: Theme, cx: &mut Context<Desktop>) -> Div {
     let matches =
         |i: usize| query.is_empty() || workspace.targets[i].id.to_lowercase().contains(&query);
     let visible = |i: usize| {
+        if expanded.as_ref().is_some_and(|nodes| !nodes[i]) {
+            return false;
+        }
         (!focus || selected == Some(i) || related.contains(&i))
             && measured.as_ref().is_none_or(|nodes| nodes.contains(&i))
     };
@@ -157,7 +187,16 @@ pub fn render(this: &Desktop, theme: Theme, cx: &mut Context<Desktop>) -> Div {
             };
             let mut normal = PathBuilder::stroke(px(1.));
             let mut highlighted = PathBuilder::stroke(px(1.5));
-            for &(provider, consumer) in &geometry.edges {
+            let first = ((-offset_x - 22. * z) / (SLOT_X * z)).floor().max(0.) as usize;
+            let last = ((width - offset_x) / (SLOT_X * z)).ceil().max(0.) as usize;
+            for (provider, consumer) in geometry.edges_in_layers(first, last) {
+                if collapsed_edges.contains(&consumer)
+                    || expanded_edges
+                        .as_ref()
+                        .is_some_and(|nodes| !nodes[provider] || !nodes[consumer])
+                {
+                    continue;
+                }
                 if measured_edges
                     .as_ref()
                     .is_some_and(|nodes| !nodes.contains(&provider) || !nodes.contains(&consumer))
@@ -206,17 +245,19 @@ pub fn render(this: &Desktop, theme: Theme, cx: &mut Context<Desktop>) -> Div {
     .inset_0()
     .size_full();
 
-    // A conservative window-size bound limits materialized nodes. Canvas
-    // clipping uses its actual bounds independently.
-    let bound = 2600.;
+    // The outer window is an upper bound on the actual graph pane.
     let first_layer = ((-offset_x - 22. * z - NODE_W * z) / (SLOT_X * z))
         .floor()
         .max(0.) as usize;
-    let last_layer = ((bound - offset_x) / (SLOT_X * z)).ceil().max(0.) as usize;
+    let last_layer = ((f32::from(viewport.width) - offset_x) / (SLOT_X * z))
+        .ceil()
+        .max(0.) as usize;
     let first_row = ((-offset_y - 22. * z - NODE_H * z) / (SLOT_Y * z))
         .floor()
         .max(0.) as usize;
-    let last_row = ((bound - offset_y) / (SLOT_Y * z)).ceil().max(0.) as usize;
+    let last_row = ((f32::from(viewport.height) - offset_y) / (SLOT_Y * z))
+        .ceil()
+        .max(0.) as usize;
     let mut body = div()
         .id("graph-viewport")
         .relative()
