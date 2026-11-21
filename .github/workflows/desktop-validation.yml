@@ -1,0 +1,142 @@
+name: Desktop validation
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/desktop-validation.yml'
+      - 'cmd/**'
+      - 'desktop/**'
+      - 'docs/desktop/**'
+      - 'examples/hello-workspace/**'
+      - 'go.mod'
+      - 'go.sum'
+      - 'internal/**'
+      - 'scripts/desktop/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/desktop-validation.yml'
+      - 'cmd/**'
+      - 'desktop/**'
+      - 'docs/desktop/**'
+      - 'examples/hello-workspace/**'
+      - 'go.mod'
+      - 'go.sum'
+      - 'internal/**'
+      - 'scripts/desktop/**'
+  workflow_dispatch:
+    inputs:
+      windows_gui:
+        description: 'Also drive the Windows window on an interactive Direct3D desktop'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  RUST_TOOLCHAIN: '1.100.0'
+
+jobs:
+  desktop:
+    name: Desktop (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            compiler: g++
+            suffix: ''
+          - os: windows-2025
+            compiler: clang-cl
+            suffix: .exe
+    env:
+      TRESTLE_TEST_NATIVE: '1'
+      TRESTLE_TEST_COMPILER: ${{ matrix.compiler }}
+      TRESTLE_EXE_SUFFIX: ${{ matrix.suffix }}
+
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Install Linux window and build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config ninja-build libxcb1-dev libxkbcommon-dev \
+            libxkbcommon-x11-dev libfontconfig1-dev libfreetype-dev libvulkan1 \
+            mesa-vulkan-drivers xvfb xauth xdotool fonts-dejavu-core
+
+      - name: Verify toolchain and install Rust
+        run: |
+          set -euo pipefail
+          if ! command -v ninja >/dev/null; then
+            python -m pip --disable-pip-version-check install 'ninja==1.13.0'
+          fi
+          command -v "$TRESTLE_TEST_COMPILER"
+          ninja --version
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component rustfmt
+
+      - name: Test Go Core
+        run: |
+          go mod verify
+          go test -mod=readonly -count=1 -timeout=8m ./...
+          go vet -mod=readonly ./...
+
+      - name: Build and test the Rust desktop
+        run: |
+          set -euo pipefail
+          mkdir -p dist/desktop
+          go build -mod=readonly -o "dist/desktop/trestle$TRESTLE_EXE_SUFFIX" ./cmd/trestle
+          cargo "+$RUST_TOOLCHAIN" fmt --manifest-path desktop/Cargo.toml --check
+          cargo "+$RUST_TOOLCHAIN" build --locked --manifest-path desktop/Cargo.toml
+          cargo "+$RUST_TOOLCHAIN" test --locked --manifest-path desktop/Cargo.toml
+          cp "desktop/target/debug/trestle-desktop$TRESTLE_EXE_SUFFIX" dist/desktop/
+
+      - name: Run Rust-to-Go native workspace integration
+        run: |
+          set -euo pipefail
+          mkdir -p dist/rpc-test
+          cp -R examples/hello-workspace dist/rpc-test/project
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            root=$(pwd -W)
+          else
+            root=$PWD
+          fi
+          export TRESTLE_CORE="$root/dist/desktop/trestle$TRESTLE_EXE_SUFFIX"
+          export TRESTLE_TEST_WORKSPACE="$root/dist/rpc-test/project"
+          export TRESTLE_DESKTOP_STATE_DIR="$root/dist/rpc-test/state"
+          cargo "+$RUST_TOOLCHAIN" test --locked --no-default-features \
+            --manifest-path desktop/Cargo.toml --test core native_workspace_round_trip -- --ignored
+
+      - name: Drive the Linux native window
+        if: runner.os == 'Linux'
+        run: |
+          xvfb-run -a -s "-screen 0 1500x1000x24 -nolisten tcp" \
+            python3 scripts/desktop/smoke.py --desktop dist/desktop/trestle-desktop \
+            --core dist/desktop/trestle --compiler "$TRESTLE_TEST_COMPILER"
+
+      - name: Drive the Windows native window
+        if: runner.os == 'Windows' && github.event_name == 'workflow_dispatch' && inputs.windows_gui
+        run: |
+          python scripts/desktop/smoke.py --desktop dist/desktop/trestle-desktop.exe \
+            --core dist/desktop/trestle.exe --compiler "$TRESTLE_TEST_COMPILER"
+
+      - name: Archive the paired desktop and Core binaries
+        run: tar -czf dist/trestle-desktop.tar.gz -C dist/desktop .
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: trestle-desktop-${{ matrix.os }}
+          path: dist/trestle-desktop.tar.gz
+          if-no-files-found: error

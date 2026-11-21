@@ -256,6 +256,11 @@ pub fn core_path() -> PathBuf {
 }
 
 pub fn desktop_state_dir() -> Option<PathBuf> {
+    if let Some(path) = std::env::var_os("TRESTLE_DESKTOP_STATE_DIR").map(PathBuf::from)
+        && path.is_absolute()
+    {
+        return Some(path);
+    }
     let root = if cfg!(windows) {
         std::env::var_os("LOCALAPPDATA").map(PathBuf::from)
     } else if cfg!(target_os = "macos") {

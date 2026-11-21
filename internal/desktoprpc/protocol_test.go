@@ -145,8 +145,20 @@ func TestNegotiationAndMalformedInput(t *testing.T) {
 func openExample(t *testing.T, peer *testPeer) (string, app.ProjectSnapshot) {
 	t.Helper()
 	dir := t.TempDir()
-	if err := os.CopyFS(dir, os.DirFS("../../examples/hello-workspace")); err != nil {
-		t.Fatal(err)
+	for _, name := range []string{"trestle.toml", "cli/trestle.toml", "cli/src/main.cpp",
+		"core/trestle.toml", "core/src/greeter.cpp", "core/include/greeter/greeter.h", "core/tests/greeter_test.cpp"} {
+		source := filepath.Join("../../examples/hello-workspace", filepath.FromSlash(name))
+		data, err := os.ReadFile(source)
+		if err != nil {
+			t.Fatal(err)
+		}
+		destination := filepath.Join(dir, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(destination), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(destination, data, 0600); err != nil {
+			t.Fatal(err)
+		}
 	}
 	ws := rpcResult[app.ProjectSnapshot](t, peer.call(t, "workspace.open", map[string]string{"path": dir}))
 	if ws.ID == "" || len(ws.Projects) != 2 || len(ws.Targets) != 3 {
@@ -177,7 +189,14 @@ func requireNativeBuild(t *testing.T) {
 	if os.Getenv("TRESTLE_TEST_NATIVE") != "1" {
 		t.Skip("set TRESTLE_TEST_NATIVE=1 to run the desktop native integration")
 	}
-	for _, tool := range []string{"g++", "ninja"} {
+	compiler := os.Getenv("TRESTLE_TEST_COMPILER")
+	if compiler == "" {
+		compiler = "g++"
+		if runtime.GOOS == "windows" {
+			compiler = "clang-cl"
+		}
+	}
+	for _, tool := range []string{compiler, "ninja"} {
 		if _, err := exec.LookPath(tool); err != nil {
 			t.Fatal(err)
 		}
@@ -185,13 +204,14 @@ func requireNativeBuild(t *testing.T) {
 }
 
 func TestBuildLifecycleAndReplay(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("this integration fixture uses the Linux GCC toolchain")
-	}
 	requireNativeBuild(t)
 	peer := connectPeer(t)
 	peer.handshake(t)
 	dir, ws := openExample(t, peer)
+	if compiler := os.Getenv("TRESTLE_TEST_COMPILER"); compiler != "" {
+		rpcResult[app.ProjectSnapshot](t, peer.call(t, "toolchain.select",
+			map[string]string{"workspace_id": ws.ID, "compiler": compiler}))
+	}
 	options := map[string]any{"workspace_id": ws.ID, "member": "cli", "targets": []string{"hello"}, "profile": "debug"}
 	configured := rpcResult[buildState](t, peer.call(t, "build.configure", options))
 	if result := waitForBuild(t, peer, configured.ID); result.Status != "completed" {
@@ -247,6 +267,9 @@ func TestBuildLifecycleAndReplay(t *testing.T) {
 		}
 	}
 	exe := filepath.Join(dir, "build", "debug", "cli", "bin", "hello-workspace")
+	if runtime.GOOS == "windows" {
+		exe += ".exe"
+	}
 	output, err := exec.Command(exe).CombinedOutput()
 	if err != nil || strings.TrimSpace(string(output)) != "Hello, workspace!" {
 		t.Fatalf("unexpected binary result: %s: %v", output, err)
@@ -303,5 +326,50 @@ func TestCancellationStopsRunningNinja(t *testing.T) {
 	_ = rpcResult[buildState](t, peer.call(t, "build.cancel", map[string]string{"build_id": build.ID}))
 	if result := waitForBuild(t, peer, build.ID); result.Status != "cancelled" {
 		t.Fatalf("unexpected cancellation result: %+v", result)
+	}
+}
+
+func TestWorkspaceRefreshAfterConfigDisappears(t *testing.T) {
+	peer := connectPeer(t)
+	peer.handshake(t)
+	_, ws := openExample(t, peer)
+	if err := os.Remove(ws.ID); err != nil {
+		t.Fatal(err)
+	}
+	frame := peer.call(t, "workspace.get", map[string]string{"workspace_id": ws.ID})
+	if frame.Error == nil || frame.Error.Message == "" {
+		t.Fatalf("refresh did not report the missing configuration: %+v", frame)
+	}
+	if frame := peer.call(t, "system.capabilities", map[string]any{}); frame.Error != nil {
+		t.Fatalf("connection stopped serving after a filesystem error: %+v", frame)
+	}
+}
+
+func TestMissingNinjaReportsFailureWithoutDisconnecting(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("uses Linux compiler symlinks in a private PATH")
+	}
+	requireNativeBuild(t)
+	dir := t.TempDir()
+	for _, name := range []string{"g++", "gcc", "ar", "as", "ld"} {
+		actual, err := exec.LookPath(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(actual, filepath.Join(dir, name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("PATH", dir)
+	peer := connectPeer(t)
+	peer.handshake(t)
+	_, ws := openExample(t, peer)
+	build := rpcResult[buildState](t, peer.call(t, "build.start", map[string]string{"workspace_id": ws.ID}))
+	result := waitForBuild(t, peer, build.ID)
+	if result.Status != "failed" || result.Error == nil || !strings.Contains(result.Error.Message, "Ninja executable is unavailable") {
+		t.Fatalf("missing Ninja was not reported: %+v", result)
+	}
+	if frame := peer.call(t, "system.capabilities", map[string]any{}); frame.Error != nil {
+		t.Fatalf("connection stopped serving after a failed build: %+v", frame)
 	}
 }

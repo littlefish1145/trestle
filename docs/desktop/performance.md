@@ -53,3 +53,22 @@ Measure frame latency and RSS while scrolling representative multi-megabyte
 logs, panning a 10,000-node native graph, and rapidly switching real
 workspaces. Compare several fresh and warm runs. Repeat on Windows with
 its native GPU backend before setting a platform performance budget.
+
+## Larger native Workspace load
+
+The Linux debug application was also launched against generated standalone
+Trestle configurations containing real C++ targets. Each project uses a
+shared source file and independent groups of 99 provider targets per
+consumer. The observation ends after the window accepts the Core snapshot
+and writes the recent-workspace entry.
+
+| Targets | Process start to accepted snapshot | Desktop RSS on acceptance |
+| ---: | ---: | ---: |
+| 100 | 649 ms | 98,672 KiB |
+| 1,000 | 588 ms | 101,948 KiB |
+| 10,000 | 1,996 ms | 132,916 KiB |
+
+These are separate single-run samples. They include framework startup,
+Go resolution, transfer, Rust decoding and graph layout. Xvfb capture
+did not reliably expose the large graph's rendered frames, so the samples
+do not establish scrolling or panning frame latency.

@@ -7,7 +7,7 @@ use std::{
 };
 use trestle_desktop::{
     protocol::{Client, Message},
-    state::{Build, LogPage, Workspace},
+    state::{Analysis, Build, GeneratedPage, LogPage, Workspace},
 };
 
 struct Peer {
@@ -72,6 +72,12 @@ fn native_workspace_round_trip() {
             .any(|target| target.id == "hello" && target.dependencies == ["greeter"])
     );
     eprintln!("Workspace open and target transfer: {:?}", at.elapsed());
+    if let Ok(compiler) = std::env::var("TRESTLE_TEST_COMPILER") {
+        peer.request(
+            "toolchain.select",
+            json!({"workspace_id":workspace.id,"compiler":compiler}),
+        );
+    }
     let start: Build = serde_json::from_value(peer.request(
         "build.start",
         json!({
@@ -98,13 +104,23 @@ fn native_workspace_round_trip() {
     .unwrap();
     assert!(page.text.contains("link hello"), "{}", page.text);
     assert!(peer.events[&build.build_id] > 0);
-    let analysis = peer.request("analysis.summary", json!({"build_id":build.build_id}));
+    let analysis_value = peer.request("analysis.summary", json!({"build_id":build.build_id}));
+    assert_eq!(analysis_value["cache"], Value::Null);
+    let analysis: Analysis = serde_json::from_value(analysis_value).unwrap();
+    assert!(!analysis.timings.is_empty());
     assert!(
-        analysis["timings"]
-            .as_array()
-            .is_some_and(|timings| !timings.is_empty())
+        analysis
+            .ninja_invocations
+            .iter()
+            .all(|item| item.critical_path.is_some())
     );
-    assert_eq!(analysis["cache"], Value::Null);
+    assert_eq!(analysis.ninja_invocations.len(), 2);
+    let commands: GeneratedPage = serde_json::from_value(peer.request(
+        "build.commands",
+        json!({"build_id":build.build_id,"target":"hello"}),
+    ))
+    .unwrap();
+    assert!(commands.available && commands.commands.len() >= 2);
     peer.client.shutdown().unwrap();
     let mut reopened = Peer {
         client: Client::start(&core).unwrap(),
