@@ -3,6 +3,7 @@ package plan
 import (
 	"fmt"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"trestle/internal/config"
@@ -392,6 +393,14 @@ func (s *buildState) linkOrArchive(target model.ResolvedTarget, linkInputs []str
 		}
 	default:
 		return Action{}, fmt.Errorf("unsupported target type %q", target.Type)
+	}
+	tc := s.options.Toolchain
+	// The system ar on macOS uses a different interface for file lists.
+	if tc.Runner == "" && (target.Type != model.StaticLibrary || runtime.GOOS != "darwin" || strings.Contains(filepath.Base(action.Command.Exe), "llvm-ar")) {
+		action.Command.Response = ResponseGNU
+		if tc.Kind == toolchain.MSVC {
+			action.Command.Response = ResponseMSVC
+		}
 	}
 	return action, nil
 }

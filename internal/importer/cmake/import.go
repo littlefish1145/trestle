@@ -52,10 +52,15 @@ type codeModel struct {
 		Projects []struct {
 			Name string `json:"name"`
 		} `json:"projects"`
+		Directories []struct {
+			Source string `json:"source"`
+			Build  string `json:"build"`
+		} `json:"directories"`
 		Targets []struct {
-			Name     string `json:"name"`
-			ID       string `json:"id"`
-			JSONFile string `json:"jsonFile"`
+			Name      string `json:"name"`
+			ID        string `json:"id"`
+			JSONFile  string `json:"jsonFile"`
+			Directory int    `json:"directoryIndex"`
 		} `json:"targets"`
 	} `json:"configurations"`
 }
@@ -334,16 +339,8 @@ func mergedEnvironment(overrides map[string]string) []string {
 // ParseReply converts a CMake File API reply directory into a Trestle config.
 // It is separate from Import so fixtures can verify the mapping without CMake.
 func ParseReply(replyDir, sourceRoot string) (Result, config.Config, error) {
-	index, err := readReplyIndex(replyDir)
+	model, err := loadCodeModel(replyDir)
 	if err != nil {
-		return Result{}, config.Config{}, err
-	}
-	codemodelFile, err := codemodelObjectFile(index)
-	if err != nil {
-		return Result{}, config.Config{}, err
-	}
-	var model codeModel
-	if err := readJSON(filepath.Join(replyDir, codemodelFile), &model); err != nil {
 		return Result{}, config.Config{}, err
 	}
 	if len(model.Configurations) == 0 {
@@ -374,6 +371,20 @@ func ParseReply(replyDir, sourceRoot string) (Result, config.Config, error) {
 		return Result{}, config.Config{}, fmt.Errorf("CMake project has no executable or library targets with compilable sources")
 	}
 	return result, cfg, nil
+}
+
+func loadCodeModel(replyDir string) (codeModel, error) {
+	index, err := readReplyIndex(replyDir)
+	if err != nil {
+		return codeModel{}, err
+	}
+	name, err := codemodelObjectFile(index)
+	if err != nil {
+		return codeModel{}, err
+	}
+	var model codeModel
+	err = readJSON(filepath.Join(replyDir, name), &model)
+	return model, err
 }
 
 // readReplyIndex finds the newest CMake File API reply index and decodes it.

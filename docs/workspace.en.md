@@ -4,6 +4,32 @@ A Trestle workspace lets one root `trestle.toml` reference several member projec
 
 This guide uses the runnable [examples/hello-workspace](../examples/hello-workspace/): `core` provides a static library and `cli` links it into an executable.
 
+## Discovery and build plans
+
+```sh
+trestle workspace init -C path/to/repo
+trestle workspace plan -C path/to/repo -profile release
+trestle build -C path/to/repo -p core
+```
+
+For a root without an existing workspace, `workspace init` can discover member manifests and write `[workspace] discover = true`. Discovery skips hidden directories, `node_modules`, the configured build directory, and directory symlinks. Each branch stops at its first member manifest. An existing workspace can also enable `discover = true` in its root manifest. Explicit members precede discovered members.
+
+`workspace plan` and `build` write the members, targets, and dependency edges to `<build_dir>/<profile>/workspace.json`. Trestle members appear in dependency order. An unqualified build target selects its owning member automatically.
+
+## CMake workspaces
+
+`workspace init -cmake` creates a `[workspace.cmake]` configuration. CMake generates the Ninja graph and Trestle uses the CMake File API to produce the workspace plan. The upstream graph handles generated sources, custom commands, object libraries, and bootstrap targets. CMake build directories name their workspace members. Use `-p lib/IR` to build a directory's default target or `lib/IR:LLVMCore` to select one target. A plain `build` uses the CMake project's defaults.
+
+From an LLVM monorepo checkout, this example enables the X86 backend and leaves Clang and the other optional projects disabled. Use GCC or run in a Visual Studio Developer Command Prompt for MSVC.
+
+```sh
+trestle workspace init -C llvm-project -source llvm -profile release -jobs 8 -D LLVM_ENABLE_PROJECTS= -D LLVM_ENABLE_RUNTIMES= -D LLVM_TARGETS_TO_BUILD=X86 -D LLVM_PARALLEL_LINK_JOBS=1
+trestle build -C llvm-project llvm-tblgen
+trestle build -C llvm-project
+```
+
+Repeat `-D NAME[:TYPE]=VALUE` to persist cache entries in `[workspace.cmake.cache]`. Different source directories or cache arguments get separate build trees. On Windows, use a short build directory such as `workspace init -build-dir D:/build/llvm` to stay within toolchain path limits. Trestle publishes CMake's compilation database to `build.compile_commands`. Use `trestle test` or `trestle test -job NAME` for CTest, or `trestle build check-llvm` for LLVM's own regression tests. [LLVM CMake guide](https://www.llvm.org/docs/CMake.html)
+
 ## 1. Layout
 
 ```text
@@ -107,7 +133,8 @@ Cross-member dependencies use `member:target`. A `public` scope passes `greeter`
 | --- | --- |
 | `[toolchain]`, `[vcpkg]`, `[conan]` | Inherited from the root when the member omits them; member values win |
 | `[compiler_presets.*]` | Union of root and member presets, member definitions win on conflicts |
-| `[build]` profile, standards, flags | Per member |
+| `build.profile` | Inherited from the root unless overridden by a member |
+| `[build]` language standards and flags | Per member |
 | `build_dir`, `compile_commands` | Root; member outputs go to `build/<profile>/<member>/` |
 | `[packages.*]` | Root packages are visible to members; member declarations win |
 | `[workspace.dependencies]` | Shared dependencies, named by `port`, added to every member |

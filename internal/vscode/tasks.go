@@ -200,9 +200,8 @@ func FromWorkspace(root string, wc *config.WorkspaceContext) Project {
 		}
 	}
 	sort.Slice(project.Targets, func(i, j int) bool { return project.Targets[i].Name < project.Targets[j].Name })
-	project.DefaultTarget = project.Targets[0].Name
-	if len(project.Targets) == 0 {
-		project.DefaultTarget = ""
+	if len(project.Targets) > 0 {
+		project.DefaultTarget = project.Targets[0].Name
 	}
 	return project
 }

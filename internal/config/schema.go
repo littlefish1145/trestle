@@ -44,11 +44,20 @@ type Project struct {
 // trestle.toml. Building the workspace root builds every member (or the
 // members named on the command line).
 type Workspace struct {
-	Members []string `toml:"members"`
+	Members  []string        `toml:"members,omitempty"`
+	Discover bool            `toml:"discover,omitempty"`
+	CMake    *CMakeWorkspace `toml:"cmake,omitempty"`
 	// Dependencies declares packages shared by every member. Each entry is
 	// named by its port and merged into every member's package set unless the
 	// member declares a package with the same name.
 	Dependencies []Package `toml:"dependencies,omitempty"`
+}
+
+// CMakeWorkspace keeps CMake in charge of generating and building its targets.
+type CMakeWorkspace struct {
+	Source string            `toml:"source"`
+	Cache  map[string]string `toml:"cache,omitempty"`
+	Jobs   int               `toml:"jobs,omitempty"`
 }
 
 // Build holds settings that apply to every target unless a rule or a target

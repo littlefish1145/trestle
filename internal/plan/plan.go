@@ -12,12 +12,21 @@ type ID string
 // Command is a single process invocation: the executable, its arguments, an
 // optional environment overlay, and the working directory.
 type Command struct {
-	Exe    string
-	Args   []string
-	Env    map[string]string
-	Dir    string
-	Prefix []string
+	Exe      string
+	Args     []string
+	Env      map[string]string
+	Dir      string
+	Response ResponseSyntax
+	Prefix   []string
 }
+
+// ResponseSyntax is the argument quoting accepted by a tool's @file reader.
+type ResponseSyntax string
+
+const (
+	ResponseGNU  ResponseSyntax = "gnu"
+	ResponseMSVC ResponseSyntax = "msvc"
+)
 
 // DepfileSpec points at the compiler-written dependency file Ninja reads back
 // after the command runs.

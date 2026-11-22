@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"sort"
 	"strings"
 
@@ -66,37 +65,47 @@ func ParseWorkspace(rootPath string) (*WorkspaceContext, error) {
 	if err != nil {
 		return nil, err
 	}
+	return ResolveWorkspaceMembers(rootPath, root)
+}
+
+// ResolveWorkspaceMembers loads members for a decoded or proposed root configuration.
+func ResolveWorkspaceMembers(rootPath string, root Config) (*WorkspaceContext, error) {
 	if root.Workspace == nil {
 		return nil, nil
 	}
-	if len(root.Workspace.Members) == 0 {
-		return nil, fmt.Errorf("E_WORKSPACE_INVALID: %s: [workspace] must declare at least one member", rootPath)
-	}
-	rootDir, _ := filepath.Abs(filepath.Dir(rootPath))
 	context := &WorkspaceContext{
 		RootConfig: root,
 		Members:    map[string]*Config{},
 	}
-	seen := map[string]bool{}
-	for _, member := range root.Workspace.Members {
+	if root.Workspace.CMake != nil {
+		return context, nil
+	}
+	rootDir, err := filepath.Abs(filepath.Dir(rootPath))
+	if err != nil {
+		return nil, err
+	}
+	members, err := workspaceMemberPaths(rootDir, root)
+	if err != nil {
+		return nil, err
+	}
+	if len(members) == 0 {
+		return nil, fmt.Errorf("E_WORKSPACE_INVALID: %s: [workspace] must declare at least one member or discover a trestle.toml", rootPath)
+	}
+	rootTree, err := workspaceRootTree(root)
+	if err != nil {
+		return nil, err
+	}
+	for _, member := range members {
 		name, dir, err := MemberDir(rootDir, member)
 		if err != nil {
 			return nil, err
 		}
-		canonical, err := fsx.Canonical(dir)
+		merged, err := mergeMemberConfig(root, rootTree, filepath.Join(dir, DefaultFileName))
 		if err != nil {
 			return nil, err
 		}
-		if runtime.GOOS == "windows" {
-			canonical = strings.ToLower(canonical)
-		}
-		if seen[canonical] {
-			return nil, fmt.Errorf("E_WORKSPACE_INVALID: member %q is listed twice in [workspace] of %s", name, rootPath)
-		}
-		seen[canonical] = true
-		merged, err := MergeMemberConfig(root, filepath.Join(rootDir, DefaultFileName), filepath.Join(dir, DefaultFileName))
-		if err != nil {
-			return nil, err
+		if merged.Workspace != nil {
+			return nil, fmt.Errorf("E_WORKSPACE_INVALID: member %q declares a nested workspace", name)
 		}
 		context.Members[name] = &merged
 		context.MemberOrder = append(context.MemberOrder, name)
@@ -143,7 +152,8 @@ func MemberDir(rootDir, member string) (string, string, error) {
 //
 //   - toolchain, vcpkg, conan: inherited key by key.
 //   - compiler_presets: union, member winning on name conflicts.
-//   - build (profile, flags, standards and friends): the member's values only.
+//   - build flags and standards: the member's values only.
+//   - build profile: inherited unless the member declares its own.
 //   - build_dir and compile_commands: inherited from the root, because a
 //     workspace builds into one shared build tree and one aggregate
 //     compile_commands.json (members are given a per-member subdirectory later
@@ -156,6 +166,10 @@ func MergeMemberConfig(root Config, rootPath, memberPath string) (Config, error)
 	if err != nil {
 		return Config{}, err
 	}
+	return mergeMemberConfig(root, rootTree, memberPath)
+}
+
+func mergeMemberConfig(root Config, rootTree map[string]any, memberPath string) (Config, error) {
 	memberData, err := os.ReadFile(memberPath)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -202,6 +216,10 @@ func MergeMemberConfig(root Config, rootPath, memberPath string) (Config, error)
 	// member a per-member subdirectory inside it.
 	merged.Build.BuildDir = root.Build.BuildDir
 	merged.Build.CompileCommands = root.Build.CompileCommands
+	build, _ := memberTree["build"].(map[string]any)
+	if _, explicit := build["profile"]; !explicit {
+		merged.Build.Profile = root.Build.Profile
+	}
 	return merged, nil
 }
 

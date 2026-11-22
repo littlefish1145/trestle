@@ -73,6 +73,21 @@ func Capture(ctx context.Context, command *exec.Cmd) ([]byte, error) {
 	return buffer.Bytes(), err
 }
 
+// Stream forwards output without retaining the complete command log in memory.
+func Stream(ctx context.Context, command *exec.Cmd, notify func(string)) error {
+	sink := Output(ctx)
+	if sink == nil {
+		sink = io.Discard
+	}
+	writer := &captureWriter{sink: sink, notify: Notify(ctx, notify)}
+	command.Stdout, command.Stderr = writer, writer
+	err := command.Run()
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	return err
+}
+
 type captureWriter struct {
 	sink   io.Writer
 	notify func(string)

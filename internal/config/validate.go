@@ -24,6 +24,17 @@ func Validate(cfg Config) error {
 	if err := validateBuild(cfg); err != nil {
 		return err
 	}
+	if ws := cfg.Workspace; ws != nil && ws.CMake != nil {
+		if ws.Discover || len(ws.Members)+len(ws.Dependencies)+len(cfg.Targets) > 0 {
+			return fmt.Errorf("E_WORKSPACE_INVALID: [workspace.cmake] requires a CMake-only workspace")
+		}
+		if strings.TrimSpace(ws.CMake.Source) == "" || ws.CMake.Jobs < 0 {
+			return fmt.Errorf("E_WORKSPACE_INVALID: [workspace.cmake] requires source and nonnegative jobs")
+		}
+		if cfg.Toolchain.Mode == "wsl" {
+			return fmt.Errorf("E_WORKSPACE_INVALID: run trestle inside WSL to use its CMake and Ninja")
+		}
+	}
 	if err := validateCompilerPresets(cfg); err != nil {
 		return err
 	}

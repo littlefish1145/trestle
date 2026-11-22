@@ -14,6 +14,7 @@ import (
 	"trestle/internal/config"
 	"trestle/internal/fsx"
 	"trestle/internal/graph"
+	cmake "trestle/internal/importer/cmake"
 	"trestle/internal/model"
 	"trestle/internal/plan"
 	"trestle/internal/policy"
@@ -94,17 +95,18 @@ func BuildWorkspace(ctx context.Context, path string, options WorkspaceBuildOpti
 	if wc == nil {
 		return fmt.Errorf("%s does not declare a [workspace] section", path)
 	}
-	_, err = graph.OrderWorkspaceMembers(wc)
-	if err != nil {
-		return err
+	if wc.RootConfig.Workspace.CMake != nil {
+		if buildanalyzer.Active(ctx) {
+			return fmt.Errorf("Build Analyzer requires a Trestle-generated Ninja workspace")
+		}
+		return buildCMakeWorkspace(ctx, path, wc, options, progress)
 	}
 	if options.Member != "" {
 		if !workspaceHasMember(wc, options.Member) {
 			return fmt.Errorf("E_WORKSPACE_INVALID: unknown member %q; members: %s", options.Member, strings.Join(wc.MemberNames(), ", "))
 		}
 	}
-	// "member:target" arguments select their own member; plain targets apply to
-	// the -p selection (or every member when nothing is selected).
+	// "member:target" arguments select their own member.
 	prefixedMember, targets, err := SplitWorkspaceTargets(options.Targets)
 	if err != nil {
 		return err
@@ -118,7 +120,6 @@ func BuildWorkspace(ctx context.Context, path string, options WorkspaceBuildOpti
 			return fmt.Errorf("E_WORKSPACE_INVALID: unknown member %q; members: %s", prefixedMember, strings.Join(wc.MemberNames(), ", "))
 		}
 		options.Member = prefixedMember
-		options.Targets = targets
 	}
 	if options.Profile != "" {
 		wc.RootConfig.Build.Profile = options.Profile
@@ -132,6 +133,9 @@ func BuildWorkspace(ctx context.Context, path string, options WorkspaceBuildOpti
 			return err
 		}
 		wc.RootConfig.Build.BuildDir = dir
+	}
+	if err := withWorkspacePlan(ctx, path, wc, options.Profile, progress, nil); err != nil {
+		return err
 	}
 	buildRoot, err := filepath.Abs(wc.RootConfig.Build.BuildDir)
 	if err != nil {
@@ -147,8 +151,32 @@ func BuildWorkspace(ctx context.Context, path string, options WorkspaceBuildOpti
 		}
 		return func(line string) { progress("[" + member + "] " + line) }
 	}
-	selected := workspaceBuildMembers(workspace, options.Member)
-	for _, name := range selected {
+	requested := make(map[string][]string)
+	needed := make(map[string]bool)
+	providers := make(map[string]bool)
+	if options.Member == "" && len(options.Targets) > 0 && !options.All {
+		for _, target := range options.Targets {
+			member, exists := workspace.MemberOf[model.TargetID(target)]
+			if !exists {
+				return fmt.Errorf("unknown workspace target %q", target)
+			}
+			requested[member] = append(requested[member], target)
+		}
+		for member := range requested {
+			for _, provider := range workspaceBuildMembers(workspace, member) {
+				needed[provider] = true
+				providers[provider] = providers[provider] || provider != member
+			}
+		}
+	} else {
+		for _, member := range workspaceBuildMembers(workspace, options.Member) {
+			needed[member] = true
+		}
+	}
+	for _, name := range workspace.Order {
+		if !needed[name] {
+			continue
+		}
 		memberPath := workspaceMemberPath(wc, name)
 		memberCtx, err := workspaceMemberContext(ctx, wc, name, options.Profile, workspace)
 		if err != nil {
@@ -157,6 +185,10 @@ func BuildWorkspace(ctx context.Context, path string, options WorkspaceBuildOpti
 		targets, all := options.Targets, options.All
 		if options.Member != "" && name != options.Member {
 			targets, all = nil, true
+		}
+		if len(requested) > 0 {
+			targets = requested[name]
+			all = providers[name]
 		}
 		if err := BuildTargetsWithOptions(memberCtx, memberPath, targets, all, options.Force, prefix(name)); err != nil {
 			return err
@@ -177,6 +209,9 @@ func RunWorkspaceTests(ctx context.Context, path string, member string, selectio
 	}
 	if wc == nil {
 		return fmt.Errorf("%s does not declare a [workspace] section", path)
+	}
+	if wc.RootConfig.Workspace.CMake != nil {
+		return testCMakeWorkspace(ctx, path, wc, member, selection, progress)
 	}
 	order, err := graph.OrderWorkspaceMembers(wc)
 	if err != nil {
@@ -255,6 +290,17 @@ func DoctorWorkspace(ctx context.Context, path, member string, progress func(str
 	if wc == nil {
 		return fmt.Errorf("%s does not declare a [workspace] section", path)
 	}
+	if wc.RootConfig.Workspace.CMake != nil {
+		return runOperation(ctx, path, "doctor cmake workspace", progress, func(ctx context.Context, emit func(string)) error {
+			if err := cmake.CheckWorkspaceTools(); err != nil {
+				return err
+			}
+			return withWorkspacePlan(ctx, path, wc, "", emit, func(_ context.Context, plan model.WorkspacePlan, _ []string) error {
+				_, err := cmakeWorkspaceGoals(plan, WorkspaceBuildOptions{Member: member})
+				return err
+			})
+		})
+	}
 	order, err := graph.OrderWorkspaceMembers(wc)
 	if err != nil {
 		return err
@@ -317,6 +363,9 @@ func ReleaseWorkspace(ctx context.Context, path string, progress func(string)) e
 	}
 	if wc == nil {
 		return fmt.Errorf("%s does not declare a [workspace] section", path)
+	}
+	if wc.RootConfig.Workspace.CMake != nil {
+		return fmt.Errorf("CMake workspace releases use the project's CMake install or package targets via trestle build")
 	}
 	order, err := graph.OrderWorkspaceMembers(wc)
 	if err != nil {
@@ -419,7 +468,11 @@ func publishWorkspaceCompileCommands(ctx context.Context, wc *config.WorkspaceCo
 	}
 	dirs := make([]string, 0, len(wc.MemberOrder)+1)
 	for _, name := range wc.MemberOrder {
-		dirs = append(dirs, filepath.Join(buildRoot, profile, name))
+		memberProfile := wc.Members[name].Build.Profile
+		if memberProfile == "" {
+			memberProfile = profile
+		}
+		dirs = append(dirs, filepath.Join(buildRoot, memberProfile, name))
 	}
 	if len(wc.RootConfig.Targets) > 0 {
 		dirs = append(dirs, filepath.Join(buildRoot, profile))

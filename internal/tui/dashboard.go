@@ -153,6 +153,7 @@ const (
 )
 
 type probeMessage struct {
+	MemberOrder  []string
 	Fingerprint  string
 	Config       config.Config
 	BaseConfig   config.Config
@@ -1294,12 +1295,15 @@ func (model dashboardModel) workspaceMembers() []string {
 	if model.config.Workspace == nil {
 		return nil
 	}
+	if model.probe.MemberOrder != nil {
+		return model.probe.MemberOrder
+	}
 	return model.config.Workspace.Members
 }
 
 // isWorkspace reports whether the opened project is a workspace root.
 func (model dashboardModel) isWorkspace() bool {
-	return len(model.workspaceMembers()) > 0
+	return model.config.Workspace != nil
 }
 
 func (model dashboardModel) header(p palette, width int) string {

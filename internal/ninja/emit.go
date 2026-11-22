@@ -75,7 +75,15 @@ func PoolDepths(buildPlan plan.BuildPlan) map[string]int {
 
 func writeRule(output *bytes.Buffer, action plan.Action) {
 	fmt.Fprintf(output, "rule %s\n", EscapePath(string(action.Rule)))
-	fmt.Fprintf(output, "  command = %s\n", command(action))
+	if useArgumentFile(action.Command) {
+		rsp := action.Outputs[0] + ".rsp"
+		parts := commandPrefix(action.Command)
+		fmt.Fprintf(output, "  command = %s\n", join(append(parts, shellQuote("@"+rsp)), " "))
+		fmt.Fprintf(output, "  rspfile = %s\n", EscapePath(rsp))
+		fmt.Fprintf(output, "  rspfile_content = %s\n", responseContent(action.Command))
+	} else {
+		fmt.Fprintf(output, "  command = %s\n", command(action))
+	}
 	if action.Depfile != nil {
 		fmt.Fprintf(output, "  depfile = %s\n", EscapePath(action.Depfile.Path))
 	}

@@ -40,7 +40,11 @@ func (model dashboardModel) probeCommand() tea.Cmd {
 		message.Fingerprint = config.Fingerprint(data)
 		message.Config, message.BaseConfig, message.ProjectName = cfg, cfg, cfg.Project.Name
 		if cfg.Workspace != nil {
-			if workspace, workspaceErr := config.ParseWorkspace(model.path); workspaceErr == nil && workspace != nil {
+			workspace, workspaceErr := config.ResolveWorkspaceMembers(model.path, cfg)
+			if workspaceErr != nil {
+				message.Error = workspaceErr
+			} else if workspace != nil {
+				message.MemberOrder = workspace.MemberNames()
 				message.MemberConfigs = make(map[string]config.Config, len(workspace.MemberOrder))
 				for _, name := range workspace.MemberOrder {
 					if member := workspace.Member(name); member != nil {

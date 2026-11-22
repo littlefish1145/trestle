@@ -4,6 +4,32 @@ Trestle 的 workspace 让一个根 `trestle.toml` 引用多个成员项目，共
 
 本指南配合可运行示例 [examples/hello-workspace](../examples/hello-workspace/)：`core` 提供静态库，`cli` 链接它并生成可执行文件。
 
+## 自动发现与编排
+
+```sh
+trestle workspace init -C path/to/repo
+trestle workspace plan -C path/to/repo -profile release
+trestle build -C path/to/repo -p core
+```
+
+根目录尚未声明 Workspace 时，`workspace init` 可以发现已有成员并写入 `[workspace] discover = true`。发现从根向下递归，跳过隐藏目录、`node_modules`、配置的构建目录和目录符号链接，遇到成员 `trestle.toml` 后停止深入该分支。已有 Workspace 可在根配置加上 `discover = true`，显式成员排在发现的成员之前。
+
+`workspace plan` 和 `build` 生成 `<build_dir>/<profile>/workspace.json`，记录成员、目标和依赖。原生 Trestle 成员按依赖顺序列出。构建时，未加前缀的目标名会自动匹配所属成员。
+
+## 保留 CMake 构建图
+
+`workspace init -cmake` 创建 `[workspace.cmake]`。CMake 生成 Ninja 构建图，Trestle 从 File API 解析编排，并通过 CMake 执行增量构建。自定义命令、生成源码、对象库和引导目标由上游项目控制。计划中的成员名来自 CMake 构建目录。用 `-p lib/IR` 构建该目录的默认目标，用 `lib/IR:LLVMCore` 构建其中的指定目标。普通 `build` 使用 CMake 项目的默认目标。
+
+以下命令从 LLVM 单仓库根目录配置 LLVM，关闭包括 Clang 在内的额外项目，只启用 X86 后端。可以使用 GCC，或在 Windows 的 Visual Studio 开发者终端使用 MSVC。
+
+```sh
+trestle workspace init -C llvm-project -source llvm -profile release -jobs 8 -D LLVM_ENABLE_PROJECTS= -D LLVM_ENABLE_RUNTIMES= -D LLVM_TARGETS_TO_BUILD=X86 -D LLVM_PARALLEL_LINK_JOBS=1
+trestle build -C llvm-project llvm-tblgen
+trestle build -C llvm-project
+```
+
+`-D NAME[:TYPE]=VALUE` 可重复，写入 `[workspace.cmake.cache]`。源码目录或缓存参数变更时使用独立构建目录。Windows 下可用 `workspace init -build-dir D:/build/llvm` 缩短路径，避免达到工具链的路径长度限制。CMake 编译数据库发布到 `build.compile_commands`。用 `trestle test` 或 `trestle test -job NAME` 运行 CTest，用 `trestle build check-llvm` 运行 LLVM 的回归测试目标。 [LLVM CMake 指南](https://www.llvm.org/docs/CMake.html)
+
 ## 1. 目录布局
 
 ```text
@@ -107,7 +133,8 @@ dependencies = [{ target = "core:greeter", scope = "public" }]
 | --- | --- |
 | `[toolchain]`、`[vcpkg]`、`[conan]` | 成员缺省时继承根，成员声明优先 |
 | `[compiler_presets.*]` | 根与成员取并集，同名时成员优先 |
-| `[build]` 的 profile、标准、flags | 以成员为准 |
+| `build.profile` | 默认继承根配置，成员可覆盖 |
+| `[build]` 的语言标准和 flags | 以成员为准 |
 | `build_dir`、`compile_commands` | 以根为准，成员写入 `build/<profile>/<成员>/` |
 | `[packages.*]` | 根的包对成员可见，成员同名声明优先 |
 | `[workspace.dependencies]` | 共享依赖，按 `port` 命名后加入每个成员 |

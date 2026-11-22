@@ -1,6 +1,7 @@
 package graph
 
 import (
+	"container/heap"
 	"context"
 	"fmt"
 	"maps"
@@ -247,7 +248,7 @@ func linkMembers(configs map[string]config.Config, order []string, owners map[mo
 					return nil, err
 				}
 				rewriteDependency(&project, model.TargetID(targetName), provider, dependencyID)
-				addCrossMemberLink(&project, model.TargetID(targetName), dependencyID, resolved, configs, buildDir)
+				addCrossMemberLink(&project, model.TargetID(targetName), model.TargetID(dependencyID), owners, resolved, configs, buildDir)
 			}
 			if dependsOn {
 				resolved[name] = project
@@ -391,13 +392,12 @@ func rewriteDependency(project *model.ResolvedProject, consumer model.TargetID, 
 // concrete artifact paths are filled in during generation
 // (Options.WorkspaceOutputs) once the toolchain's artifact extension is known;
 // the provider's bin directories stay as the name-based fallback.
-func addCrossMemberLink(project *model.ResolvedProject, consumer model.TargetID, dependency string, resolved map[string]model.ResolvedProject, configs map[string]config.Config, buildDir string) {
-	owner := dependencyOwner(model.TargetID(dependency), resolved)
-	source, ok := resolved[owner]
+func addCrossMemberLink(project *model.ResolvedProject, consumer, dependency model.TargetID, owners map[model.TargetID]string, resolved map[string]model.ResolvedProject, configs map[string]config.Config, buildDir string) {
+	source, ok := resolved[owners[dependency]]
 	if !ok {
 		return
 	}
-	target, ok := source.ByID[model.TargetID(dependency)]
+	target, ok := source.ByID[dependency]
 	if !ok {
 		return
 	}
@@ -410,7 +410,7 @@ func addCrossMemberLink(project *model.ResolvedProject, consumer model.TargetID,
 		seen[current.ID] = true
 		if current.Type == model.StaticLibrary || current.Type == model.SharedLibrary {
 			addLinkItem(project, consumer, string(current.ID))
-			if owner := dependencyOwner(current.ID, resolved); owner != "" {
+			if owner := owners[current.ID]; owner != "" {
 				if cfg, ok := configs[owner]; ok {
 					addLibraryDir(project, consumer, filepath.Join(memberBuildDir(cfg, buildDir, owner), "bin"))
 				}
@@ -426,18 +426,6 @@ func addCrossMemberLink(project *model.ResolvedProject, consumer model.TargetID,
 		}
 	}
 	collect(target)
-}
-
-// dependencyOwner finds which member's resolved project declares id.
-func dependencyOwner(id model.TargetID, resolved map[string]model.ResolvedProject) string {
-	for name, project := range resolved {
-		for _, target := range project.Targets {
-			if target.ID == id {
-				return name
-			}
-		}
-	}
-	return ""
 }
 
 // addLinkItem appends one workspace link item to consumer's private usage.
@@ -497,44 +485,55 @@ func orderMembers(order []string, edges map[string]map[string]bool) ([]string, e
 	for position, name := range order {
 		index[name] = position
 	}
-	remaining := make(map[string]map[string]bool, len(order))
+	pending := make(map[string]int, len(order))
+	consumers := make(map[string][]string, len(order))
+	ready := &memberPositions{}
 	for _, name := range order {
-		deps := map[string]bool{}
 		for dependency := range edges[name] {
 			if dependency != name {
-				deps[dependency] = true
+				pending[name]++
+				consumers[dependency] = append(consumers[dependency], name)
 			}
 		}
-		remaining[name] = deps
+		if pending[name] == 0 {
+			heap.Push(ready, index[name])
+		}
 	}
 	result := make([]string, 0, len(order))
-	for len(result) < len(order) {
-		var ready []string
-		for _, name := range order {
-			if _, pending := remaining[name]; !pending {
-				continue
-			}
-			if len(remaining[name]) == 0 {
-				ready = append(ready, name)
-			}
-		}
-		if len(ready) == 0 {
-			cyclic := make([]string, 0, len(remaining))
-			for name := range remaining {
-				cyclic = append(cyclic, name)
-			}
-			sort.Strings(cyclic)
-			return nil, fmt.Errorf("E_WORKSPACE_CYCLE: members depend on each other: %s", strings.Join(cyclic, ", "))
-		}
-		sort.Slice(ready, func(i, j int) bool { return index[ready[i]] < index[ready[j]] })
-		next := ready[0]
+	for ready.Len() > 0 {
+		next := order[heap.Pop(ready).(int)]
 		result = append(result, next)
-		delete(remaining, next)
-		for name := range remaining {
-			delete(remaining[name], next)
+		for _, consumer := range consumers[next] {
+			pending[consumer]--
+			if pending[consumer] == 0 {
+				heap.Push(ready, index[consumer])
+			}
 		}
 	}
+	if len(result) < len(order) {
+		var cyclic []string
+		for name, count := range pending {
+			if count > 0 {
+				cyclic = append(cyclic, name)
+			}
+		}
+		sort.Strings(cyclic)
+		return nil, fmt.Errorf("E_WORKSPACE_CYCLE: members depend on each other: %s", strings.Join(cyclic, ", "))
+	}
 	return result, nil
+}
+
+type memberPositions []int
+
+func (p memberPositions) Len() int           { return len(p) }
+func (p memberPositions) Less(i, j int) bool { return p[i] < p[j] }
+func (p memberPositions) Swap(i, j int)      { p[i], p[j] = p[j], p[i] }
+func (p *memberPositions) Push(value any)    { *p = append(*p, value.(int)) }
+func (p *memberPositions) Pop() any {
+	last := len(*p) - 1
+	value := (*p)[last]
+	*p = (*p)[:last]
+	return value
 }
 
 func sortedKeys(values map[string]bool) []string {

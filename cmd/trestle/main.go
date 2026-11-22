@@ -86,6 +86,9 @@ func run(command string, args []string) (result error) {
 	if command == "build" {
 		args = normalizeBuildProfileFlag(args)
 	}
+	if command == "workspace" && len(args) > 0 && (args[0] == "init" || args[0] == "plan") {
+		flags.workspaceAction, args = args[0], args[1:]
+	}
 	set := flag.NewFlagSet(command, flag.ContinueOnError)
 	set.SetOutput(os.Stderr)
 	registerRunFlags(set, command, &flags)
@@ -159,6 +162,12 @@ type runFlags struct {
 	testGroup          string
 	testFile           string
 	releaseTargets     string
+	workspaceAction    string
+	workspaceSource    string
+	workspaceBuildDir  string
+	workspaceCache     map[string]string
+	workspaceJobs      int
+	workspaceCMake     bool
 	install            bool
 	refresh            bool
 	testAll            bool
@@ -246,6 +255,23 @@ func registerRunFlags(set *flag.FlagSet, command string, flags *runFlags) {
 	case "export-cmake":
 		set.StringVar(&flags.output, "output", "CMakeLists.txt", "output path relative to the project")
 		set.BoolVar(&flags.force, "force", false, "overwrite an existing CMakeLists.txt")
+	case "workspace":
+		set.BoolVar(&flags.workspaceCMake, "cmake", false, "use the original CMake build system")
+		set.StringVar(&flags.workspaceSource, "source", "", "CMake source directory relative to -C")
+		set.StringVar(&flags.workspaceBuildDir, "build-dir", "", "workspace build directory, relative to -C by default")
+		set.IntVar(&flags.workspaceJobs, "jobs", 0, "CMake build parallelism")
+		set.StringVar(&flags.buildProfile, "profile", "", "workspace plan profile")
+		set.Func("D", "CMake cache entry NAME[:TYPE]=VALUE (repeatable)", func(value string) error {
+			name, entry, ok := strings.Cut(value, "=")
+			if !ok || name == "" {
+				return fmt.Errorf("expected NAME[:TYPE]=VALUE")
+			}
+			if flags.workspaceCache == nil {
+				flags.workspaceCache = make(map[string]string)
+			}
+			flags.workspaceCache[name] = entry
+			return nil
+		})
 	case "editor-config":
 		set.BoolVar(&flags.force, "force", false, "overwrite an existing .vscode/tasks.json")
 		set.BoolVar(&flags.merge, "merge", false, "update generated tasks in an existing .vscode/tasks.json")
@@ -309,6 +335,28 @@ func executeCommand(ctx context.Context, command, path string, args []string, fl
 	case "export-cmake":
 		_, err := app.ExportCMake(ctx, path, flags.output, flags.force, progressPrinter)
 		return err
+	case "workspace":
+		action := flags.workspaceAction
+		if action == "" && len(args) == 1 {
+			action, args = args[0], nil
+		}
+		if len(args) > 0 {
+			return fmt.Errorf("usage: trestle workspace init|plan [options]")
+		}
+		switch action {
+		case "init":
+			return app.InitWorkspace(ctx, path, app.WorkspaceInitOptions{
+				CMake: flags.workspaceCMake, Source: flags.workspaceSource, Cache: flags.workspaceCache, Jobs: flags.workspaceJobs, Profile: flags.buildProfile,
+				BuildDir: flags.workspaceBuildDir,
+			}, progressPrinter)
+		case "", "plan":
+			if flags.workspaceCMake || flags.workspaceSource != "" || len(flags.workspaceCache) > 0 || flags.workspaceJobs != 0 || flags.workspaceBuildDir != "" {
+				return fmt.Errorf("-cmake, -source, -D, -jobs and -build-dir apply to workspace init")
+			}
+			return app.GenerateWorkspacePlan(ctx, path, flags.buildProfile, progressPrinter)
+		default:
+			return fmt.Errorf("unknown workspace action %q", action)
+		}
 	case "package":
 		return app.PackageWithProgress(ctx, path, flags.output, progressPrinter)
 	case "release":
@@ -684,6 +732,8 @@ func usage() {
 	fmt.Println("  trestle analyze why [-C dir] [--report path]")
 	fmt.Println("  trestle analyze html [-C dir] [--report path] [--output file]")
 	fmt.Println("  trestle build [-C dir] [-p member] [--all] [--force] [--preset name] [--jobs N] [--scheduler=ninja|history] [--profile=debug|release] [--profile-build | --profile | --profile-deep] [target ... | member:target ...]")
+	fmt.Println("  trestle workspace init [-C dir] [-profile name] [-build-dir dir] [-cmake] [-source dir] [-D NAME=VALUE] [-jobs N]")
+	fmt.Println("  trestle workspace plan [-C dir] [-profile name]")
 	fmt.Println("  trestle test [-C dir] [-p member] [-job name | -group name | -file source | -all]")
 	fmt.Println("  trestle import [-C dir]          import CMake through the File API")
 	fmt.Println("  trestle import-xmake [-C dir]    import Xmake targets (new and legacy Xmake)")

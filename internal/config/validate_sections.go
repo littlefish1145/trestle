@@ -30,7 +30,7 @@ func validateProject(cfg Config) error {
 	if strings.TrimSpace(cfg.Project.Name) == "" {
 		return fmt.Errorf("E_CONFIG_MISSING_REQUIRED: project.name is required")
 	}
-	if len(cfg.Targets) == 0 && (cfg.Workspace == nil || len(cfg.Workspace.Members) == 0) {
+	if len(cfg.Targets) == 0 && (cfg.Workspace == nil || len(cfg.Workspace.Members) == 0 && !cfg.Workspace.Discover && cfg.Workspace.CMake == nil) {
 		return fmt.Errorf("E_CONFIG_MISSING_REQUIRED: at least one target is required")
 	}
 	return nil
