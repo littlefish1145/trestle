@@ -19,6 +19,7 @@ import (
 	"sync"
 	"time"
 
+	"trestle/internal/buildanalyzer"
 	"trestle/internal/config"
 	"trestle/internal/deps"
 	"trestle/internal/deps/conan"
@@ -43,12 +44,15 @@ import (
 // profile, per-target output paths, extra runtime files, and the environment the
 // build needs.
 type BuildResult struct {
-	ConfigPath     string
-	Manifest       string
-	Profile        string
-	Outputs        map[model.TargetID]string
-	RuntimeOutputs map[model.TargetID][]string
-	Environment    map[string]string
+	ConfigPath      string
+	Manifest        string
+	Profile         string
+	Outputs         map[model.TargetID]string
+	RuntimeOutputs  map[model.TargetID][]string
+	Environment     map[string]string
+	analyzerPlan    *plan.BuildPlan
+	analyzerScope   string
+	compilerProfile []buildanalyzer.CompilerArtifact
 }
 
 // ConfigureOptions carries the settings resolved from the command-line flags and
@@ -1728,6 +1732,13 @@ func generateWithConfig(ctx context.Context, path string, cfg config.Config) (Bu
 	if err := translateWSLArguments(ctx, cfg.Toolchain.WSLDistribution, &buildPlan); err != nil {
 		return BuildResult{}, err
 	}
+	var compilerProfile []buildanalyzer.CompilerArtifact
+	if buildanalyzer.DeepProfile(ctx) {
+		compilerProfile, err = buildanalyzer.Instrument(manifestDir, &buildPlan, tc)
+		if err != nil {
+			return BuildResult{}, err
+		}
+	}
 	manifest, err := ninja.Emit(buildPlan)
 	if err != nil {
 		return BuildResult{}, err
@@ -1743,7 +1754,18 @@ func generateWithConfig(ctx context.Context, path string, cfg config.Config) (Bu
 	if err != nil {
 		return BuildResult{}, err
 	}
-	return BuildResult{ConfigPath: path, Manifest: manifestPath, Profile: cfg.Build.Profile, Outputs: outputs, RuntimeOutputs: buildPlan.RuntimeOutputs, Environment: tc.Env}, nil
+	result := BuildResult{ConfigPath: path, Manifest: manifestPath, Profile: cfg.Build.Profile, Outputs: outputs, RuntimeOutputs: buildPlan.RuntimeOutputs, Environment: tc.Env}
+	if buildanalyzer.Active(ctx) {
+		result.analyzerPlan = &buildPlan
+		result.compilerProfile = compilerProfile
+		tools := struct {
+			CXX    toolchain.Toolchain
+			CUDA   *cuda.Toolchain
+			Vulkan *vulkan.SDK
+		}{tc, cudaToolchain, vulkanSDK}
+		result.analyzerScope = buildanalyzer.ConfigurationID(path, cfg, tools)
+	}
+	return result, nil
 }
 
 type compileCommandEntry struct {
@@ -1898,6 +1920,14 @@ func buildTargetsWithOptions(ctx context.Context, path string, targets []string,
 	if err != nil {
 		return err
 	}
+	if buildanalyzer.DeepProfile(ctx) {
+		dir, err := buildanalyzer.DeepBuildDir(ctx)
+		if err != nil {
+			return err
+		}
+		cfg.Build.BuildDir = dir
+		cfg.Build.CompileCommands = ""
+	}
 	selected, err := selectBuildTargets(cfg, targets, all)
 	ctx, release, lockErr := buildResources(ctx, cfg, "build")
 	if lockErr != nil {
@@ -1937,10 +1967,33 @@ func buildTargetsWithOptions(ctx context.Context, path string, targets []string,
 	writer := &progressWriter{callback: processx.Notify(ctx, progress), statusCallback: progress, outputs: result.Outputs, failedTargets: map[string]bool{}, diagnostics: map[string][]string{}}
 	defer writer.Flush()
 	args := []string{"-f", "build.ninja"}
+	jobs := buildanalyzer.Jobs(ctx)
+	if jobs > 0 {
+		args = append(args, "-j", strconv.Itoa(jobs))
+	}
 	args = append(args, goals...)
-	runErr := (runner.Runner{}).RunWithEvents(ctx, "ninja", args, runner.Options{
-		Dir: filepath.Dir(result.Manifest), Env: environmentList(result.Environment), Stdout: writer, Stderr: writer, RawOutput: processx.Output(ctx),
+	capture := buildanalyzer.BeginExecution(ctx, filepath.Dir(result.Manifest), path, result.Profile, goals)
+	var stderr io.Writer = writer
+	var explanations *buildanalyzer.ExplainWriter
+	if capture != nil {
+		capture.Scope, capture.Jobs = result.analyzerScope, jobs
+		args = append([]string{"-d", "explain"}, args...)
+		explanations = capture.ExplainWriter()
+		stderr = io.MultiWriter(writer, explanations)
+	}
+	executable, args, cleanup := capture.SchedulerCommand(ctx, args, result.analyzerPlan, progress)
+	defer cleanup()
+	capture.StartTiming()
+	runErr := (runner.Runner{}).RunWithEvents(ctx, executable, args, runner.Options{
+		Dir: filepath.Dir(result.Manifest), Env: environmentList(result.Environment), Stdout: writer, Stderr: stderr, RawOutput: processx.Output(ctx),
 	}, writer)
+	if explanations != nil {
+		explanations.Flush()
+	}
+	capture.Finish(ctx, runErr, result.analyzerPlan)
+	if capture != nil && len(result.compilerProfile) > 0 {
+		capture.CollectCompiler(result.compilerProfile)
+	}
 	writer.Flush()
 	emitBuildSummary(progress, cfg, requested, writer, runErr)
 	return runErr

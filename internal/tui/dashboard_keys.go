@@ -312,6 +312,8 @@ func (model dashboardModel) handleEnterKey() (tea.Model, tea.Cmd, bool) {
 		return updated, cmd, true
 	case DoctorRoute:
 		return model.enterDoctor()
+	case AnalyzerRoute:
+		return model, model.loadAnalyzer(), true
 	}
 	return model, nil, true
 }

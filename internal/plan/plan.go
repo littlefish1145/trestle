@@ -12,10 +12,11 @@ type ID string
 // Command is a single process invocation: the executable, its arguments, an
 // optional environment overlay, and the working directory.
 type Command struct {
-	Exe  string
-	Args []string
-	Env  map[string]string
-	Dir  string
+	Exe    string
+	Args   []string
+	Env    map[string]string
+	Dir    string
+	Prefix []string
 }
 
 // DepfileSpec points at the compiler-written dependency file Ninja reads back
@@ -28,17 +29,19 @@ type DepfileSpec struct {
 // command shape, while the remaining fields mirror Ninja's per-edge inputs,
 // outputs, implicit dependencies and pool assignment.
 type Action struct {
-	ID           ID
-	Rule         ID
-	Command      Command
-	Inputs       []string
-	Implicit     []string
-	OrderOnly    []string
-	Outputs      []string
-	Depfile      *DepfileSpec
-	Deps         string
-	Pool         string
-	ResponseFile bool
+	ID              ID
+	Rule            ID
+	Command         Command
+	Inputs          []string
+	Implicit        []string
+	OrderOnly       []string
+	Outputs         []string
+	ImplicitOutputs []string
+	Dyndep          string
+	Depfile         *DepfileSpec
+	Deps            string
+	Pool            string
+	ResponseFile    bool
 }
 
 // BuildPlan is the complete Ninja program for a project: its ordered actions,
@@ -50,6 +53,7 @@ type BuildPlan struct {
 	Variables      map[string]string
 	CompileCommand string
 	RuntimeOutputs map[model.TargetID][]string
+	Pools          map[string]int
 }
 
 // Validate checks that every action names a rule and an executable and has at
@@ -57,14 +61,16 @@ type BuildPlan struct {
 func (p BuildPlan) Validate() error {
 	seen := map[string]bool{}
 	for _, action := range p.Actions {
-		if action.Rule == "" || len(action.Outputs) == 0 || action.Command.Exe == "" {
+		if action.Rule == "" || len(action.Outputs) == 0 || (action.Rule != "phony" && action.Command.Exe == "") {
 			return &ValidationError{Action: string(action.ID)}
 		}
-		for _, output := range action.Outputs {
-			if seen[output] {
-				return &ValidationError{Action: string(action.ID), Message: "duplicate output " + output}
+		for _, outputs := range [][]string{action.Outputs, action.ImplicitOutputs} {
+			for _, output := range outputs {
+				if seen[output] {
+					return &ValidationError{Action: string(action.ID), Message: "duplicate output " + output}
+				}
+				seen[output] = true
 			}
-			seen[output] = true
 		}
 	}
 	return nil

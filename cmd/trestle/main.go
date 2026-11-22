@@ -16,6 +16,7 @@ import (
 
 	"golang.org/x/term"
 	"trestle/internal/app"
+	"trestle/internal/buildanalyzer"
 	"trestle/internal/config"
 	"trestle/internal/deps"
 	"trestle/internal/diag"
@@ -72,7 +73,19 @@ func main() {
 func run(command string, args []string) (result error) {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	if command == "__profile-compiler" {
+		return buildanalyzer.RunProfileCompiler(ctx, args, os.Stdout, os.Stderr)
+	}
 	var flags runFlags
+	if command == "analyze" && len(args) > 0 {
+		switch args[0] {
+		case "impact", "why", "html":
+			flags.analyzerAction, args = args[0], args[1:]
+		}
+	}
+	if command == "build" {
+		args = normalizeBuildProfileFlag(args)
+	}
 	set := flag.NewFlagSet(command, flag.ContinueOnError)
 	set.SetOutput(os.Stderr)
 	registerRunFlags(set, command, &flags)
@@ -86,6 +99,9 @@ func run(command string, args []string) (result error) {
 		return err
 	}
 	if command == "analyze" {
+		if flags.analyzerAction != "" {
+			return queryBuildAnalysis(flags, set.Args())
+		}
 		return app.AnalyzeProject(".", os.Stdout)
 	}
 	path := config.DefaultFileName
@@ -101,6 +117,12 @@ func run(command string, args []string) (result error) {
 // struct keeps the registration and dispatch code in sync and avoids a long list
 // of bare flag pointers.
 type runFlags struct {
+	profileBuild       bool
+	buildJobs          int
+	buildScheduler     string
+	profileDeep        bool
+	analyzerAction     string
+	analyzerReport     string
 	directory          string
 	name               string
 	member             string
@@ -152,6 +174,13 @@ type runFlags struct {
 func registerRunFlags(set *flag.FlagSet, command string, flags *runFlags) {
 	set.StringVar(&flags.directory, "C", ".", "run from this directory")
 	switch command {
+	case "analyze":
+		if flags.analyzerAction != "" {
+			set.StringVar(&flags.analyzerReport, "report", "", "Build Analyzer report.json path")
+			if flags.analyzerAction == "html" {
+				set.StringVar(&flags.output, "output", "", "destination HTML file")
+			}
+		}
 	case "init":
 		set.StringVar(&flags.name, "name", "", "project name")
 	case "configure":
@@ -185,6 +214,10 @@ func registerRunFlags(set *flag.FlagSet, command string, flags *runFlags) {
 		set.BoolVar(&flags.refresh, "refresh", false, "rescan installed toolchains and refresh the cache")
 	case "build":
 		set.BoolVar(&flags.dashboard, "ui", false, "open the project console")
+		set.BoolVar(&flags.profileBuild, "profile-build", false, "record a Build Analyzer report (also bare --profile)")
+		set.BoolVar(&flags.profileDeep, "profile-deep", false, "collect compiler timings in an isolated build")
+		set.IntVar(&flags.buildJobs, "jobs", 0, "set the Ninja job limit for this build")
+		set.StringVar(&flags.buildScheduler, "scheduler", "ninja", "ninja or experimental history")
 		set.StringVar(&flags.member, "p", "", "workspace member to build")
 		set.StringVar(&flags.member, "package", "", "workspace member to build")
 		set.StringVar(&flags.buildProfile, "profile", "", "debug or release")
@@ -231,6 +264,32 @@ func executeCommand(ctx context.Context, command, path string, args []string, fl
 	case "configure":
 		return configureProject(path, flags)
 	case "build":
+		switch flags.buildScheduler {
+		case "ninja":
+		case "history":
+			ctx = buildanalyzer.WithHistoryScheduler(ctx)
+			flags.profileBuild = true
+		default:
+			return fmt.Errorf("unknown build scheduler %q", flags.buildScheduler)
+		}
+		if flags.buildJobs < 0 {
+			return fmt.Errorf("--jobs must be positive when specified")
+		}
+		if flags.buildJobs > 0 {
+			ctx = buildanalyzer.WithJobs(ctx, flags.buildJobs)
+		}
+		if flags.profileDeep {
+			if flags.buildScheduler == "history" {
+				return fmt.Errorf("--profile-deep and --scheduler=history require separate builds")
+			}
+			ctx = buildanalyzer.WithDeepProfile(ctx)
+			flags.profileBuild = true
+		}
+		if flags.profileBuild {
+			return buildanalyzer.Record(ctx, filepath.Dir(path), progressPrinter, func(ctx context.Context) error {
+				return buildProject(ctx, path, args, flags)
+			})
+		}
 		return buildProject(ctx, path, args, flags)
 	case "test":
 		selection := app.TestSelection{
@@ -352,6 +411,9 @@ func configureProject(path string, flags *runFlags) error {
 // "member:target" arguments.
 func buildProject(ctx context.Context, path string, args []string, flags *runFlags) error {
 	if flags.dashboard && term.IsTerminal(int(os.Stdin.Fd())) {
+		if flags.profileBuild {
+			return fmt.Errorf("use Profile build in the dashboard or run --profile without --ui")
+		}
 		return tuimodel.RunDashboard(path, dashboardServices(path))
 	}
 	// Workspace roots fan out to their members, narrowed to one member by -p or
@@ -377,6 +439,27 @@ func buildProject(ctx context.Context, path string, args []string, flags *runFla
 		}
 	}
 	return app.BuildTargetsWithOptions(ctx, path, args, flags.testAll, flags.force, progressPrinter)
+}
+
+func normalizeBuildProfileFlag(args []string) []string {
+	normalized := append([]string(nil), args...)
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" || !strings.HasPrefix(arg, "-") || arg == "-" {
+			break
+		}
+		switch arg {
+		case "--profile":
+			if i+1 < len(args) && (args[i+1] == "debug" || args[i+1] == "release") {
+				i++
+			} else {
+				normalized[i] = "--profile-build"
+			}
+		case "-C", "--C", "-p", "--p", "-package", "--package", "-preset", "--preset", "-profile", "-jobs", "--jobs", "-scheduler", "--scheduler":
+			i++
+		}
+	}
+	return normalized
 }
 
 // importProject imports a CMake build directory, falling back to Xmake when the
@@ -488,6 +571,14 @@ func dashboardServices(path string) tuimodel.Services {
 		Build: func(ctx context.Context, progress func(string)) error {
 			return app.BuildWithProgress(ctx, path, progress)
 		},
+		ProfileBuild: func(ctx context.Context, member string, progress func(string)) error {
+			return buildanalyzer.Record(ctx, filepath.Dir(path), progress, func(ctx context.Context) error {
+				if member != "" {
+					return app.BuildWorkspace(ctx, path, app.WorkspaceBuildOptions{Member: member}, progress)
+				}
+				return app.BuildWithProgress(ctx, path, progress)
+			})
+		},
 		BuildTargets: func(ctx context.Context, targets []string, all bool, progress func(string)) error {
 			return app.BuildTargetsWithProgress(ctx, path, targets, all, progress)
 		},
@@ -589,7 +680,10 @@ func usage() {
 	fmt.Println("  trestle init [-C dir] [-name project]")
 	fmt.Println("  trestle configure [-C dir] [-toolchain clang++] [-msvc 14.3~14.5] [-mode native|wsl] [-wsl-distribution Ubuntu] [-cuda 12.0~12.9] [-cuda-execution native|wsl] [-vulkan path] [-vulkan-execution native|wsl]")
 	fmt.Println("  trestle analyze [-C dir]")
-	fmt.Println("  trestle build [-C dir] [-p member] [--all] [--force] [--preset name] [--profile debug|release] [target ... | member:target ...]")
+	fmt.Println("  trestle analyze impact [-C dir] [--report path] file ...")
+	fmt.Println("  trestle analyze why [-C dir] [--report path]")
+	fmt.Println("  trestle analyze html [-C dir] [--report path] [--output file]")
+	fmt.Println("  trestle build [-C dir] [-p member] [--all] [--force] [--preset name] [--jobs N] [--scheduler=ninja|history] [--profile=debug|release] [--profile-build | --profile | --profile-deep] [target ... | member:target ...]")
 	fmt.Println("  trestle test [-C dir] [-p member] [-job name | -group name | -file source | -all]")
 	fmt.Println("  trestle import [-C dir]          import CMake through the File API")
 	fmt.Println("  trestle import-xmake [-C dir]    import Xmake targets (new and legacy Xmake)")

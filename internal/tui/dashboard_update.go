@@ -285,6 +285,9 @@ func (model dashboardModel) applyWorkflowEvent(event workflowEvent) (tea.Model, 
 		if quitAfterTask {
 			return model, tea.Quit
 		}
+		if event.label == profiledBuildLabel {
+			return model, model.loadAnalyzer()
+		}
 		return model, nil
 	}
 	model.setMessage(event.label+" completed", false)
@@ -293,6 +296,10 @@ func (model dashboardModel) applyWorkflowEvent(event workflowEvent) (tea.Model, 
 	}
 	if quitAfterTask {
 		return model, tea.Quit
+	}
+	if event.label == profiledBuildLabel {
+		model.selectRoute(routeIndex(AnalyzerRoute))
+		return model, tea.Batch(model.probeCommand(), model.loadAnalyzer())
 	}
 	return model, model.probeCommand()
 }

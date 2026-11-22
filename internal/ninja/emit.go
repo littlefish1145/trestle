@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 
 	"trestle/internal/plan"
@@ -31,8 +32,17 @@ func Emit(buildPlan plan.BuildPlan) ([]byte, error) {
 			writtenRules[string(action.Rule)] = true
 		}
 	}
-	output.WriteString("pool compile_pool\n  depth = 2147483647\n\n")
-	output.WriteString("pool console_pool\n  depth = 1\n\n")
+	pools := PoolDepths(buildPlan)
+	names := make([]string, 0, len(pools))
+	for name := range pools {
+		if name != "console" {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		fmt.Fprintf(&output, "pool %s\n  depth = %d\n\n", EscapePath(name), pools[name])
+	}
 	for _, action := range buildPlan.Actions {
 		writeAction(&output, action)
 		output.WriteByte('\n')
@@ -50,6 +60,17 @@ func Emit(buildPlan plan.BuildPlan) ([]byte, error) {
 	}
 	output.WriteByte('\n')
 	return output.Bytes(), nil
+}
+
+// PoolDepths returns both the emitted pools and Ninja's built-in console pool.
+func PoolDepths(buildPlan plan.BuildPlan) map[string]int {
+	pools := map[string]int{"compile_pool": 2147483647, "console_pool": 1, "console": 1}
+	for name, depth := range buildPlan.Pools {
+		if name != "console" {
+			pools[name] = depth
+		}
+	}
+	return pools
 }
 
 func writeRule(output *bytes.Buffer, action plan.Action) {
@@ -77,11 +98,11 @@ func writeAction(output *bytes.Buffer, action plan.Action) {
 	for i, outputPath := range action.Outputs {
 		outputs[i] = EscapePath(outputPath)
 	}
-	if action.Rule == "phony" {
-		fmt.Fprintf(output, "build %s: phony", join(outputs, " "))
-	} else {
-		fmt.Fprintf(output, "build %s: %s", join(outputs, " "), EscapePath(string(action.Rule)))
+	fmt.Fprintf(output, "build %s", join(outputs, " "))
+	if len(action.ImplicitOutputs) > 0 {
+		output.WriteString(" | " + joinEscaped(action.ImplicitOutputs))
 	}
+	fmt.Fprintf(output, ": %s", EscapePath(string(action.Rule)))
 	if len(inputs) > 0 {
 		output.WriteString(" " + join(inputs, " "))
 	}
@@ -100,13 +121,16 @@ func writeAction(output *bytes.Buffer, action plan.Action) {
 		output.WriteString(" || " + join(escaped, " "))
 	}
 	output.WriteByte('\n')
+	if action.Dyndep != "" {
+		fmt.Fprintf(output, "  dyndep = %s\n", EscapePath(action.Dyndep))
+	}
 }
 
 func command(action plan.Action) string {
 	if action.Command.Exe == "" {
 		return EscapePath("false")
 	}
-	parts := []string{shellQuote(action.Command.Exe)}
+	parts := commandPrefix(action.Command)
 	inputs := append([]string{}, action.Inputs...)
 	outputs := append([]string{}, action.Outputs...)
 	for _, argument := range action.Command.Args {
@@ -117,6 +141,14 @@ func command(action plan.Action) string {
 		parts = append(parts, quoted)
 	}
 	return join(parts, " ")
+}
+
+func commandPrefix(command plan.Command) []string {
+	parts := make([]string, 0, len(command.Prefix)+1)
+	for _, argument := range command.Prefix {
+		parts = append(parts, shellQuote(argument))
+	}
+	return append(parts, shellQuote(command.Exe))
 }
 
 func replacePaths(value string, inputs, outputs []string) string {

@@ -1,0 +1,123 @@
+diff --git a/src/ninja.cc b/src/ninja.cc
+index 00a7366..3d93242 100644
+--- a/src/ninja.cc
++++ b/src/ninja.cc
+@@ -21,6 +21,8 @@
+ #include <algorithm>
+ #include <cstdlib>
+ #include <cstring>
++#include <fstream>
++#include <unordered_map>
+ #include <string>
+ 
+ #ifdef _WIN32
+@@ -87,6 +89,8 @@ struct Options {
+ 
+   /// Whether phony cycles should warn or print an error.
+   bool phony_cycle_should_err;
++
++  const char* trestle_history_file;
+ };
+ 
+ /// Helper class used to manage the state of jobserver pool and client
+@@ -211,6 +215,7 @@ struct NinjaMain : public BuildLogUser {
+   /// For each edge, lookup in build log how long it took last time,
+   /// and record that in the edge itself. It will be used for ETA prediction.
+   void ParsePreviousElapsedTimes();
++  void ApplyTrestleHistory(const char* path);
+ 
+   /// Build the targets listed on the command line.
+   /// @return an exit code.
+@@ -365,6 +370,54 @@ void NinjaMain::ParsePreviousElapsedTimes() {
+   }
+ }
+ 
++// Overrides only the elapsed-time input to Ninja's own critical-path heuristic.
++// A mismatch or an unreadable file leaves the usual build-log weight in place.
++void NinjaMain::ApplyTrestleHistory(const char* path) {
++  if (!path)
++    return;
++  std::ifstream stream(path, std::ios::binary);
++  string line;
++  if (!std::getline(stream, line) || line != "trestle-history-v1") {
++    fprintf(stderr, "trestle-history: applied 0\n");
++    return;
++  }
++  std::unordered_map<string, std::unordered_map<uint64_t, int64_t>> weights;
++  while (std::getline(stream, line)) {
++    size_t first = line.find('\t');
++    size_t last = line.rfind('\t');
++    if (first == 0 || first == string::npos || first == last)
++      continue;
++    string hash = line.substr(first + 1, last - first - 1);
++    string millis = line.substr(last + 1);
++    if (hash.empty() || hash.size() > 16 ||
++        hash.find_first_not_of("0123456789abcdefABCDEF") != string::npos ||
++        millis.empty() || millis.size() > 10 ||
++        millis.find_first_not_of("0123456789") != string::npos)
++      continue;
++    uint64_t duration = strtoull(millis.c_str(), NULL, 10);
++    if (duration > INT_MAX)
++      continue;
++    weights[line.substr(0, first)][strtoull(hash.c_str(), NULL, 16)] = duration;
++  }
++  size_t applied = 0;
++  if (stream.eof() && !stream.bad()) {
++    for (Edge* edge : state_.edges_) {
++      if (edge->is_phony() || edge->outputs_.empty())
++        continue;
++      auto output = weights.find(edge->outputs_[0]->path());
++      if (output == weights.end())
++        continue;
++      auto weight = output->second.find(
++          BuildLog::LogEntry::HashCommand(edge->EvaluateCommand(true)));
++      if (weight == output->second.end())
++        continue;
++      edge->prev_elapsed_time_millis = weight->second;
++      ++applied;
++    }
++  }
++  fprintf(stderr, "trestle-history: applied %zu\n", applied);
++}
++
+ Node* NinjaMain::CollectTarget(const char* cpath, string* err) {
+   string path = cpath;
+   if (path.empty()) {
+@@ -1850,12 +1903,16 @@ int ReadFlags(int* argc, char*** argv,
+     OPT_QUIET = 2,
+     OPT_STATUS = 3,
+     OPT_JOBSERVER_POOL = 4,
++    OPT_TRESTLE_HISTORY,
++    OPT_TRESTLE_HISTORY_VERSION,
+   };
+   const option kLongOptions[] = {
+     { "help", no_argument, NULL, 'h' },
+     { "version", no_argument, NULL, OPT_VERSION },
+     { "verbose", no_argument, NULL, 'v' },
+     { "quiet", no_argument, NULL, OPT_QUIET },
++    { "trestle-history", required_argument, NULL, OPT_TRESTLE_HISTORY },
++    { "trestle-history-version", no_argument, NULL, OPT_TRESTLE_HISTORY_VERSION },
+     { "status", required_argument, NULL, OPT_STATUS },
+     { "jobserver-pool", no_argument, NULL, OPT_JOBSERVER_POOL },
+     { NULL, 0, NULL, 0 }
+@@ -1932,6 +1989,12 @@ int ReadFlags(int* argc, char*** argv,
+       case 'C':
+         options->working_dir = optarg;
+         break;
++      case OPT_TRESTLE_HISTORY:
++        options->trestle_history_file = optarg;
++        break;
++      case OPT_TRESTLE_HISTORY_VERSION:
++        printf("trestle-history-v1 ninja a00b184\n");
++        return 0;
+       case OPT_VERSION:
+         printf("%s\n", kNinjaVersion);
+         return 0;
+@@ -2048,6 +2111,7 @@ NORETURN void real_main(int argc, char** argv) {
+     }
+ 
+     ninja.ParsePreviousElapsedTimes();
++    ninja.ApplyTrestleHistory(options.trestle_history_file);
+ 
+     ExitStatus result = ninja.RunBuild(argc, argv, status);
+     if (g_metrics)

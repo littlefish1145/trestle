@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 
+	"trestle/internal/buildanalyzer"
 	"trestle/internal/config"
 	"trestle/internal/fsx"
 	"trestle/internal/graph"
@@ -125,6 +126,13 @@ func BuildWorkspace(ctx context.Context, path string, options WorkspaceBuildOpti
 			cfg.Build.Profile = options.Profile
 		}
 	}
+	if buildanalyzer.DeepProfile(ctx) {
+		dir, err := buildanalyzer.DeepBuildDir(ctx)
+		if err != nil {
+			return err
+		}
+		wc.RootConfig.Build.BuildDir = dir
+	}
 	buildRoot, err := filepath.Abs(wc.RootConfig.Build.BuildDir)
 	if err != nil {
 		return err
@@ -153,6 +161,9 @@ func BuildWorkspace(ctx context.Context, path string, options WorkspaceBuildOpti
 		if err := BuildTargetsWithOptions(memberCtx, memberPath, targets, all, options.Force, prefix(name)); err != nil {
 			return err
 		}
+	}
+	if buildanalyzer.DeepProfile(ctx) {
+		return nil
 	}
 	return publishWorkspaceCompileCommands(ctx, wc, buildRoot)
 }

@@ -60,6 +60,7 @@ type WorkspaceReleaseFunc func(context.Context, func(string)) error
 // otherwise a member name.
 type Services struct {
 	Build             BuildFunc
+	ProfileBuild      func(context.Context, string, func(string)) error
 	BuildTargets      TargetBuildFunc
 	BuildTargetsForce TargetBuildFunc
 	BuildWorkspace    WorkspaceFunc
@@ -132,13 +133,15 @@ const (
 	ReleaseRoute      Route = "Release"
 	DoctorRoute       Route = "Doctor"
 	SettingsRoute     Route = "Settings"
+	AnalyzerRoute     Route = "Build Analyzer"
 )
 
-var routes = []Route{OverviewRoute, TargetsRoute, TasksRoute, DependenciesRoute, ToolchainsRoute, PresetsRoute, ImportRoute, PackagesRoute, TestsRoute, BuildRoute, ReleaseRoute, DoctorRoute, SettingsRoute}
+var routes = []Route{OverviewRoute, TargetsRoute, TasksRoute, DependenciesRoute, ToolchainsRoute, PresetsRoute, ImportRoute, PackagesRoute, TestsRoute, BuildRoute, ReleaseRoute, DoctorRoute, SettingsRoute, AnalyzerRoute}
 
 var routeGlyph = map[Route]string{
 	OverviewRoute: "⌂", TargetsRoute: "▦", TasksRoute: "⌘", DependenciesRoute: "◇", ToolchainsRoute: "⚙",
 	PresetsRoute: "◫", ImportRoute: "⇣", PackagesRoute: "⬡", TestsRoute: "✓", BuildRoute: "▶", ReleaseRoute: "◆", DoctorRoute: "✚", SettingsRoute: "≡",
+	AnalyzerRoute: "≋",
 }
 
 type focusArea uint8
@@ -201,6 +204,7 @@ type workflowBatch []workflowEvent
 type installBatch []installEvent
 
 type dashboardModel struct {
+	analyzer           analyzerMessage
 	path               string
 	services           Services
 	config             config.Config
@@ -366,6 +370,9 @@ func pulseCommand() tea.Cmd {
 // and any follow-up command.
 func (model dashboardModel) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	switch value := message.(type) {
+	case analyzerMessage:
+		model.analyzer = value
+		return model, nil
 	case workflowBatch:
 		return model.applyWorkflowBatch(value)
 	case installBatch:
@@ -1417,6 +1424,7 @@ var contentRenderers = map[Route]func(dashboardModel, palette, int) []string{
 	ReleaseRoute:      dashboardModel.releaseLines,
 	DoctorRoute:       func(model dashboardModel, p palette, _ int) []string { return model.doctorLines(p) },
 	SettingsRoute:     dashboardModel.settingsLines,
+	AnalyzerRoute:     dashboardModel.analyzerLines,
 }
 
 func (model dashboardModel) contentLines(p palette, width int) []string {

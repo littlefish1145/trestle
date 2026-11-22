@@ -32,6 +32,9 @@ func (model dashboardModel) consoleCommands() []consoleCommand {
 		{label: "Toggle navigation", detail: "ctrl+b", keywords: "sidebar 侧栏 导航", action: "navigation"},
 		{label: "Keyboard reference", detail: "?", keywords: "help 帮助 快捷键", action: "help"},
 	}
+	if model.services.ProfileBuild != nil {
+		commands = append(commands, consoleCommand{label: "Profile build", detail: "Build Analyzer", keywords: "timing 性能 构建", action: "profile-build"})
+	}
 	for _, route := range routes {
 		commands = append(commands, consoleCommand{label: "Open " + navigationLabel(route), detail: "page", keywords: string(route), action: "route", route: route})
 	}
@@ -161,7 +164,7 @@ func (model dashboardModel) handleCommandKey(key tea.Key) (tea.Model, tea.Cmd) {
 
 func (model dashboardModel) executeConsoleCommand(command consoleCommand) (tea.Model, tea.Cmd) {
 	switch command.action {
-	case "build", "build-all", "test", "doctor", "profile", "target", "task", "member":
+	case "build", "build-all", "profile-build", "test", "doctor", "profile", "target", "task", "member":
 		if model.busy() {
 			model.setMessage("An operation is running · Esc cancels it before starting another", false)
 			return model, nil
@@ -172,6 +175,8 @@ func (model dashboardModel) executeConsoleCommand(command consoleCommand) (tea.M
 	switch command.action {
 	case "build":
 		return model.startBuild()
+	case "profile-build":
+		return model.startProfiledBuild()
 	case "build-all":
 		return model.startTargetBuild(nil, true, "Build all targets")
 	case "test":
@@ -207,6 +212,9 @@ func (model dashboardModel) executeConsoleCommand(command consoleCommand) (tea.M
 		model.help, model.details, model.history, model.fullLog = false, false, false, false
 		model.focus = focusContent
 		model.keepCursorVisible()
+		if command.route == AnalyzerRoute {
+			return model, model.loadAnalyzer()
+		}
 	case "target":
 		return model.startTargetRowBuild(command.target, false)
 	case "task":

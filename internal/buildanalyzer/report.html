@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Trestle Build Analyzer</title>
+<style>
+:root { color-scheme: light dark; font-family: system-ui, sans-serif; }
+body { max-width: 72rem; margin: auto; padding: 1.25rem; }
+section { border-top: 1px solid GrayText; padding: 1rem 0; }
+table { border-collapse: collapse; text-align: left; width: 100%; }
+th, td { padding: .35rem; border-bottom: 1px solid GrayText; overflow-wrap: anywhere; }
+summary { cursor: pointer; margin: .75rem 0; }
+code { overflow-wrap: anywhere; }
+dt { font-weight: 600; }
+dd { margin: 0 1.25rem .7rem 0; }
+dl { display: flex; flex-wrap: wrap; gap: .35rem; }
+.scroll { overflow: auto; }
+</style>
+<main>
+<h1>Build Analyzer</h1>
+<p><strong>{{.Outcome}}</strong> · {{.DurationMS}} ms · <code>{{.ID}}</code></p>
+{{if .Error}}<p>{{.Error}}</p>{{end}}
+{{range .Runs}}
+<section>
+<h2>{{.Profile}} · {{.Scheduler}}</h2>
+<p><code>{{.Directory}}</code></p>
+<p>{{.Outcome}} · {{.DurationMS}} ms · {{range .Goals}}<code>{{.}}</code> {{end}}</p>
+{{if not .LogComplete}}<p>Timing log incomplete.</p>{{end}}
+{{range .Warnings}}<p>{{.}}</p>{{end}}
+{{with .Graph}}{{if not .Complete}}
+<details><summary>Dependency graph incomplete</summary><ul>{{range .Warnings}}<li>{{.}}</li>{{end}}</ul></details>
+{{end}}{{end}}
+{{with .Metrics}}
+<dl>
+<div><dt>Completed edges</dt><dd>{{len .Timings}}</dd></div>
+<div><dt>Work</dt><dd>{{.WorkMS}} ms</dd></div>
+<div><dt>Critical path</dt><dd>{{.CriticalPathMS}} ms</dd></div>
+<div><dt>Peak parallelism</dt><dd>{{.PeakParallel}}</dd></div>
+</dl>
+{{if .Timeline}}
+<details><summary>Parallelism timeline</summary><table><thead><tr><th>Start (ms)</th><th>End (ms)</th><th>Running</th></tr></thead><tbody>
+{{range .Timeline}}<tr><td>{{.StartMS}}</td><td>{{.EndMS}}</td><td>{{.Running}}</td></tr>{{end}}
+</tbody></table></details>
+{{end}}
+{{end}}
+{{if .Critical}}
+<details open><summary>Critical path edges</summary><ol>{{range .Critical}}<li><code>{{.}}</code></li>{{end}}</ol></details>
+{{end}}
+{{if .Timings}}
+<details><summary>Edge timings</summary><div class="scroll"><table><thead><tr><th>Edge and outputs</th><th>Pool</th><th>Start (ms)</th><th>End (ms)</th></tr></thead><tbody>
+{{range .Timings}}<tr><td>{{.Name}}{{range .Outputs}}<br><code>{{.}}</code>{{end}}</td><td>{{.Pool}}</td><td>{{.StartMS}}</td><td>{{.EndMS}}</td></tr>{{end}}
+</tbody></table></div></details>
+{{end}}
+{{with .History}}
+<details><summary>Historical predictions · {{len .Predictions}} matched</summary>
+{{if .MeanAbsErrorMS}}<p>Median-based MAE {{milliseconds .MeanAbsErrorMS}} ms · last-sample MAE {{milliseconds .LastSampleMAEMS}} ms</p>{{end}}
+{{with .Simulation}}<p>Offline simulation with {{.Jobs}} jobs and {{.Tasks}} executed edges · median {{.MedianMS}} ms · last sample {{.LastSampleMS}} ms</p>{{end}}
+</details>
+{{end}}
+{{if .Explanations}}
+<details><summary>Ninja explanations</summary><ul>{{range .Explanations}}<li>{{.Message}}</li>{{end}}</ul></details>
+{{end}}
+{{if .CompilerProfile}}
+<details><summary>Compiler profile artifacts</summary><ul>
+{{range .CompilerProfile}}<li>{{.Adapter}} · <code>{{.File}}</code> · {{len .Events}} events{{if .Warning}} · {{.Warning}}{{end}}</li>{{end}}
+</ul></details>
+{{end}}
+</section>
+{{else}}<p>No Ninja invocation was captured.</p>{{end}}
+</main>

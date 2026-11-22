@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"trestle/internal/buildanalyzer"
 	"trestle/internal/config"
 	"trestle/internal/fsx"
 	"trestle/internal/model"
@@ -323,7 +324,11 @@ func writeGenerationArtifacts(ctx context.Context, root, manifestDir, manifestPa
 	if err := fsx.AtomicWrite(manifestPath, manifest); err != nil {
 		return err
 	}
-	if err := writeCommandMetadata(ctx, root, manifestDir, cfg, buildPlan); err != nil {
+	metadataRoot := root
+	if buildanalyzer.DeepProfile(ctx) {
+		metadataRoot = manifestDir
+	}
+	if err := writeCommandMetadata(ctx, metadataRoot, manifestDir, cfg, buildPlan); err != nil {
 		return err
 	}
 	if err := writeGenerationState(manifestDir, cfg, project, tc); err != nil {
